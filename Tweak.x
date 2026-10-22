@@ -363,6 +363,53 @@ static NSArray<NSDictionary *> *agVerifiedDefaultModelsForTab(AGConfigTab tab) {
 - (void)clickedMenuButton;
 @end
 
+@interface SBBacklightController : NSObject
++ (instancetype)sharedInstance;
++ (instancetype)sharedInstanceIfExists;
+@property (nonatomic, readonly) BOOL screenIsOn;
+- (void)turnOnScreenFullyWithBacklightSource:(NSInteger)source;
+- (void)_undimFromSource:(NSInteger)source;
+@end
+
+@interface SBLockScreenManager (AGWakeAdditions)
+- (void)requestUserAttentionScreenWakeFromSource:(NSInteger)source reason:(NSString *)reason;
+@end
+
+@interface AGLockScreenRootViewController : UIViewController
+@end
+@implementation AGLockScreenRootViewController
+- (BOOL)_canShowWhileLocked { return YES; }
+@end
+
+// 锁屏/息屏状态下主动点亮屏幕硬件背光并唤醒锁屏壁纸与时钟，解决黑屏唤醒与锁屏黑底问题
+static void agWakeScreenBacklightIfNeeded(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            Class blCls = objc_getClass("SBBacklightController");
+            SBBacklightController *bl = (blCls && [blCls respondsToSelector:@selector(sharedInstanceIfExists)])
+                ? [blCls sharedInstanceIfExists]
+                : ((blCls && [blCls respondsToSelector:@selector(sharedInstance)]) ? [blCls sharedInstance] : nil);
+            BOOL isScreenCurrentlyOn = (bl && [bl respondsToSelector:@selector(screenIsOn)]) ? [bl screenIsOn] : YES;
+
+            // 若当前处于息屏黑屏状态，直接调用 SpringBoard 原生电源键亮屏，100% 唤醒原装锁屏壁纸与时钟！
+            if (!isScreenCurrentlyOn) {
+                SpringBoard *sb = (SpringBoard *)[UIApplication sharedApplication];
+                if ([sb respondsToSelector:@selector(_simulateLockButtonPress)]) {
+                    [sb _simulateLockButtonPress];
+                }
+            }
+            if (bl) {
+                if ([bl respondsToSelector:@selector(turnOnScreenFullyWithBacklightSource:)]) {
+                    [bl turnOnScreenFullyWithBacklightSource:1];
+                }
+                if ([bl respondsToSelector:@selector(_undimFromSource:)]) {
+                    [bl _undimFromSource:1];
+                }
+            }
+        } @catch (NSException *e) {}
+    });
+}
+
 @interface SBLockScreenManager : NSObject
 + (instancetype)sharedInstance;
 + (instancetype)sharedInstanceIfExists;
@@ -3756,6 +3803,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 }
 
 - (void)playIOS27SiriInvocationEffectFromPowerButton:(BOOL)fromPowerButton {
+    agWakeScreenBacklightIfNeeded();
     if (!self.overlayWindow) return;
     CGRect sb = [UIScreen mainScreen].bounds;
 
@@ -4025,14 +4073,14 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         self.overlayWindow = [[GeminiPassthroughWindow alloc] initWithFrame:screenBounds];
     }
 
-    self.overlayWindow.windowLevel = UIWindowLevelAlert + 500;
+    self.overlayWindow.windowLevel = 10000.0;
     self.overlayWindow.backgroundColor = [UIColor clearColor];
     self.overlayWindow.hidden = YES;
     if ([self.overlayWindow respondsToSelector:@selector(_setSecure:)]) {
         [self.overlayWindow _setSecure:YES];
     }
 
-    UIViewController *rootVC = [[UIViewController alloc] init];
+    AGLockScreenRootViewController *rootVC = [[AGLockScreenRootViewController alloc] init];
     rootVC.view.backgroundColor = [UIColor clearColor];
     self.overlayWindow.rootViewController = rootVC;
 
@@ -8199,6 +8247,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
 
 - (void)triggerFromSystemHook {
+    agWakeScreenBacklightIfNeeded();
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     if (now - self.lastTriggerTime < 0.45) return;
     self.lastTriggerTime = now;
@@ -9654,8 +9703,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
 %hook SBLockHardwareButtonActions
 - (void)performLongPressActions {
-    if ([[GeminiAssistantManager sharedManager] isTweakEnabled] && !isDeviceCurrentlyLocked()) {
+    if ([[GeminiAssistantManager sharedManager] isTweakEnabled]) {
         [GeminiAssistantManager sharedManager].isInvocationFromPowerButton = YES;
+        agWakeScreenBacklightIfNeeded();
         [[GeminiAssistantManager sharedManager] triggerFromSystemHook];
         return;
     }
@@ -9665,8 +9715,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
 %hook SBHomeHardwareButtonActions
 - (void)performLongPressActions {
-    if ([[GeminiAssistantManager sharedManager] isTweakEnabled] && !isDeviceCurrentlyLocked()) {
+    if ([[GeminiAssistantManager sharedManager] isTweakEnabled]) {
         [GeminiAssistantManager sharedManager].isInvocationFromPowerButton = NO;
+        agWakeScreenBacklightIfNeeded();
         [[GeminiAssistantManager sharedManager] triggerFromSystemHook];
         return;
     }
@@ -9676,29 +9727,33 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
 %hook SBAssistantController
 - (void)_activateSiriWithContext:(id)context {
-    if ([[GeminiAssistantManager sharedManager] isTweakEnabled] && !isDeviceCurrentlyLocked()) {
+    if ([[GeminiAssistantManager sharedManager] isTweakEnabled]) {
         [GeminiAssistantManager sharedManager].isInvocationFromPowerButton = NO;
+        agWakeScreenBacklightIfNeeded();
         [[GeminiAssistantManager sharedManager] triggerFromSystemHook];
         return;
     }
     %orig(context);
 }
 - (void)_activateSiriForPPTWithOptions:(id)arg1 {
-    if ([[GeminiAssistantManager sharedManager] isTweakEnabled] && !isDeviceCurrentlyLocked()) {
+    if ([[GeminiAssistantManager sharedManager] isTweakEnabled]) {
+        agWakeScreenBacklightIfNeeded();
         [[GeminiAssistantManager sharedManager] triggerFromSystemHook];
         return;
     }
     %orig(arg1);
 }
 - (void)handleSiriButtonDownEventFromSource:(NSInteger)source activationEvent:(NSInteger)event {
-    if ([[GeminiAssistantManager sharedManager] isTweakEnabled] && !isDeviceCurrentlyLocked()) {
+    if ([[GeminiAssistantManager sharedManager] isTweakEnabled]) {
+        agWakeScreenBacklightIfNeeded();
         [[GeminiAssistantManager sharedManager] triggerFromSystemHook];
         return;
     }
     %orig(source, event);
 }
 - (BOOL)activateIgnoringTouches:(BOOL)arg1 {
-    if ([[GeminiAssistantManager sharedManager] isTweakEnabled] && !isDeviceCurrentlyLocked()) {
+    if ([[GeminiAssistantManager sharedManager] isTweakEnabled]) {
+        agWakeScreenBacklightIfNeeded();
         [[GeminiAssistantManager sharedManager] triggerFromSystemHook];
         return NO;
     }
@@ -9707,38 +9762,52 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 %end
 
 %hook SiriPresentationSpringBoardMainScreenViewController
+- (BOOL)_canShowWhileLocked {
+    return YES;
+}
+- (void)viewDidLoad {
+    %orig;
+    if ([[GeminiAssistantManager sharedManager] isTweakEnabled]) {
+        self.view.hidden = YES;
+        self.view.alpha = 0.0;
+        self.view.backgroundColor = [UIColor clearColor];
+    }
+}
 - (void)requestSiriPresentation:(id)arg1 withOptions:(id)arg2 {
-    if ([[GeminiAssistantManager sharedManager] isTweakEnabled] && !isDeviceCurrentlyLocked()) {
+    if ([[GeminiAssistantManager sharedManager] isTweakEnabled]) {
         if ([self respondsToSelector:@selector(dismissSiriViewController:withReason:)]) {
             [self dismissSiriViewController:nil withReason:0];
         } else if ([self respondsToSelector:@selector(dismissSiriViewController:)]) {
             [self dismissSiriViewController:nil];
         }
+        agWakeScreenBacklightIfNeeded();
         [[GeminiAssistantManager sharedManager] triggerFromSystemHook];
         return;
     }
     %orig(arg1, arg2);
 }
 - (void)_activateSiriWithContext:(id)context {
-    if ([[GeminiAssistantManager sharedManager] isTweakEnabled] && !isDeviceCurrentlyLocked()) {
+    if ([[GeminiAssistantManager sharedManager] isTweakEnabled]) {
+        agWakeScreenBacklightIfNeeded();
         [[GeminiAssistantManager sharedManager] triggerFromSystemHook];
         return;
     }
     %orig(context);
 }
 - (void)viewWillAppear:(BOOL)animated {
-    if ([[GeminiAssistantManager sharedManager] isTweakEnabled] && !isDeviceCurrentlyLocked()) {
+    %orig(animated);
+    if ([[GeminiAssistantManager sharedManager] isTweakEnabled]) {
         self.view.hidden = YES;
         self.view.alpha = 0.0;
+        self.view.backgroundColor = [UIColor clearColor];
         if ([self respondsToSelector:@selector(dismissSiriViewController:withReason:)]) {
             [self dismissSiriViewController:nil withReason:0];
         } else if ([self respondsToSelector:@selector(dismissSiriViewController:)]) {
             [self dismissSiriViewController:nil];
         }
+        agWakeScreenBacklightIfNeeded();
         [[GeminiAssistantManager sharedManager] triggerFromSystemHook];
-        return;
     }
-    %orig(animated);
 }
 %end
 // ==============================================================================
@@ -11222,7 +11291,7 @@ static void initInSituGlobalTouchMonitor(void) {
     self.userInteractionEnabled = YES;
     self.impactHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
 
-    UIViewController *rootVC = [[UIViewController alloc] init];
+    AGLockScreenRootViewController *rootVC = [[AGLockScreenRootViewController alloc] init];
     rootVC.view.backgroundColor = [UIColor clearColor];
     rootVC.view.userInteractionEnabled = YES;
     self.rootViewController = rootVC;
