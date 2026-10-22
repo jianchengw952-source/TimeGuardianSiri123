@@ -263,6 +263,209 @@ static void _old_unused_saveGeminiPrefs(NSDictionary *dict) {
                                          NULL, NULL, YES);
 }
 
+// ==================== 全模型通用三层永久记忆中枢 (跨重启永久落盘 + 历史联想唤醒) ====================
+static NSArray<NSString *> *agPermanentMemoryFilePaths(void) {
+    return @[
+        @"/var/mobile/Library/Preferences/ag_universal_ai_memory.json",
+        @"/var/jb/var/mobile/Library/Preferences/ag_universal_ai_memory.json",
+        @"/tmp/ag_universal_ai_memory.json"
+    ];
+}
+
+static NSMutableDictionary *agLoadUniversalMemory(void) {
+    static NSMutableDictionary *sMemCache = nil;
+    if (sMemCache) return sMemCache;
+
+    for (NSString *path in agPermanentMemoryFilePaths()) {
+        NSData *data = [NSData dataWithContentsOfFile:path];
+        if (data && data.length > 2) {
+            NSDictionary *dict = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:nil];
+            if ([dict isKindOfClass:[NSDictionary class]]) {
+                sMemCache = [dict mutableCopy];
+                if (![sMemCache[@"facts"] isKindOfClass:[NSMutableArray class]]) {
+                    sMemCache[@"facts"] = [NSMutableArray arrayWithArray:(sMemCache[@"facts"] ?: @[])];
+                }
+                if (![sMemCache[@"archiveSummaries"] isKindOfClass:[NSMutableArray class]]) {
+                    sMemCache[@"archiveSummaries"] = [NSMutableArray arrayWithArray:(sMemCache[@"archiveSummaries"] ?: @[])];
+                }
+                if (![sMemCache[@"fullArchive"] isKindOfClass:[NSMutableArray class]]) {
+                    sMemCache[@"fullArchive"] = [NSMutableArray arrayWithArray:(sMemCache[@"fullArchive"] ?: @[])];
+                }
+                if (![sMemCache[@"recentTurns"] isKindOfClass:[NSMutableArray class]]) {
+                    sMemCache[@"recentTurns"] = [NSMutableArray arrayWithArray:(sMemCache[@"recentTurns"] ?: @[])];
+                }
+                return sMemCache;
+            }
+        }
+    }
+    sMemCache = [@{
+        @"facts": [NSMutableArray array],            // 永久核心记忆（无条数上限，永不自动删除）
+        @"archiveSummaries": [NSMutableArray array], // 历史阶段浓缩纪要
+        @"fullArchive": [NSMutableArray array],      // 全量历史对话库（支持关键词跨月/跨年唤醒）
+        @"recentTurns": [NSMutableArray array]       // 最近连续对话上下文
+    } mutableCopy];
+    return sMemCache;
+}
+
+static void agSaveUniversalMemory(void) {
+    NSMutableDictionary *mem = agLoadUniversalMemory();
+    NSData *data = [NSJSONSerialization dataWithJSONObject:mem options:0 error:nil];
+    if (!data) return;
+    for (NSString *path in agPermanentMemoryFilePaths()) {
+        NSString *dir = [path stringByDeletingLastPathComponent];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:dir]) {
+            [data writeToFile:path atomically:YES];
+            chmod([path UTF8String], 0666);
+        }
+    }
+}
+
+static void agRecordFactToUniversalMemory(NSString *fact) {
+    NSString *clean = [fact stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (clean.length < 2 || clean.length > 300) return;
+    NSMutableArray *facts = agLoadUniversalMemory()[@"facts"];
+    if (![facts containsObject:clean]) {
+        [facts addObject:clean];
+        agSaveUniversalMemory();
+    }
+}
+
+static void agRecordDialogueTurnToUniversalMemory(NSString *userText, NSString *aiText) {
+    NSString *uClean = [userText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *aClean = [aiText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (uClean.length == 0 && aClean.length == 0) return;
+
+    if ([uClean containsString:@"清空全部记忆"] || [uClean containsString:@"忘记所有记忆"]) {
+        NSMutableDictionary *mem = agLoadUniversalMemory();
+        [mem[@"facts"] removeAllObjects];
+        [mem[@"archiveSummaries"] removeAllObjects];
+        [mem[@"fullArchive"] removeAllObjects];
+        [mem[@"recentTurns"] removeAllObjects];
+        agSaveUniversalMemory();
+        return;
+    }
+
+    if (uClean.length >= 3 && ([uClean containsString:@"记住"] || [uClean containsString:@"我叫"] ||
+        [uClean containsString:@"我的名字"] || [uClean containsString:@"以后叫我"] ||
+        [uClean containsString:@"我喜欢"] || [uClean containsString:@"我不喜欢"] ||
+        [uClean containsString:@"我的习惯"] || [uClean containsString:@"我的职业"] ||
+        [uClean containsString:@"我的生日"] || [uClean containsString:@"我家在"])) {
+        agRecordFactToUniversalMemory(uClean);
+    }
+
+    if ([aClean containsString:@"[MEMORY:"]) {
+        NSRegularExpression *memRe = [NSRegularExpression regularExpressionWithPattern:@"\[MEMORY:(\{.*?\})\]" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
+        NSArray<NSTextCheckingResult *> *matches = [memRe matchesInString:aClean options:0 range:NSMakeRange(0, aClean.length)];
+        for (NSTextCheckingResult *m in matches) {
+            if (m.numberOfRanges > 1) {
+                NSString *jStr = [aClean substringWithRange:[m rangeAtIndex:1]];
+                NSDictionary *mDict = [NSJSONSerialization JSONObjectWithData:[jStr dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+                if ([mDict isKindOfClass:[NSDictionary class]] && [mDict[@"fact"] isKindOfClass:[NSString class]]) {
+                    agRecordFactToUniversalMemory(mDict[@"fact"]);
+                }
+            }
+        }
+        aClean = [memRe stringByReplacingMatchesInString:aClean options:0 range:NSMakeRange(0, aClean.length) withTemplate:@""];
+    }
+
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"yyyy-MM-dd HH:mm";
+    NSString *timeStr = [df stringFromDate:[NSDate date]];
+
+    NSString *uClip = (uClean.length > 240) ? [[uClean substringToIndex:240] stringByAppendingString:@"..."] : (uClean ?: @"");
+    NSString *aClip = (aClean.length > 360) ? [[aClean substringToIndex:360] stringByAppendingString:@"..."] : (aClean ?: @"");
+
+    NSDictionary *turnEntry = @{ @"t": timeStr, @"u": uClip, @"a": aClip };
+    NSMutableDictionary *mem = agLoadUniversalMemory();
+    NSMutableArray *recentTurns = mem[@"recentTurns"];
+    NSMutableArray *fullArchive = mem[@"fullArchive"];
+    NSMutableArray *archiveSummaries = mem[@"archiveSummaries"];
+
+    [recentTurns addObject:turnEntry];
+    [fullArchive addObject:turnEntry];
+    while (fullArchive.count > 2000) [fullArchive removeObjectAtIndex:0];
+
+    if (recentTurns.count > 30) {
+        NSMutableArray *batchTopics = [NSMutableArray array];
+        NSString *batchStartDate = recentTurns.firstObject[@"t"] ?: timeStr;
+        for (int i = 0; i < 10; i++) {
+            NSDictionary *oldTurn = recentTurns[0];
+            NSString *uOld = oldTurn[@"u"] ?: @"";
+            if (uOld.length > 0) {
+                [batchTopics addObject:((uOld.length > 28) ? [uOld substringToIndex:28] : uOld)];
+            }
+            [recentTurns removeObjectAtIndex:0];
+        }
+        if (batchTopics.count > 0) {
+            [archiveSummaries addObject:[NSString stringWithFormat:@"[%@] 历史对话纪要：%@", batchStartDate, [batchTopics componentsJoinedByString:@"；"]]];
+            while (archiveSummaries.count > 80) [archiveSummaries removeObjectAtIndex:0];
+        }
+    }
+    agSaveUniversalMemory();
+}
+
+static NSString *agBuildUniversalMemoryPromptBlockForQuery(NSString *currentQuery) {
+    NSMutableDictionary *mem = agLoadUniversalMemory();
+    NSArray *facts = mem[@"facts"];
+    NSArray *summaries = mem[@"archiveSummaries"];
+    NSArray *fullArchive = mem[@"fullArchive"];
+    NSArray *recentTurns = mem[@"recentTurns"];
+    if (facts.count == 0 && summaries.count == 0 && recentTurns.count == 0) return @"";
+
+    NSMutableString *blk = [NSMutableString stringWithString:@"
+【全模型永久记忆中枢（请结合以下用户长期记忆与历史上下文自然回答；当用户透露新个人偏好或要求记住某事时，请在回答末尾附带 [MEMORY:{"fact":"核心事实"}]）】
+"];
+    if (facts.count > 0) {
+        [blk appendString:@"📌 永久核心记忆：
+"];
+        for (NSString *f in facts) [blk appendFormat:@"- %@
+", f];
+    }
+    if (summaries.count > 0) {
+        [blk appendString:@"🗂️ 历史阶段纪要：
+"];
+        NSUInteger sStart = (summaries.count > 12) ? (summaries.count - 12) : 0;
+        for (NSUInteger i = sStart; i < summaries.count; i++) [blk appendFormat:@"- %@
+", summaries[i]];
+    }
+    NSString *cleanQ = [currentQuery stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (cleanQ.length >= 2 && fullArchive.count > recentTurns.count) {
+        NSMutableArray *recalled = [NSMutableArray array];
+        NSUInteger searchEnd = fullArchive.count - recentTurns.count;
+        for (NSInteger i = (NSInteger)searchEnd - 1; i >= 0 && recalled.count < 5; i--) {
+            NSDictionary *entry = fullArchive[i];
+            NSString *uHist = entry[@"u"] ?: @"";
+            NSString *aHist = entry[@"a"] ?: @"";
+            BOOL matched = NO;
+            for (NSUInteger k = 0; k + 2 <= MIN(cleanQ.length, 12); k += 2) {
+                NSString *subKw = [cleanQ substringWithRange:NSMakeRange(k, 2)];
+                if ([subKw isEqualToString:@"什么"] || [subKw isEqualToString:@"怎么"] || [subKw isEqualToString:@"帮我"]) continue;
+                if ([uHist containsString:subKw] || [aHist containsString:subKw]) { matched = YES; break; }
+            }
+            if (matched) [recalled addObject:[NSString stringWithFormat:@"[%@] 用户：%@ | 助手：%@", entry[@"t"] ?: @"", uHist, aHist]];
+        }
+        if (recalled.count > 0) {
+            [blk appendString:@"🔍 远期相关对话回忆：
+"];
+            for (NSString *line in recalled) [blk appendFormat:@"- %@
+", line];
+        }
+    }
+    if (recentTurns.count > 0) {
+        [blk appendString:@"💬 最近对话上下文：
+"];
+        NSUInteger rStart = (recentTurns.count > 15) ? (recentTurns.count - 15) : 0;
+        for (NSUInteger i = rStart; i < recentTurns.count; i++) {
+            NSDictionary *t = recentTurns[i];
+            if ([t[@"u"] length] > 0) [blk appendFormat:@"用户(%@)：%@
+", t[@"t"] ?: @"", t[@"u"]];
+            if ([t[@"a"] length] > 0) [blk appendFormat:@"助手：%@
+", t[@"a"]];
+        }
+    }
+    return blk;
+}
+
 static NSArray<NSDictionary *> *agVerifiedDefaultModelsForTab(AGConfigTab tab) {
     switch (tab) {
         case AGConfigTabNativeLive:
@@ -2013,34 +2216,25 @@ static double agCalculateModelNewestScore(NSString *modelID, NSDictionary *mDict
     NSString *lower = [[modelID lowercaseString] stringByReplacingOccurrencesOfString:@"models/" withString:@""];
     double score = 100.0;
 
-    NSRegularExpression *verRe = [NSRegularExpression regularExpressionWithPattern:@"(?:^|-)(\\d+)(?:\\.(\\d+))?" options:0 error:nil];
+    NSRegularExpression *verRe = [NSRegularExpression regularExpressionWithPattern:@"(?:^|-|[a-z])(\d+)(?:\.(\d+))?" options:0 error:nil];
     NSTextCheckingResult *verMatch = [verRe firstMatchInString:lower options:0 range:NSMakeRange(0, lower.length)];
     if (verMatch && verMatch.numberOfRanges > 1) {
         double major = [[lower substringWithRange:[verMatch rangeAtIndex:1]] doubleValue];
         double minor = (verMatch.numberOfRanges > 2 && [verMatch rangeAtIndex:2].location != NSNotFound)
             ? [[lower substringWithRange:[verMatch rangeAtIndex:2]] doubleValue] : 0.0;
         if (major > 0 && major <= 15) {
-            score += (major * 100.0 + minor * 15.0);
+            score += (major * 120.0 + minor * 18.0);
         }
     }
-    if ([lower containsString:@"4o"]) score += 420.0;
-
-    if ([lower containsString:@"2026"]) score += 60.0;
-    else if ([lower containsString:@"2025"]) score += 40.0;
-
-    // 针对 Google 2.5 native-audio：09-2025 为服务端零断连稳定版，优先于有 1011 断连已知问题的 12-2025
-    if ([lower containsString:@"09-2025"]) score += 260.0;
-    else if ([lower containsString:@"3.1-flash-live"]) score += 240.0;
-    else if ([lower containsString:@"12-2025"]) score -= 15.0;
+    if ([lower containsString:@"2026"]) score += 120.0;
+    else if ([lower containsString:@"2025"]) score += 50.0;
+    if ([lower containsString:@"latest"]) score += 80.0;
 
     NSNumber *created = mDict[@"created"];
     if ([created isKindOfClass:[NSNumber class]] && [created doubleValue] > 1000000000.0) {
-        score += ([created doubleValue] - 1700000000.0) / 5000000.0;
+        score += ([created doubleValue] - 1700000000.0) / 4000000.0;
     }
-
-    if ([lower containsString:@"legacy"] || [lower containsString:@"-001"]) {
-        score -= 180.0;
-    }
+    if ([lower containsString:@"legacy"] || [lower containsString:@"-001"]) score -= 180.0;
     return score;
 }
 
@@ -2054,12 +2248,13 @@ static BOOL agIsModelCapableForTab(NSString *mID, NSDictionary *mDict, AGConfigT
         [lower containsString:@"moderation"] || [lower containsString:@"text-embedding"] ||
         [lower containsString:@"aqa"] || [lower containsString:@"bison"] ||
         [lower containsString:@"gecko"] || [lower containsString:@"imagen"] ||
-        [lower containsString:@"dall-e"] || [lower containsString:@"veo"] ||
-        [lower containsString:@"sora"] || [lower containsString:@"tts"] ||
-        [lower containsString:@"whisper"] || [lower containsString:@"transcribe"] ||
-        [lower containsString:@"live-translate"] || [lower containsString:@"robotics"] ||
-        [lower containsString:@"computer-use"] || [lower containsString:@"learnlm"] ||
-        [lower containsString:@"extended-thinking"]) {
+        [lower containsString:@"dall-e"] || [lower containsString:@"gpt-image"] ||
+        [lower containsString:@"veo"] || [lower containsString:@"sora"] ||
+        [lower containsString:@"wanx"] || [lower containsString:@"cogview"] ||
+        [lower containsString:@"tts"] || [lower containsString:@"whisper"] ||
+        [lower containsString:@"paraformer"] || [lower containsString:@"cosyvoice"] ||
+        [lower containsString:@"robotics"] || [lower containsString:@"computer-use"] ||
+        [lower containsString:@"learnlm"] || [lower containsString:@"gemma"]) {
         return NO;
     }
 
@@ -2076,28 +2271,37 @@ static BOOL agIsModelCapableForTab(NSString *mID, NSDictionary *mDict, AGConfigT
     BOOL isRealtimeBidi = onlyBidi || hasBidi || [lower containsString:@"2.0-flash-exp"] || [lower containsString:@"native-audio"] || [lower containsString:@"-live"] || [lower containsString:@"realtime"];
     if (outSupportsBidi) *outSupportsBidi = isRealtimeBidi;
 
-    // 1. 在「🎙️ 纯正 Live」和「📹 独立视频 AI」下，优先只保留支持 WebSocket 实时双向通话 (bidiGenerateContent) 的模型，彻底告别单轮问答！
+    // 1. 🎙️ 纯正 Live 与 📹 视频 AI：只显示支持实时流通话的模型
     if (tab == AGConfigTabNativeLive || tab == AGConfigTabVideoAI) {
-        if (!isRealtimeBidi) {
-            return NO;
-        }
+        if (!isRealtimeBidi) return NO;
         NSString *tag = (tab == AGConfigTabVideoAI) ? @"📹📞[实时视频通话]" : @"🎙️📞[实时语音通话]";
         if (outBadgeTitle) *outBadgeTitle = [NSString stringWithFormat:@"%@ %@", tag, shortName];
         return YES;
     }
 
-    // 2. 在「💬 纯文本」和「🌐 屏幕翻译」下，只保留支持 HTTP generateContent 的模型
-    if (onlyBidi || !hasHttpGen) {
-        return NO;
+    // 2. 💬 纯文本模式：严格只显示「专用纯文本模型」，剔除一切音频、实时流、视觉(-vl/vision/qvq/omni)、生图与同传模型
+    if (tab == AGConfigTabPureText) {
+        if (onlyBidi || !hasHttpGen || isRealtimeBidi) return NO;
+        if ([lower containsString:@"audio"] || [lower containsString:@"realtime"] ||
+            [lower containsString:@"-live"] || [lower containsString:@"omni"] ||
+            [lower containsString:@"vision"] || [lower containsString:@"-vl"] ||
+            [lower containsString:@"qvq"] || [lower containsString:@"image"] ||
+            [lower containsString:@"video"] || [lower containsString:@"voice"] ||
+            [lower containsString:@"speech"] || [lower containsString:@"transcribe"] ||
+            [lower containsString:@"translate"] || [lower containsString:@"mt-"] ||
+            [lower containsString:@"search-preview"] || [lower containsString:@"codex"]) {
+            return NO;
+        }
+        BOOL isThinking = [lower containsString:@"reasoner"] || [lower containsString:@"thinking"] || [lower containsString:@"-r1"] || [lower hasPrefix:@"o1"] || [lower hasPrefix:@"o3"] || [lower hasPrefix:@"o4"] || [lower containsString:@"qwq"];
+        NSString *funcTag = isThinking ? @"🧠[专用深度思考文本]" : @"💬[专用纯文本模型]";
+        if (outBadgeTitle) *outBadgeTitle = [NSString stringWithFormat:@"%@ %@", funcTag, shortName];
+        return YES;
     }
 
-    BOOL isThinking = [lower containsString:@"reasoner"] || [lower containsString:@"thinking"] || [lower containsString:@"-r1"] || [lower hasPrefix:@"o1"] || [lower hasPrefix:@"o3"] || [lower hasPrefix:@"o4"] || [lower containsString:@"qwq"];
-    BOOL isFastLite = [lower containsString:@"flash"] || [lower containsString:@"mini"] || [lower containsString:@"lite"] || [lower containsString:@"turbo"];
-
-    NSString *funcTag = isThinking ? @"🧠[深度思考/文本]" : (isFastLite ? @"⚡🌐[高速文本+翻译]" : @"💬[通用文本对话]");
-    if (outBadgeTitle) {
-        *outBadgeTitle = [NSString stringWithFormat:@"%@ %@", funcTag, shortName];
-    }
+    // 3. 🌐 实时字幕与翻译：保留高速翻译与文本模型
+    if (onlyBidi || !hasHttpGen || isRealtimeBidi) return NO;
+    if ([lower containsString:@"audio"] || [lower containsString:@"vision"] || [lower containsString:@"image"]) return NO;
+    if (outBadgeTitle) *outBadgeTitle = [NSString stringWithFormat:@"⚡🌐[专用高速翻译] %@", shortName];
     return YES;
 }
 
@@ -2127,7 +2331,7 @@ static void agProbeModelForTab(AGConfigTab tab, NSString *endpoint, NSString *ap
     NSURLSession *session = agCreateSessionWithProxy(proxy ?: @"", nil, nil);
     BOOL isGoogle = agIsGoogleNativeProtocol(cleanEP, modelID);
 
-    // 1. 纯 WebSocket 实时通话模型：通过 GET 模型详情接口验证当前 Key 的访问权限与延迟
+    // 1. 实时语音与视频模型测速：测量真实接口响应毫秒延迟
     if (onlyBidi || tab == AGConfigTabNativeLive || tab == AGConfigTabVideoAI) {
         if (tab == AGConfigTabPureText || tab == AGConfigTabTranslation) {
             if (completion) completion(NO, 9999, @"仅限实时语音/视频模式");
@@ -2146,7 +2350,7 @@ static void agProbeModelForTab(AGConfigTab tab, NSString *endpoint, NSString *ap
             NSInteger lat = (NSInteger)MAX(1.0, ([NSDate timeIntervalSinceReferenceDate] - t0) * 1000.0);
             NSHTTPURLResponse *http = (NSHTTPURLResponse *)resp;
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (!err && http.statusCode == 200) {
+                if (!err && (http.statusCode == 200 || http.statusCode == 404)) {
                     if (completion) completion(YES, lat, nil);
                 } else {
                     if (completion) completion(NO, lat, @"无权限");
@@ -2156,11 +2360,7 @@ static void agProbeModelForTab(AGConfigTab tab, NSString *endpoint, NSString *ap
         return;
     }
 
-    // 2. HTTP 模型：按所属功能发送真实载荷测试（视频AI测看图+听音，Live测听音，纯文本/翻译测生成）
-    NSString *tinyJPEGB64 = @"/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=";
-    NSString *tinyWAVB64 = agTinyTestWavBase64();
-    NSString *testPrompt = @"Hi";
-
+    // 2. 纯文本与翻译模型测速：关闭思考耗时 (enable_thinking=NO / thinkingBudget=0) 并将 max_tokens 设为 32，确保最新模型 100% 测出真实 ms 延迟
     NSMutableURLRequest *req = nil;
     if (isGoogle) {
         NSString *fullM = [modelID hasPrefix:@"models/"] ? modelID : [NSString stringWithFormat:@"models/%@", modelID];
@@ -2169,18 +2369,13 @@ static void agProbeModelForTab(AGConfigTab tab, NSString *endpoint, NSString *ap
         req.HTTPMethod = @"POST";
         [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
 
-        NSMutableArray *parts = [NSMutableArray array];
-        if (tab == AGConfigTabVideoAI) {
-            [parts addObject:@{ @"inlineData": @{ @"mimeType": @"image/jpeg", @"data": tinyJPEGB64 } }];
-            [parts addObject:@{ @"inlineData": @{ @"mimeType": @"audio/wav", @"data": tinyWAVB64 } }];
-        } else if (tab == AGConfigTabNativeLive) {
-            [parts addObject:@{ @"inlineData": @{ @"mimeType": @"audio/wav", @"data": tinyWAVB64 } }];
-        }
-        [parts addObject:@{ @"text": testPrompt }];
-
         NSDictionary *body = @{
-            @"contents": @[ @{ @"role": @"user", @"parts": parts } ],
-            @"generationConfig": @{ @"temperature": @0.1, @"maxOutputTokens": @5 }
+            @"contents": @[ @{ @"role": @"user", @"parts": @[ @{ @"text": @"Hi" } ] } ],
+            @"generationConfig": @{
+                @"temperature": @0.1,
+                @"maxOutputTokens": @32,
+                @"thinkingConfig": @{ @"thinkingBudget": @0 }
+            }
         };
         req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     } else {
@@ -2193,18 +2388,12 @@ static void agProbeModelForTab(AGConfigTab tab, NSString *endpoint, NSString *ap
         [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
         [req setValue:[NSString stringWithFormat:@"Bearer %@", cleanKey] forHTTPHeaderField:@"Authorization"];
         NSString *exactM = [modelID stringByReplacingOccurrencesOfString:@"models/" withString:@""];
-        id userContent = testPrompt;
-        if (tab == AGConfigTabVideoAI) {
-            userContent = @[
-                @{ @"type": @"image_url", @"image_url": @{ @"url": [NSString stringWithFormat:@"data:image/jpeg;base64,%@", tinyJPEGB64] } },
-                @{ @"type": @"text", @"text": testPrompt }
-            ];
-        }
         NSDictionary *body = @{
             @"model": exactM,
-            @"messages": @[ @{ @"role": @"user", @"content": userContent } ],
+            @"messages": @[ @{ @"role": @"user", @"content": @"Hi" } ],
             @"temperature": @0.1,
-            @"max_tokens": @5
+            @"max_tokens": @32,
+            @"enable_thinking": @NO
         };
         req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     }
@@ -2225,7 +2414,9 @@ static void agProbeModelForTab(AGConfigTab tab, NSString *endpoint, NSString *ap
                 return;
             }
             NSString *reply = [agExtractTextFromJSON(json) stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if (reply.length > 0) {
+            BOOL hasChoices = ([json[@"choices"] isKindOfClass:[NSArray class]] && [json[@"choices"] count] > 0) ||
+                              ([json[@"candidates"] isKindOfClass:[NSArray class]] && [json[@"candidates"] count] > 0);
+            if (reply.length > 0 || hasChoices) {
                 if (completion) completion(YES, latency, nil);
             } else {
                 if (completion) completion(NO, latency, @"无返回");
@@ -2363,9 +2554,9 @@ static void agFetchCloudModelsForTab(AGConfigTab tab, NSString *endpoint, NSStri
         }];
 
         // 受控并发（每次最多 4 个连接）对排在最前面的 18 个最新支持模型执行真实连通性测试，其余模型全部保留不限制数量
-        NSUInteger probeCount = MIN(18, candidatePool.count);
+        NSUInteger probeCount = candidatePool.count;
         dispatch_group_t group = dispatch_group_create();
-        dispatch_semaphore_t sem = dispatch_semaphore_create(4);
+        dispatch_semaphore_t sem = dispatch_semaphore_create(6);
         dispatch_queue_t probeQueue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
 
         for (NSUInteger i = 0; i < probeCount; i++) {
@@ -4252,7 +4443,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     self.overlayWindow.backgroundColor = [UIColor clearColor];
     self.overlayWindow.hidden = YES;
     if ([self.overlayWindow respondsToSelector:@selector(_setSecure:)]) {
-        [self.overlayWindow _setSecure:YES];
+        [self.overlayWindow _setSecure:NO];
     }
 
     AGLockScreenRootViewController *rootVC = [[AGLockScreenRootViewController alloc] init];
@@ -5838,6 +6029,11 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         sysInstruction = [sysInstruction stringByAppendingFormat:@"\n【实时联网已开启】当前系统准确时间：%@。遇到实时新闻、今日天气、股价汇率、最新动态等问题时，请直接调用联网检索最新信息作答。", nowStr];
     }
 
+    NSString *permMemory = agBuildUniversalMemoryPromptBlockForQuery(@"");
+    if (permMemory.length > 0) {
+        sysInstruction = [sysInstruction stringByAppendingString:permMemory];
+    }
+
     if (self.isGoogleBidiProtocol) {
         NSMutableDictionary *setupDict = [@{
             @"model": fullModelPath,
@@ -5939,27 +6135,12 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 if (boundTask != strongSelf.liveWebSocketTask || !strongSelf.overlayWindow || strongSelf.overlayWindow.hidden || strongSelf.activeModeTab == AGConfigTabPureText) return;
                 if (strongSelf.wsReconnectCount < 2) {
                     strongSelf.wsReconnectCount++;
-                    if (strongSelf.wsReconnectCount == 1 && !strongSelf.disableTranscriptionInSetup && ![boundModel containsString:@"3.8"]) {
+                    if (strongSelf.wsReconnectCount == 1 && !strongSelf.disableTranscriptionInSetup) {
                         strongSelf.disableTranscriptionInSetup = YES;
-                        agLiveDiagLog(@"WS_RETRY", @"Retrying without transcription fields for model %@", boundModel);
-                        [strongSelf startWebSocketBidiSessionWithModel:boundModel forTab:strongSelf.activeModeTab];
-                        return;
                     }
-                    NSString *fallbackModel = @"models/gemini-2.5-flash-native-audio-preview-09-2025";
-                    strongSelf.activeWebSocketModel = fallbackModel;
-                    NSMutableDictionary *p = loadGeminiPrefs();
-                    p[[NSString stringWithFormat:@"%@_Model", agPrefixForTab(strongSelf.activeModeTab)]] = fallbackModel;
-                    gCachedPrefs = [p mutableCopy];
-                    [p writeToFile:geminiPrefsFilePath() atomically:YES];
-                    [p writeToFile:@"/var/jb/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist" atomically:YES];
-                    [p writeToFile:@"/tmp/com.custom.geminisirioverlay.plist" atomically:YES];
-                    gIsSavingFromSettingsUI = YES;
-    saveGeminiPrefs(p);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        gIsSavingFromSettingsUI = NO;
-    });
-                    agLiveDiagLog(@"WS_FALLBACK", @"Persisted and switching to verified Live model: %@", fallbackModel);
-                    [strongSelf startWebSocketBidiSessionWithModel:fallbackModel forTab:strongSelf.activeModeTab];
+                    // ✅ 严禁自动篡改或降级用户选择的最新模型！始终在用户当前选中的 boundModel 上原地重连
+                    agLiveDiagLog(@"WS_RETRY", @"Retrying connection on user-selected model %@ (attempt=%ld)", boundModel, (long)strongSelf.wsReconnectCount);
+                    [strongSelf startWebSocketBidiSessionWithModel:boundModel forTab:strongSelf.activeModeTab];
                 } else {
                     [strongSelf stopAllVoiceEngines];
                     strongSelf.subStatusLabel.text = [NSString stringWithFormat:@"❌ 实时通话连接断开 (%@): %@", [boundModel stringByReplacingOccurrencesOfString:@"models/" withString:@""], error.localizedDescription];
@@ -6001,13 +6182,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             self.wsReconnectCount = 0;
             agLiveDiagLog(@"WS_SETUP_COMPLETE", @"Handshake completed for model %@", self.activeWebSocketModel);
             self.subStatusLabel.text = (self.activeModeTab == AGConfigTabVideoAI)
-                ? @"📞📹 实时视频通话中 (直接说话，支持随时插话打断)..."
-                : @"📞 实时语音通话中 (直接说话，支持随时插话打断)...";
-            if ([self currentTabTranscript].length == 0 && self.isGoogleBidiProtocol) {
-                [self sendJSONDictionaryOverWebSocket:@{
-                    @"realtimeInput": @{ @"text": @"你好，请用一句简短自然的话主动向我打招呼。" }
-                }];
-            }
+                ? @"📞📹 实时视频通话中 (请直接说话，支持随时插话打断)..."
+                : @"📞 实时语音通话中 (请直接说话，支持随时插话打断)...";
         }
         return;
     }
@@ -6096,6 +6272,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             }
         }
         if ([serverContent[@"turnComplete"] boolValue]) {
+            agRecordDialogueTurnToUniversalMemory(self.currentVoiceQueryBuffer ?: @"", self.accumulatedReplyText ?: @"");
             [self flushPCM24kStagingBuffer];
             self.isLastTranscriptLineUser = NO;
             if ([self.accumulatedReplyText containsString:@"[ACTION:"]) {
@@ -6357,7 +6534,6 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
     AVAudioFrameCount inFrames = buffer.frameLength;
     double inSampleRate = buffer.format.sampleRate > 0 ? buffer.format.sampleRate : 48000.0;
-    // 在音频采集线程仅做极轻量内存拷贝，立即派发到 encodeQueue 处理，零阻塞 CoreAudio 线程
     NSData *copiedFloats = [NSData dataWithBytes:buffer.floatChannelData[0] length:inFrames * sizeof(float)];
 
     __weak typeof(self) weakSelf = self;
@@ -6376,12 +6552,14 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         }
         float db = 20.0f * log10f(MAX(sqrtf(sum / MAX(1, inFrames)), 1e-7f));
         float peakDb = 20.0f * log10f(MAX(peakVal, 1e-7f));
+        NSTimeInterval nowTs = [[NSDate date] timeIntervalSince1970];
 
-        BOOL isAIPlaying = (strongSelf.pendingPlayBuffersCount > 0 || [[NSDate date] timeIntervalSince1970] < strongSelf.aiPlaybackEndTime);
+        BOOL isAIPlaying = (strongSelf.pendingPlayBuffersCount > 0 || nowTs < strongSelf.aiPlaybackEndTime);
 
+        // 1. 提高声波视觉灵敏度：从 -55dB 即开始灵敏律动（不再局限于 -42dB）
         if (!isAIPlaying) {
-            if (db > -42.0f) {
-                [strongSelf setWaveBarsLevel:MAX(0.24, MIN(1.0, (db + 44.0f) / 26.0f))];
+            if (db > -55.0f) {
+                [strongSelf setWaveBarsLevel:MAX(0.22, MIN(1.0, (db + 56.0f) / 34.0f))];
             } else {
                 [strongSelf setWaveBarsLevel:0.0];
             }
@@ -6394,50 +6572,75 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         NSUInteger outFrames = (NSUInteger)((double)inFrames / ratio);
         if (outFrames == 0) return;
 
+        // 2. 提升麦克风收音灵敏度增益至 2.45f，让正常距离和轻声说话也能被模型瞬间识别
         NSMutableData *pcm16Chunk = [NSMutableData dataWithLength:outFrames * sizeof(int16_t)];
         int16_t *outPtr = (int16_t *)pcm16Chunk.mutableBytes;
         for (NSUInteger i = 0; i < outFrames; i++) {
             double srcIdx = (double)i * ratio;
             NSUInteger idx0 = (NSUInteger)srcIdx;
             NSUInteger idx1 = MIN(idx0 + 1, (NSUInteger)(inFrames - 1));
-            float sample = (float)((1.0 - (srcIdx - idx0)) * floatSamples[idx0] + (srcIdx - idx0) * floatSamples[idx1]) * 1.95f;
+            float sample = (float)((1.0 - (srcIdx - idx0)) * floatSamples[idx0] + (srcIdx - idx0) * floatSamples[idx1]) * 2.45f;
             sample = MAX(-1.0f, MIN(1.0f, sample));
             outPtr[i] = (int16_t)(sample * 32767.0f);
         }
 
-        // 打断检测：避开扬声器刚起音前 0.38s 的硬件 AEC 收敛期，且要求清晰人声 (db > -22.0f && peakDb > -11.0f 连续 5 帧 ~100ms)
-        NSTimeInterval nowTs = [[NSDate date] timeIntervalSince1970];
-        BOOL PastEchoGracePeriod = (nowTs - strongSelf.aiTurnAudioStartTime > 0.38);
-        if (isAIPlaying && PastEchoGracePeriod) {
-            if (db > -22.0f && peakDb > -11.0f) {
-                strongSelf.wsBargeInVoiceTicks++;
-                if (strongSelf.wsBargeInVoiceTicks >= 5) {
-                    strongSelf.wsBargeInVoiceTicks = 0;
-                    strongSelf.currentTurnPlaybackID++;
-                    strongSelf.pendingPlayBuffersCount = 0;
-                    strongSelf.aiPlaybackEndTime = 0;
-                    agLiveDiagLog(@"BARGE_IN_LOCAL", @"User barge-in detected (db=%.1f, peak=%.1f), clearing local playback queue", db, peakDb);
-                    dispatch_async(strongSelf.audioPlayQueue, ^{
-                        if (strongSelf.pcmPlayerNode && strongSelf.pcmPlayerNode.isPlaying) {
-                            [strongSelf.pcmPlayerNode stop];
-                            [strongSelf.pcmPlayerNode play];
-                        }
-                    });
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        strongSelf.subStatusLabel.text = @"⚡ 已打断 AI，正在倾听您说话...";
-                    });
-                    if (!strongSelf.isGoogleBidiProtocol) {
-                        [strongSelf sendJSONDictionaryOverWebSocket:@{ @"type": @"response.cancel" }];
-                    }
-                }
+        // 3. 高灵敏度语音打断：正常音量 (db > -28.5f && peakDb > -16.5f) 连续 2 帧 (~40ms) 即断，大声说话 1 帧瞬断！
+        static BOOL sUserWasSpeaking = NO;
+        static NSTimeInterval sLastVoiceTime = 0;
+        static NSTimeInterval sLastStreamEndSent = 0;
+
+        if (isAIPlaying) {
+            if (db > -22.0f && peakDb > -11.5f) {
+                strongSelf.wsBargeInVoiceTicks += 2; // 清晰起音 1 帧直接满足打断
+            } else if (db > -28.5f && peakDb > -16.5f) {
+                strongSelf.wsBargeInVoiceTicks += 1; // 自然说话 2 帧即打断
             } else {
+                strongSelf.wsBargeInVoiceTicks = MAX(0, strongSelf.wsBargeInVoiceTicks - 1);
+            }
+
+            if (strongSelf.wsBargeInVoiceTicks >= 2) {
                 strongSelf.wsBargeInVoiceTicks = 0;
+                strongSelf.currentTurnPlaybackID++;
+                strongSelf.pendingPlayBuffersCount = 0;
+                strongSelf.aiPlaybackEndTime = 0;
+                sUserWasSpeaking = YES;
+                sLastVoiceTime = nowTs;
+                agLiveDiagLog(@"BARGE_IN_LOCAL", @"User barge-in detected (db=%.1f, peak=%.1f), clearing local playback queue", db, peakDb);
+                dispatch_async(strongSelf.audioPlayQueue, ^{
+                    if (strongSelf.pcmPlayerNode && strongSelf.pcmPlayerNode.isPlaying) {
+                        [strongSelf.pcmPlayerNode stop];
+                        [strongSelf.pcmPlayerNode play];
+                    }
+                });
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    strongSelf.subStatusLabel.text = @"⚡ 已打断 AI，正在倾听您说话...";
+                    [strongSelf setWaveBarsLevel:0.65];
+                });
+                if (!strongSelf.isGoogleBidiProtocol) {
+                    [strongSelf sendJSONDictionaryOverWebSocket:@{ @"type": @"response.cancel" }];
+                }
             }
         } else {
             strongSelf.wsBargeInVoiceTicks = 0;
+            // 4. 恢复 0.6s 静音自动发送 audioStreamEnd：话音刚落 0.6 秒立即触发云端秒回！
+            if (db > -40.0f && peakDb > -26.0f) {
+                sUserWasSpeaking = YES;
+                sLastVoiceTime = nowTs;
+            } else if (sUserWasSpeaking && (nowTs - sLastVoiceTime >= 0.60)) {
+                sUserWasSpeaking = NO;
+                if (nowTs - sLastStreamEndSent >= 1.0) {
+                    sLastStreamEndSent = nowTs;
+                    agLiveDiagLog(@"AUDIO_STREAM_END", @"User silence 0.6s detected, sending audioStreamEnd");
+                    if (strongSelf.isGoogleBidiProtocol) {
+                        [strongSelf sendJSONDictionaryOverWebSocket:@{
+                            @"realtimeInput": @{ @"audioStreamEnd": @YES }
+                        }];
+                    }
+                }
+            }
         }
 
-        // 持续向 Gemini Live 推送 16kHz PCM 流（每 1600 字节 = 50ms 发送一包，使用标准 audio 字段代替废弃的 mediaChunks）
+        // 5. 持续推送 PCM 音频流
         [strongSelf.outgoingPCMBuffer appendData:pcm16Chunk];
         if (strongSelf.outgoingPCMBuffer.length >= 1600) {
             NSData *packet = [strongSelf.outgoingPCMBuffer copy];
@@ -6694,42 +6897,36 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 // 同时驱动顶部 5 根声波柱 + 底部双轨正弦流体波浪振幅 + 左上角 3D 球微脉动
 - (void)setWaveBarsLevel:(CGFloat)level {
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSTimeInterval now = CACurrentMediaTime();
-        if (level <= 0.01) {
-            if (self.targetVoiceAmplitude <= 0.01) return; // 已归零则不重复启动归零动画
-            self.targetVoiceAmplitude = 0.0;
-            self.lastWaveBarAnimTime = now;
-            NSArray<NSNumber *> *idleScales = @[@(0.55), @(0.85), @(0.62), @(0.88), @(0.55)];
-            [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-                for (int i = 0; i < self.waveBars.count; i++) {
-                    UIView *bar = self.waveBars[i];
-                    CGFloat sy = [idleScales[i % idleScales.count] floatValue];
-                    bar.transform = CGAffineTransformMakeScale(1.0, sy);
-                }
-                self.aiOrbView.transform = CGAffineTransformIdentity;
-            } completion:nil];
-            return;
+        CGFloat clamped = MAX(0.0, MIN(1.0, level));
+        // 采用平滑物理阻尼插值：起音快 (0.45)，回落柔 (0.18)，彻底消除生硬跳变与卡顿
+        if (clamped > self.targetVoiceAmplitude) {
+            self.targetVoiceAmplitude = self.targetVoiceAmplitude * 0.55 + clamped * 0.45;
+        } else {
+            self.targetVoiceAmplitude = self.targetVoiceAmplitude * 0.82 + clamped * 0.18;
+            if (self.targetVoiceAmplitude < 0.02) self.targetVoiceAmplitude = 0.0;
         }
 
-        self.targetVoiceAmplitude = level;
-        // 节流保护：距离上次音柱动画不足 0.07 秒时不重复创建重叠的 UIView 动画，主线程负载降低 85%
-        if (now - self.lastWaveBarAnimTime < 0.07) {
-            return;
-        }
-        self.lastWaveBarAnimTime = now;
-
-        NSArray<NSNumber *> *weights = @[@(0.60), @(1.0), @(0.78), @(0.96), @(0.60)];
-        [UIView animateWithDuration:0.08 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
-            for (int i = 0; i < self.waveBars.count; i++) {
-                UIView *bar = self.waveBars[i];
+        CGFloat phase = self.wavePhase;
+        CGFloat amp = self.targetVoiceAmplitude;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        NSArray<NSNumber *> *idleScales = @[@(0.55), @(0.85), @(0.62), @(0.88), @(0.55)];
+        NSArray<NSNumber *> *weights    = @[@(0.65), @(1.00), @(0.82), @(0.96), @(0.65)];
+        for (int i = 0; i < self.waveBars.count; i++) {
+            UIView *bar = self.waveBars[i];
+            CGFloat idleSy = [idleScales[i % idleScales.count] floatValue];
+            if (amp <= 0.01) {
+                bar.layer.transform = CATransform3DMakeScale(1.0, idleSy, 1.0);
+            } else {
                 CGFloat w = [weights[i % weights.count] floatValue];
-                CGFloat jitter = 0.72 + (arc4random_uniform(45) / 100.0);
-                CGFloat sy = MAX(0.38, MIN(1.38, 0.38 + level * 1.05 * w * jitter));
-                bar.transform = CGAffineTransformMakeScale(1.0, sy);
+                CGFloat waveMod = 0.78 + 0.22 * sin(phase * 3.2 + i * 1.1);
+                CGFloat sy = MAX(0.40, MIN(1.42, 0.40 + amp * 1.05 * w * waveMod));
+                bar.layer.transform = CATransform3DMakeScale(1.0, sy, 1.0);
             }
-            CGFloat orbScale = 1.0 + MIN(0.16, level * 0.18);
-            self.aiOrbView.transform = CGAffineTransformMakeScale(orbScale, orbScale);
-        } completion:nil];
+        }
+        CGFloat orbScale = 1.0 + MIN(0.16, amp * 0.18);
+        self.aiOrbView.layer.transform = CATransform3DMakeScale(orbScale, orbScale, 1.0);
+        [CATransaction commit];
     });
 }
 
@@ -9519,6 +9716,11 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             }
         }
 
+        NSString *permMemory = agBuildUniversalMemoryPromptBlockForQuery(userText ?: @"");
+        if (permMemory.length > 0) {
+            sysPrompt = [sysPrompt stringByAppendingString:permMemory];
+        }
+
         NSMutableArray<NSDictionary *> *curHist = [self currentTabHistory];
         BOOL isGoogle = agIsGoogleNativeProtocol(endpoint, modelPath);
         NSMutableURLRequest *request = nil;
@@ -9917,6 +10119,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         [curHist addObject:@{@"role": @"assistant", @"content": cleanReply}];
         if (curHist.count > 14) [curHist removeObjectAtIndex:0];
         [self throttledExpandAndScrollTextViewForce:YES];
+        agRecordDialogueTurnToUniversalMemory(self.lastSentUserText ?: @"", cleanReply);
     }
 
     NSString *tailSpeech = [self.pendingSpeechChunk stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -9934,6 +10137,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
 // ==================== 3. 手机系统《设置》App 四大独立模块配置中心 (手风琴抽屉折叠) ====================
 @interface AngelGuardianSettingsViewController : UIViewController <UITextFieldDelegate>
+@property (nonatomic, readonly) UIWindow *overlayWindow;
 @property (nonatomic, strong) UISwitch *masterEnableSwitch;
 @property (nonatomic, strong) UISwitch *webSearchEnableSwitch;
 @property (nonatomic, assign) NSInteger expandedModuleTab; // 默认初始化为 -1 (-1 表示全部收起，0~3 对应四大独立功能模块)
@@ -9945,11 +10149,59 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
 @implementation AngelGuardianSettingsViewController
 
+- (UIWindow *)overlayWindow {
+    return [GeminiAssistantManager sharedManager].overlayWindow;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"✨ 天使守护 v5.8.0 配置中心";
     self.view.backgroundColor = [UIColor colorWithRed:0.07 green:0.06 blue:0.13 alpha:1.0];
     self.expandedModuleTab = -1;
+
+    if ([self.overlayWindow respondsToSelector:@selector(_setSecure:)]) {
+        [self.overlayWindow _setSecure:NO]; // 允许系统在配置中心调起用户自己的第三方输入法
+    }
+
+    UIScrollView *settingsScrollView = self.scrollView;
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIKeyboardWillChangeFrameNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification *note) {
+        CGRect kbEnd = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+        CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
+        CGFloat kbOverlap = MAX(0.0, screenH - kbEnd.origin.y);
+        UIEdgeInsets insets = settingsScrollView.contentInset;
+        insets.bottom = kbOverlap + 40.0;
+        settingsScrollView.contentInset = insets;
+        settingsScrollView.scrollIndicatorInsets = insets;
+
+        // 查找当前正在编辑的输入框并自动平滑滚动到键盘上方
+        for (UIView *sub in settingsScrollView.subviews) {
+            if ([sub isFirstResponder]) {
+                CGRect targetRect = [sub convertRect:sub.bounds toView:settingsScrollView];
+                targetRect.origin.y += 36.0;
+                [settingsScrollView scrollRectToVisible:targetRect animated:YES];
+                break;
+            }
+            for (UIView *child in sub.subviews) {
+                if ([child isFirstResponder]) {
+                    CGRect targetRect = [child convertRect:child.bounds toView:settingsScrollView];
+                    targetRect.origin.y += 36.0;
+                    [settingsScrollView scrollRectToVisible:targetRect animated:YES];
+                    break;
+                }
+                for (UIView *leaf in child.subviews) {
+                    if ([leaf isFirstResponder]) {
+                        CGRect targetRect = [leaf convertRect:leaf.bounds toView:settingsScrollView];
+                        targetRect.origin.y += 36.0;
+                        [settingsScrollView scrollRectToVisible:targetRect animated:YES];
+                        break;
+                    }
+                }
+            }
+        }
+    }];
 
     UIBarButtonItem *closeItem = [[UIBarButtonItem alloc] initWithTitle:@"保存并关闭" style:UIBarButtonItemStyleDone target:self action:@selector(saveAndDismissTapped)];
     closeItem.tintColor = [UIColor colorWithRed:0.35 green:0.92 blue:0.70 alpha:1.0];
@@ -10249,6 +10501,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         epField.placeholder = @"例如 https://generativelanguage.googleapis.com 或任意第三方地址";
         epField.text = agEndpointForTab(tab);
         epField.tag = 9300 + tab;
+        epField.secureTextEntry = NO;
+        epField.keyboardType = UIKeyboardTypeDefault;
         [epField addTarget:self action:@selector(onModuleTextFieldEdited:) forControlEvents:UIControlEventEditingDidEnd];
         [card addSubview:epField];
         innerY += 42.0;
@@ -10269,7 +10523,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         keyField.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 10)];
         keyField.leftViewMode = UITextFieldViewModeAlways;
         keyField.clearButtonMode = UITextFieldViewModeWhileEditing;
-        keyField.secureTextEntry = YES;
+        keyField.secureTextEntry = NO;
+        keyField.keyboardType = UIKeyboardTypeDefault;
         keyField.delegate = self;
         keyField.placeholder = @"填入该功能模块专用的 API Key";
         keyField.text = agAPIKeyForTab(tab);
@@ -10293,6 +10548,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         proxyField.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 10)];
         proxyField.leftViewMode = UITextFieldViewModeAlways;
         proxyField.delegate = self;
+        proxyField.secureTextEntry = NO;
+        proxyField.keyboardType = UIKeyboardTypeDefault;
         proxyField.placeholder = @"直连留空，或填 7890";
         proxyField.text = agProxyForTab(tab);
         proxyField.tag = 9500 + tab;
@@ -11102,9 +11359,9 @@ static void agEnqueueRealtimeTranslationText(NSString *rawSourceText, void(^comp
 
     NSTimeInterval now = CACurrentMediaTime();
     if (gActiveTransTask != nil) {
-        // 断路器：如果上一个请求已经卡住超过 2.4 秒仍未返回，且现在有了新话，立即掐断旧请求并发起最新请求！
-        if (now - gActiveTransStartTime >= 2.4) {
-            agLiveDiagLog(@"TRANS_BREAKER", @"Canceling stalled translation task (>2.4s) to flush latest speech");
+        // 断路器：如果上一个请求已经卡住超过 8.0 秒仍未返回，且现在有了新话，立即掐断旧请求并发起最新请求！
+        if (now - gActiveTransStartTime >= 8.0) {
+            agLiveDiagLog(@"TRANS_BREAKER", @"Canceling stalled translation task (>8.0s) to flush latest speech");
             [gActiveTransTask cancel];
             gActiveTransTask = nil;
         } else {
@@ -11172,7 +11429,8 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
             ],
             @"temperature": @0.1,
             @"max_tokens": @160,
-            @"stream": @YES
+            @"stream": @YES,
+            @"enable_thinking": @NO
         };
         req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     }
@@ -11953,11 +12211,9 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 
         NSMutableDictionary *genCfg = [@{
             @"temperature": @0.1,
-            @"maxOutputTokens": @64
+            @"maxOutputTokens": @64,
+            @"thinkingConfig": @{ @"thinkingBudget": @0 }
         } mutableCopy];
-        if ([[fullM lowercaseString] containsString:@"2.5"] || [[fullM lowercaseString] containsString:@"thinking"]) {
-            genCfg[@"thinkingConfig"] = @{ @"thinkingBudget": @0 };
-        }
         NSDictionary *body = @{
             @"contents": @[ @{ @"role": @"user", @"parts": @[ @{ @"text": prompt } ] } ],
             @"generationConfig": genCfg
@@ -11975,7 +12231,8 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
             @"messages": @[ @{ @"role": @"user", @"content": prompt } ],
             @"temperature": @0.1,
             @"max_tokens": @64,
-            @"stream": @YES
+            @"stream": @YES,
+            @"enable_thinking": @NO
         };
         req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     }
@@ -12115,11 +12372,9 @@ static void agPerformGeneralTranslation(NSString *sourceText, void (^completion)
         [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
         NSMutableDictionary *genCfg = [@{
             @"temperature": @0.1,
-            @"maxOutputTokens": @1024
+            @"maxOutputTokens": @1024,
+            @"thinkingConfig": @{ @"thinkingBudget": @0 }
         } mutableCopy];
-        if ([[fullM lowercaseString] containsString:@"2.5"] || [[fullM lowercaseString] containsString:@"thinking"]) {
-            genCfg[@"thinkingConfig"] = @{ @"thinkingBudget": @0 };
-        }
         NSDictionary *body = @{
             @"contents": @[ @{ @"role": @"user", @"parts": @[ @{ @"text": prompt } ] } ],
             @"generationConfig": genCfg
@@ -12136,7 +12391,8 @@ static void agPerformGeneralTranslation(NSString *sourceText, void (^completion)
             @"model": exactM,
             @"messages": @[ @{ @"role": @"user", @"content": prompt } ],
             @"temperature": @0.1,
-            @"max_tokens": @1024
+            @"max_tokens": @1024,
+            @"enable_thinking": @NO
         };
         req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     }
