@@ -3345,32 +3345,207 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
 
         _builtinAppMap = @{
+            // 移动支付与银行金融 (20+)
             @"微信": @"com.tencent.xin", @"wechat": @"com.tencent.xin",
-            @"支付宝": @"com.eg.android.AlipayGphone", @"淘宝": @"com.taobao.taobao4iphone",
-            @"京东": @"com.360buy.jdmobile", @"拼多多": @"com.xunmeng.pinduoduo",
-            @"美团": @"com.meituan.imeituan", @"网易云": @"com.netease.cloudmusic",
-            @"网易云音乐": @"com.netease.cloudmusic", @"qq音乐": @"com.tencent.QQMusic",
-            @"qq": @"com.tencent.mqq", @"抖音": @"com.ss.iphone.ugc.Aweme",
-            @"快手": @"com.jiangjia.gif", @"小红书": @"com.xingin.discover",
-            @"b站": @"tv.danmaku.bilianime", @"哔哩哔哩": @"tv.danmaku.bilianime",
-            @"youtube": @"com.google.ios.youtube", @"油管": @"com.google.ios.youtube",
-            @"地图": @"com.apple.Maps", @"高德地图": @"com.autonavi.amap", @"百度地图": @"com.baidu.BaiduMobileMap",
-            @"设置": @"com.apple.Preferences", @"相机": @"com.apple.camera",
+            @"支付宝": @"com.eg.android.AlipayGphone", @"alipay": @"com.eg.android.AlipayGphone",
+            @"云闪付": @"com.unionpay.chsp", @"upwallet": @"com.unionpay.chsp",
+            @"招商银行": @"com.cmbchina.mobilebank", @"招行": @"com.cmbchina.mobilebank",
+            @"掌上生活": @"com.cmbchina.life",
+            @"工商银行": @"com.icbc.iphoneclient", @"工行": @"com.icbc.iphoneclient",
+            @"建设银行": @"com.ccb.mobilebank", @"建行": @"com.ccb.mobilebank",
+            @"中国银行": @"com.boc.bocmbci", @"中行": @"com.boc.bocmbci",
+            @"农业银行": @"com.bankabc", @"农行": @"com.bankabc",
+            @"交通银行": @"com.bankcomm.Bankcomm", @"交行": @"com.bankcomm.Bankcomm",
+            @"平安口袋银行": @"com.pingan.pocketbank", @"平安银行": @"com.pingan.pocketbank",
+            @"浦发银行": @"com.spdb.mobilebank",
+            @"中信银行": @"com.citicbank.mobilebank",
+            @"民生银行": @"com.cmbc.mobilebank",
+            @"光大银行": @"com.cebbank.mobilebank",
+            @"广发银行": @"com.cgb.mobilebank",
+            @"兴业银行": @"com.cib.mobilebank",
+            @"京东金融": @"com.jd.jdmobile",
+            // 电商购物与闲置特卖 (15+)
+            @"淘宝": @"com.taobao.taobao4iphone", @"taobao": @"com.taobao.taobao4iphone",
+            @"京东": @"com.360buy.jdmobile", @"jd": @"com.360buy.jdmobile",
+            @"拼多多": @"com.xunmeng.pinduoduo", @"pdd": @"com.xunmeng.pinduoduo",
+            @"闲鱼": @"com.taobao.fleamarket", @"fleamarket": @"com.taobao.fleamarket",
+            @"唯品会": @"com.vipshop.iphone", @"vip": @"com.vipshop.iphone",
+            @"得物": @"com.siwu.poizon", @"毒": @"com.siwu.poizon",
+            @"转转": @"com.wuba.zhuanzhuan",
+            @"找靓机": @"com.huishoubao.zlj",
+            @"苏宁易购": @"com.suning.SuningEBuy", @"苏宁": @"com.suning.SuningEBuy",
+            @"当当": @"com.dangdang.buy", @"当当网": @"com.dangdang.buy",
+            @"淘特": @"com.taobao.live", @"淘宝特价版": @"com.taobao.live",
+            // 餐饮美食、外卖咖啡与生鲜 (16+)
+            @"美团": @"com.meituan.imeituan", @"meituan": @"com.meituan.imeituan",
+            @"美团外卖": @"com.meituan.itakeaway",
+            @"饿了么": @"me.ele.ios.eleme", @"eleme": @"me.ele.ios.eleme",
+            @"大众点评": @"com.dianping.dpscope", @"点评": @"com.dianping.dpscope",
+            @"盒马": @"com.taobao.channel", @"盒马鲜生": @"com.taobao.channel",
+            @"叮咚买菜": @"com.yaya.zone", @"叮咚": @"com.yaya.zone",
+            @"朴朴超市": @"com.pupu.buyer", @"朴朴": @"com.pupu.buyer",
+            @"山姆会员": @"com.walmart.samsclub", @"山姆": @"com.walmart.samsclub",
+            @"瑞幸咖啡": @"com.luckin.coffee", @"瑞幸": @"com.luckin.coffee",
+            @"喜茶": @"com.heytea.heytea",
+            @"星巴克": @"com.starbucks.cn",
+            @"肯德基": @"com.yum.kfc",
+            @"麦当劳": @"com.mcdonalds.cn",
+            @"海底捞": @"com.haidilao.app",
+            // 地铁导航、打车与旅游出行 (20+)
+            @"高德地图": @"com.autonavi.amap", @"高德": @"com.autonavi.amap",
+            @"百度地图": @"com.baidu.BaiduMobileMap",
+            @"腾讯地图": @"com.tencent.sosomap",
+            @"滴滴出行": @"com.xiaojukeji.didi", @"滴滴": @"com.xiaojukeji.didi",
+            @"花小猪": @"com.huaxiaozhu.passenger", @"花小猪打车": @"com.huaxiaozhu.passenger",
+            @"哈啰": @"com.hellobike.app", @"哈啰出行": @"com.hellobike.app",
+            @"t3出行": @"com.t3.passenger",
+            @"曹操出行": @"com.caocao.passenger",
+            @"12306": @"com.chinasofti.iroad.12306", @"铁路12306": @"com.chinasofti.iroad.12306",
+            @"智行火车票": @"com.tieyou.train", @"智行": @"com.tieyou.train",
+            @"携程": @"ctrip.com", @"携程旅行": @"ctrip.com",
+            @"去哪儿": @"com.qunar.iphone", @"去哪儿旅行": @"com.qunar.iphone",
+            @"飞猪": @"com.taobao.trip", @"飞猪旅行": @"com.taobao.trip",
+            @"航旅纵横": @"com.umetrip.android",
+            @"飞常准": @"com.feeyo.fz",
+            @"metro大都会": @"com.shmetro.cdm", @"大都会": @"com.shmetro.cdm",
+            @"亿通行": @"com.bjsubway.yitongxing",
+            // 演艺演出与电影票务 (5+)
+            @"大麦": @"cn.damai.iphone", @"大麦网": @"cn.damai.iphone",
+            @"猫眼": @"com.sankuai.movie", @"猫眼电影": @"com.sankuai.movie",
+            @"淘票票": @"com.taobao.movie.android",
+            @"秀动": @"com.showstart.client",
+            @"摩天轮票务": @"com.motianlun.app", @"摩天轮": @"com.motianlun.app",
+            // 社交网络、社区与游戏 (18+)
+            @"qq": @"com.tencent.mqq",
+            @"小红书": @"com.xingin.discover", @"xhs": @"com.xingin.discover",
+            @"微博": @"com.sina.weibo", @"新浪微博": @"com.sina.weibo",
+            @"知乎": @"com.zhihu.ios",
+            @"哔哩哔哩": @"tv.danmaku.bilianime", @"b站": @"tv.danmaku.bilianime",
+            @"抖音": @"com.ss.iphone.ugc.Aweme",
+            @"快手": @"com.jiangjia.gif",
+            @"贴吧": @"com.baidu.tieba", @"百度贴吧": @"com.baidu.tieba",
+            @"豆瓣": @"com.douban.frodo",
+            @"虎扑": @"com.hupu.games",
+            @"米游社": @"com.miHoYo.mhybbs",
+            @"小黑盒": @"com.max.xiaoheihe",
+            @"taptap": @"com.taptap",
+            // 音乐播客与视频流媒体 (18+)
+            @"网易云音乐": @"com.netease.cloudmusic", @"网易云": @"com.netease.cloudmusic",
+            @"qq音乐": @"com.tencent.QQMusic",
+            @"酷狗音乐": @"com.kugou.kugoumusic", @"酷狗": @"com.kugou.kugoumusic",
+            @"酷我音乐": @"cn.kuwo.player", @"酷我": @"cn.kuwo.player",
+            @"汽水音乐": @"com.luna.music",
+            @"喜马拉雅": @"com.gemd.iting",
+            @"小宇宙": @"app.podcast.cosmos",
+            @"荔枝fm": @"com.lizhi.fm", @"荔枝": @"com.lizhi.fm",
+            @"蜻蜓fm": @"com.qingting.fm", @"蜻蜓": @"com.qingting.fm",
+            @"爱奇艺": @"com.qiyi.iphone",
+            @"腾讯视频": @"com.tencent.live4iphone",
+            @"优酷": @"com.youku.YouKu", @"优酷视频": @"com.youku.YouKu",
+            @"芒果tv": @"com.mgtv.app",
+            @"斗鱼": @"com.douyu.iphone", @"斗鱼直播": @"com.douyu.iphone",
+            @"虎牙": @"com.huya.iphone", @"虎牙直播": @"com.huya.iphone",
+            // 阅读文学与外语考研 (16+)
+            @"欧路词典": @"com.eusoft.eudic",
+            @"有道词典": @"com.youdao.dict", @"网易有道词典": @"com.youdao.dict",
+            @"微信读书": @"com.tencent.weread",
+            @"百词斩": @"com.baicizhan.word",
+            @"多邻国": @"com.duolingo.DuolingoMobile",
+            @"学习强国": @"cn.xuexi.android",
+            @"得到": @"com.luojilab.player",
+            @"起点读书": @"com.qidian.QDReader", @"起点": @"com.qidian.QDReader",
+            @"晋江文学城": @"com.jjwxc.reader", @"晋江": @"com.jjwxc.reader",
+            @"番茄小说": @"com.dragon.read", @"番茄免费小说": @"com.dragon.read",
+            @"快看漫画": @"com.kuaikan.comic", @"快看": @"com.kuaikan.comic",
+            @"哔哩哔哩漫画": @"com.bilibili.comic", @"b站漫画": @"com.bilibili.comic",
+            @"掌阅": @"com.chaozh.iReaderFree",
+            // 协同办公、云盘与效率 (16+)
+            @"钉钉": @"com.laiwang.DingTalk",
+            @"飞书": @"com.electron.lark",
+            @"企业微信": @"com.tencent.wework",
+            @"腾讯会议": @"com.tencent.meeting",
+            @"wps": @"com.kingsoft.office", @"wps office": @"com.kingsoft.office",
+            @"百度网盘": @"com.baidu.netdisk",
+            @"阿里云盘": @"com.alicloud.databox",
+            @"夸克": @"com.ucweb.iphone.quark",
+            @"滴答清单": @"com.ticktick.task",
+            @"扫描全能王": @"com.intsig.CamScanner",
+            @"白描": @"com.baimiao.app",
+            @"语雀": @"com.antgroup.yuque",
+            @"石墨文档": @"com.shimo.client",
+            @"幕布": @"com.mubu.app",
+            // 快递物流与跑腿 (6+)
+            @"菜鸟": @"com.cainiao.logistic", @"菜鸟裹裹": @"com.cainiao.logistic",
+            @"顺丰速运": @"com.sf-express.SFClient", @"顺丰": @"com.sf-express.SFClient",
+            @"丰巢": @"com.fcbox.app",
+            @"货拉拉": @"com.huolala.client",
+            @"闪送": @"com.ishansong.client",
+            // 三大运营商掌厅 (3+)
+            @"中国移动": @"com.greenpoint.android.mc10086.activity", @"10086": @"com.greenpoint.android.mc10086.activity",
+            @"中国联通": @"com.sinovatech.unicom.ui", @"10010": @"com.sinovatech.unicom.ui",
+            @"中国电信": @"cn.com.chinatelecom.ChinaTelecom", @"10000": @"cn.com.chinatelecom.ChinaTelecom",
+            // 交管政务与民生办事 (7+)
+            @"交管12123": @"com.tmri.12123", @"12123": @"com.tmri.12123",
+            @"个人所得税": @"com.chinatax.taxpayer",
+            @"随申办": @"com.wondertek.activity", @"随申办市民云": @"com.wondertek.activity",
+            @"浙里办": @"com.hanweb.zjdss",
+            @"58同城": @"com.wuba.Life",
+            // 新能源车机互联与汽车 (9+)
+            @"蔚来": @"cn.com.weilai.car",
+            @"小鹏汽车": @"com.xiaopeng.mycar", @"小鹏": @"com.xiaopeng.mycar",
+            @"理想汽车": @"com.chehejia.lixiang", @"理想": @"com.chehejia.lixiang",
+            @"比亚迪": @"com.byd.auto",
+            @"特斯拉": @"com.teslamotors.Tesla", @"tesla": @"com.teslamotors.Tesla",
+            @"懂车帝": @"com.ss.android.auto",
+            @"汽车之家": @"com.cubic.autohome",
+            @"易车": @"com.yiche.autoeasy",
+            @"瓜子二手车": @"com.guazi.app",
+            // 智能家居与 IoT (6+)
+            @"米家": @"com.xiaomi.mihome",
+            @"华为智慧生活": @"com.huawei.smarthome", @"智慧生活": @"com.huawei.smarthome",
+            @"美的美居": @"com.midea.ai.home",
+            @"海尔智家": @"com.haier.uhome",
+            @"贝壳找房": @"com.lianjia.beike", @"贝壳": @"com.lianjia.beike",
+            @"安居客": @"com.anjuke.iphone",
+            // 剪辑修图、求职与证券 (12+)
+            @"剪映": @"com.lemon.lv",
+            @"美图秀秀": @"com.mt.mtxx",
+            @"醒图": @"com.bytedance.snapseed",
+            @"boss直聘": @"com.hpbr.bosszhipin",
+            @"智联招聘": @"com.zhaopin.iphone",
+            @"猎聘": @"com.liepin.hunter",
+            @"同花顺": @"com.hexin.plat.android",
+            @"东方财富": @"com.eastmoney.iphone",
+            @"雪球": @"com.xueqiu",
+            @"富途牛牛": @"com.futu.futu",
+            // 国产大模型 AI 助手 (4+)
+            @"豆包": @"com.bytedance.doubao",
+            @"kimi": @"ai.moonshot.kimi",
+            @"智谱清言": @"cn.zhipu.chatglm",
+            @"文心一言": @"com.baidu.yiyan",
+            // iOS 系统原生功能
+            @"设置": @"com.apple.Preferences",
+            @"相机": @"com.apple.camera",
             @"相册": @"com.apple.mobileslideshow", @"照片": @"com.apple.mobileslideshow",
             @"safari": @"com.apple.mobilesafari", @"浏览器": @"com.apple.mobilesafari",
-            @"电话": @"com.apple.mobilephone", @"短信": @"com.apple.MobileSMS",
-            @"信息": @"com.apple.MobileSMS", @"备忘录": @"com.apple.mobilenotes",
-            @"日历": @"com.apple.mobilecal", @"闹钟": @"com.apple.mobiletimer",
-            @"时钟": @"com.apple.mobiletimer", @"计算器": @"com.apple.calculator",
-            @"天气": @"com.apple.weather", @"股市": @"com.apple.stocks", @"股票": @"com.apple.stocks",
-            @"快捷指令": @"com.apple.shortcuts", @"文件": @"com.apple.DocumentsApp",
+            @"电话": @"com.apple.mobilephone",
+            @"短信": @"com.apple.MobileSMS", @"信息": @"com.apple.MobileSMS",
+            @"备忘录": @"com.apple.mobilenotes",
+            @"日历": @"com.apple.mobilecal",
+            @"闹钟": @"com.apple.mobiletimer", @"时钟": @"com.apple.mobiletimer",
+            @"计算器": @"com.apple.calculator",
+            @"天气": @"com.apple.weather",
+            @"股市": @"com.apple.stocks", @"股票": @"com.apple.stocks",
+            @"快捷指令": @"com.apple.shortcuts",
+            @"文件": @"com.apple.DocumentsApp",
             @"appstore": @"com.apple.AppStore", @"应用商店": @"com.apple.AppStore",
-            @"微博": @"com.sina.weibo", @"知乎": @"com.zhihu.ios",
-            @"钉钉": @"com.laiwang.DingTalk", @"飞书": @"com.electron.lark", @"企业微信": @"com.tencent.wework",
-            @"闲鱼": @"com.taobao.fleamarket", @"饿了么": @"me.ele.ios.eleme", @"夸克": @"com.ucweb.iphone.quark",
-            @"酷狗音乐": @"com.kugou.kugoumusic", @"qq邮箱": @"com.tencent.qqmail", @"微信读书": @"com.tencent.weread",
-            @"filza": @"com.tigisoftware.Filza", @"zebra": @"xyz.willy.Zebra", @"斑马": @"xyz.willy.Zebra",
-            @"sileo": @"org.coolstar.SileoStore"
+            @"地图": @"com.apple.Maps",
+            @"语音备忘录": @"com.apple.VoiceMemos", @"录音机": @"com.apple.VoiceMemos",
+            // 越狱工具
+            @"filza": @"com.tigisoftware.Filza",
+            @"zebra": @"xyz.willy.Zebra", @"斑马": @"xyz.willy.Zebra",
+            @"sileo": @"org.coolstar.SileoStore",
+            @"youtube": @"com.google.ios.youtube", @"油管": @"com.google.ios.youtube"
         };
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
@@ -6894,7 +7069,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         return YES;
     }
 
-    // 14. 🟢 微信 & 🔵 支付宝快捷功能直达
+    // 14. 🟢 移动支付、扫码、乘车码与生活服务深度直达
     if ([cmd containsString:@"微信"] && [cmd containsString:@"扫"]) {
         [self executeActionDictionary:@{@"type": @"wechat_shortcut", @"feature": @"scan"}];
         return YES;
@@ -6931,7 +7106,238 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         [self executeActionDictionary:@{@"type": @"alipay_shortcut", @"feature": @"receipt"}];
         return YES;
     }
+    if ([cmd containsString:@"蚂蚁森林"] || [cmd containsString:@"收能量"] || [cmd containsString:@"收取能量"]) {
+        [self openURLString:@"alipays://platformapi/startapp?appId=60000002"];
+        return YES;
+    }
+    if ([cmd containsString:@"蚂蚁庄园"] || [cmd containsString:@"喂小鸡"] || [cmd containsString:@"喂鸡"]) {
+        [self openURLString:@"alipays://platformapi/startapp?appId=66666674"];
+        return YES;
+    }
+    if ([cmd containsString:@"支付宝"] && ([cmd containsString:@"快递"] || [cmd containsString:@"查件"])) {
+        [self openURLString:@"alipays://platformapi/startapp?appId=20000754"];
+        return YES;
+    }
+    if ([cmd containsString:@"医保"] && ([cmd containsString:@"码"] || [cmd containsString:@"凭证"])) {
+        [self openURLString:@"alipays://platformapi/startapp?appId=20000067"];
+        return YES;
+    }
+    if ([cmd containsString:@"云闪付"] && [cmd containsString:@"扫"]) {
+        [self openURLString:@"upwallet://native/scanCode"];
+        return YES;
+    }
+    if ([cmd containsString:@"云闪付"] && ([cmd containsString:@"付"] || [cmd containsString:@"买单"])) {
+        [self openURLString:@"upwallet://pay"];
+        return YES;
+    }
+    if ([cmd containsString:@"云闪付"] && ([cmd containsString:@"乘车"] || [cmd containsString:@"公交"] || [cmd containsString:@"地铁"])) {
+        [self openURLString:@"upwallet://rn/rnhtmlridingcode"];
+        return YES;
+    }
+    if ([cmd containsString:@"淘宝"] && [cmd containsString:@"扫"]) {
+        [self openURLString:@"taobao://tb.cn/n/scancode"];
+        return YES;
+    }
+    if ([cmd containsString:@"淘宝"] && [cmd containsString:@"购物车"]) {
+        [self openURLString:@"taobao://m.taobao.com/cart"];
+        return YES;
+    }
+    if ([cmd containsString:@"京东"] && [cmd containsString:@"扫"]) {
+        [self openURLString:@"openapp.jdmobile://virtual?params=%7B%22category%22%3A%22jump%22%2C%22des%22%3A%22saoasao%22%7D"];
+        return YES;
+    }
+    if ([cmd containsString:@"京东"] && [cmd containsString:@"购物车"]) {
+        [self openURLString:@"openapp.jdmobile://virtual?params=%7B%22category%22%3A%22jump%22%2C%22des%22%3A%22cart%22%7D"];
+        return YES;
+    }
+    if ([cmd containsString:@"闲鱼"] && ([cmd containsString:@"发布"] || [cmd containsString:@"卖闲置"])) {
+        [self openURLString:@"fleamarket://publish"];
+        return YES;
+    }
+    if ([cmd containsString:@"微博"] && [cmd containsString:@"扫"]) {
+        [self openURLString:@"sinaweibo://qrcode"];
+        return YES;
+    }
+    if ([cmd containsString:@"钉钉"] && [cmd containsString:@"扫"]) {
+        [self openURLString:@"dingtalk://dingtalkclient/page/scan"];
+        return YES;
+    }
+    if ([cmd containsString:@"飞书"] && [cmd containsString:@"扫"]) {
+        [self openURLString:@"feishu://applink.feishu.cn/client/qrcode"];
+        return YES;
+    }
+    if ([cmd containsString:@"58同城"] && [cmd containsString:@"扫"]) {
+        [self openURLString:@"wbmain://jump/core/capture"];
+        return YES;
+    }
+    if ([cmd containsString:@"菜鸟"] && ([cmd containsString:@"取件码"] || [cmd containsString:@"身份码"] || [cmd containsString:@"查件"])) {
+        [self openURLString:@"cainiao://desktop/station_code"];
+        return YES;
+    }
+    if (([cmd containsString:@"网易云"] || [cmd containsString:@"音乐"]) && [cmd containsString:@"听歌识曲"]) {
+        [self openURLString:@"orpheuswidget://recognize"];
+        return YES;
+    }
+    if ([cmd containsString:@"网易云"] && [cmd containsString:@"私人fm"]) {
+        [self openURLString:@"orpheuswidget://radio"];
+        return YES;
+    }
+    if ([cmd containsString:@"qq音乐"] && [cmd containsString:@"听歌识曲"]) {
+        [self openURLString:@"qqmusic://qq.com/ui/recognize"];
+        return YES;
+    }
+    if ([cmd containsString:@"滴答清单"] && ([cmd containsString:@"今天"] || [cmd containsString:@"今日"] || [cmd containsString:@"查看待办"])) {
+        [self openURLString:@"ticktick://v1/show?smartlist=today"];
+        return YES;
+    }
+    if ([cmd containsString:@"查违章"] || [cmd containsString:@"处理违章"] || [cmd containsString:@"驾照扣分"]) {
+        [self openURLString:@"tmri12123://"];
+        return YES;
+    }
+    if ([cmd containsString:@"个人所得税"] || [cmd containsString:@"个税汇算"] || [cmd containsString:@"查个税"]) {
+        [self openURLString:@"taxpayer://"];
+        return YES;
+    }
+    if ([cmd containsString:@"随申办"] || [cmd containsString:@"上海随申办"]) {
+        [self openURLString:@"suishenban://"];
+        return YES;
+    }
+    if ([cmd containsString:@"浙里办"]) {
+        [self openURLString:@"zheliban://"];
+        return YES;
+    }
+    if ([cmd containsString:@"大都会"] && ([cmd containsString:@"地铁"] || [cmd containsString:@"刷码"])) {
+        [self openURLString:@"metrodadouhui://"];
+        return YES;
+    }
+    if ([cmd containsString:@"亿通行"] && ([cmd containsString:@"地铁"] || [cmd containsString:@"乘车"])) {
+        [self openURLString:@"yitongxing://"];
+        return YES;
+    }
+    if ([cmd containsString:@"知乎"] && [cmd containsString:@"热榜"]) {
+        [self openURLString:@"zhihu://billboard"];
+        return YES;
+    }
+    if ([cmd containsString:@"b站"] && [cmd containsString:@"动态"]) {
+        [self openURLString:@"bilibili://following/home"];
+        return YES;
+    }
+    if ([cmd containsString:@"拍抖音"] || ([cmd containsString:@"抖音"] && [cmd containsString:@"拍视频"])) {
+        [self openURLString:@"snssdk1128://openRecord"];
+        return YES;
+    }
+    if ([cmd containsString:@"发小红书"] || ([cmd containsString:@"小红书"] && [cmd containsString:@"发笔记"])) {
+        [self openURLString:@"xhsdiscover://post"];
+        return YES;
+    }
 
+    // 14B. ⚙️ iOS 深度系统设置直达 (40+ 项设置面板秒开)
+    if ([cmd containsString:@"设置"] || [cmd containsString:@"开关"]) {
+        if ([cmd containsString:@"wifi"] || [cmd containsString:@"wi-fi"] || [cmd containsString:@"无线网"] || [cmd containsString:@"局域网"]) {
+            [self openURLString:@"App-prefs:root=WIFI"];
+            return YES;
+        }
+        if ([cmd containsString:@"蓝牙"]) {
+            [self openURLString:@"App-prefs:root=Bluetooth"];
+            return YES;
+        }
+        if ([cmd containsString:@"蜂窝"] || [cmd containsString:@"移动网络"] || [cmd containsString:@"流量"]) {
+            [self openURLString:@"App-prefs:root=MOBILE_DATA_SETTINGS_ID"];
+            return YES;
+        }
+        if ([cmd containsString:@"热点"] || [cmd containsString:@"个人热点"]) {
+            [self openURLString:@"App-prefs:root=INTERNET_TETHERING"];
+            return YES;
+        }
+        if ([cmd containsString:@"vpn"]) {
+            [self openURLString:@"App-prefs:root=VPN"];
+            return YES;
+        }
+        if ([cmd containsString:@"电池"] || [cmd containsString:@"健康"]) {
+            [self openURLString:@"App-prefs:root=BATTERY_USAGE"];
+            return YES;
+        }
+        if ([cmd containsString:@"显示"] || [cmd containsString:@"亮度"]) {
+            [self openURLString:@"App-prefs:root=DISPLAY"];
+            return YES;
+        }
+        if ([cmd containsString:@"自动锁定"] || [cmd containsString:@"息屏时间"]) {
+            [self openURLString:@"App-prefs:root=DISPLAY&path=AUTOLOCK"];
+            return YES;
+        }
+        if ([cmd containsString:@"声音"] || [cmd containsString:@"铃声"] || [cmd containsString:@"触感"]) {
+            [self openURLString:@"App-prefs:root=Sounds"];
+            return YES;
+        }
+        if ([cmd containsString:@"通知"]) {
+            [self openURLString:@"App-prefs:root=NOTIFICATIONS_ID"];
+            return YES;
+        }
+        if ([cmd containsString:@"专注模式"] || [cmd containsString:@"勿扰"]) {
+            [self openURLString:@"App-prefs:root=DO_NOT_DISTURB"];
+            return YES;
+        }
+        if ([cmd containsString:@"屏幕使用时间"]) {
+            [self openURLString:@"App-prefs:root=SCREEN_TIME"];
+            return YES;
+        }
+        if ([cmd containsString:@"通用"]) {
+            [self openURLString:@"App-prefs:root=General"];
+            return YES;
+        }
+        if ([cmd containsString:@"关于本机"] || [cmd containsString:@"序列号"]) {
+            [self openURLString:@"App-prefs:root=General&path=About"];
+            return YES;
+        }
+        if ([cmd containsString:@"软件更新"] || [cmd containsString:@"系统更新"]) {
+            [self openURLString:@"App-prefs:root=General&path=SOFTWARE_UPDATE_LINK"];
+            return YES;
+        }
+        if ([cmd containsString:@"存储空间"] || [cmd containsString:@"储存空间"] || [cmd containsString:@"清理手机"]) {
+            [self openURLString:@"App-prefs:root=General&path=STORAGE_MGMT"];
+            return YES;
+        }
+        if ([cmd containsString:@"隔空投送"] || [cmd containsString:@"airdrop"]) {
+            [self openURLString:@"App-prefs:root=General&path=AIRDROP_LINK"];
+            return YES;
+        }
+        if ([cmd containsString:@"carplay"] || [cmd containsString:@"车载"]) {
+            [self openURLString:@"App-prefs:root=General&path=CARPLAY"];
+            return YES;
+        }
+        if ([cmd containsString:@"日期"] || [cmd containsString:@"时间"]) {
+            [self openURLString:@"App-prefs:root=General&path=DATE_AND_TIME"];
+            return YES;
+        }
+        if ([cmd containsString:@"键盘"] || [cmd containsString:@"输入法"]) {
+            [self openURLString:@"App-prefs:root=General&path=Keyboard"];
+            return YES;
+        }
+        if ([cmd containsString:@"辅助功能"]) {
+            [self openURLString:@"App-prefs:root=ACCESSIBILITY"];
+            return YES;
+        }
+        if ([cmd containsString:@"小白点"] || [cmd containsString:@"辅助触控"]) {
+            [self openURLString:@"App-prefs:root=ACCESSIBILITY&path=TOUCH_RE_TITLE"];
+            return YES;
+        }
+        if ([cmd containsString:@"壁纸"] || [cmd containsString:@"墙纸"]) {
+            [self openURLString:@"App-prefs:root=Wallpaper"];
+            return YES;
+        }
+        if ([cmd containsString:@"面容"] || [cmd containsString:@"密码"] || [cmd containsString:@"face id"]) {
+            [self openURLString:@"App-prefs:root=PASSCODE"];
+            return YES;
+        }
+        if ([cmd containsString:@"定位"] || [cmd containsString:@"gps"]) {
+            [self openURLString:@"App-prefs:root=Privacy&path=LOCATION"];
+            return YES;
+        }
+        if ([cmd containsString:@"隐私"]) {
+            [self openURLString:@"App-prefs:root=Privacy"];
+            return YES;
+        }
+    }
     // 🛍️/🎬 各大电商与视频平台搜索（支持“打开淘宝搜索一下手机”、“去京东搜充电宝”、“在拼多多找纸巾”等全套口语）
     NSTextCheckingResult *searchMatch = [searchRegex firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
     if (searchMatch && searchMatch.numberOfRanges >= 3) {
@@ -7730,42 +8136,596 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
 - (void)handleSearchOnPlatform:(NSString *)platform keyword:(NSString *)keyword {
     if (!keyword || keyword.length == 0) return;
-    NSString *encoded = [keyword stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
-    NSString *plt = [platform lowercaseString];
+    NSString *cleanKw = [keyword stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *encoded = [cleanKw stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *plt = [[platform stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
     NSURL *targetURL = nil;
-    NSString *pillText = [NSString stringWithFormat:@"🔍 正在检索: %@...", keyword];
+    NSString *pillText = [NSString stringWithFormat:@"🔍 正在检索 %@...", cleanKw];
 
+    // 1. 电商购物与闲置特卖
     if ([plt containsString:@"taobao"] || [plt containsString:@"淘宝"]) {
-        pillText = [NSString stringWithFormat:@"🛍️ 正在淘宝搜索: %@...", keyword];
+        pillText = [NSString stringWithFormat:@"🛍️ 正在淘宝搜索: %@...", cleanKw];
         targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"taobao://s.taobao.com/search?q=%@", encoded]];
     } else if ([plt containsString:@"jd"] || [plt containsString:@"京东"]) {
-        pillText = [NSString stringWithFormat:@"📦 正在京东搜索: %@...", keyword];
-        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"openapp.jdmobile://virtual?params={\"category\":\"jump\",\"des\":\"productList\",\"keyWord\":\"%@\"}", encoded]];
-    } else if ([plt containsString:@"meituan"] || [plt containsString:@"美团"] || [plt containsString:@"外卖"]) {
-        pillText = [NSString stringWithFormat:@"🍔 正在美团搜索: %@...", keyword];
-        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"imeituan://www.meituan.com/search?keyword=%@", encoded]];
-    } else if ([plt containsString:@"douyin"] || [plt containsString:@"抖音"]) {
-        pillText = [NSString stringWithFormat:@"🎵 正在抖音搜索: %@...", keyword];
-        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"snssdk1128://search?keyword=%@", encoded]];
-    } else if ([plt containsString:@"bilibili"] || [plt containsString:@"b站"] || [plt containsString:@"哔哩哔哩"]) {
-        pillText = [NSString stringWithFormat:@"📺 正在B站搜索: %@...", keyword];
-        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"bilibili://search?keyword=%@", encoded]];
+        pillText = [NSString stringWithFormat:@"📦 正在京东搜索: %@...", cleanKw];
+        NSString *jdJson = [NSString stringWithFormat:@"{\"des\":\"productList\",\"keyWord\":\"%@\",\"from\":\"search\",\"category\":\"jump\"}", cleanKw];
+        NSString *encodedParams = [jdJson stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet alphanumericCharacterSet]];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"openapp.jdmobile://virtual?params=%@", encodedParams]];
     } else if ([plt containsString:@"pdd"] || [plt containsString:@"拼多多"]) {
-        pillText = [NSString stringWithFormat:@"🛍️ 正在拼多多搜索: %@...", keyword];
-        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"pinduoduo://com.xunmeng.pinduoduo/search_result.html?search_key=%@", encoded]];
+        pillText = [NSString stringWithFormat:@"🛍️ 正在拼多多搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"pinduoduo://yangkeduo.com/search_result.html?search_key=%@", encoded]];
+    } else if ([plt containsString:@"xianyu"] || [plt containsString:@"闲鱼"]) {
+        pillText = [NSString stringWithFormat:@"🐟 正在闲鱼搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"fleamarket://x_search_items?keyword=%@", encoded]];
+    } else if ([plt containsString:@"vip"] || [plt containsString:@"唯品会"]) {
+        pillText = [NSString stringWithFormat:@"👗 正在唯品会搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"vipshop://search?keyword=%@", encoded]];
+    } else if ([plt containsString:@"dewu"] || [plt containsString:@"得物"]) {
+        pillText = [NSString stringWithFormat:@"👟 正在得物查看: %@...", cleanKw];
+        [UIPasteboard generalPasteboard].string = cleanKw;
+        targetURL = [NSURL URLWithString:@"dewuapp://"];
+    } else if ([plt containsString:@"zhuanzhuan"] || [plt containsString:@"转转"]) {
+        pillText = [NSString stringWithFormat:@"🔄 正在转转搜索: %@...", cleanKw];
+        [UIPasteboard generalPasteboard].string = cleanKw;
+        targetURL = [NSURL URLWithString:@"zhuanzhuan://"];
+    } else if ([plt containsString:@"zlj"] || [plt containsString:@"找靓机"]) {
+        pillText = [NSString stringWithFormat:@"📱 正在找靓机搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"zlj://"];
+    } else if ([plt containsString:@"suning"] || [plt containsString:@"苏宁"]) {
+        pillText = [NSString stringWithFormat:@"🏬 正在苏宁易购搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"suning://"];
+    } else if ([plt containsString:@"dangdang"] || [plt containsString:@"当当"]) {
+        pillText = [NSString stringWithFormat:@"📚 正在当当网搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"dangdang://"];
+    } else if ([plt containsString:@"taobaolite"] || [plt containsString:@"淘特"]) {
+        pillText = [NSString stringWithFormat:@"🛍️ 正在淘特搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"taobaolite://"];
+    }
+    // 2. 本地生活与外卖餐饮
+    else if ([plt containsString:@"meituanwaimai"] || [plt containsString:@"美团外卖"]) {
+        pillText = [NSString stringWithFormat:@"🍔 正在美团外卖搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"meituanwaimai://waimai.meituan.com/search?query=%@", encoded]];
+    } else if ([plt containsString:@"meituan"] || [plt containsString:@"美团"]) {
+        pillText = [NSString stringWithFormat:@"🍔 正在美团搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"imeituan://www.meituan.com/search?q=%@", encoded]];
+    } else if ([plt containsString:@"eleme"] || [plt containsString:@"饿了么"]) {
+        pillText = [NSString stringWithFormat:@"🍱 正在饿了么搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"eleme://search?keyword=%@", encoded]];
+    } else if ([plt containsString:@"dianping"] || [plt containsString:@"大众点评"] || [plt containsString:@"点评"]) {
+        pillText = [NSString stringWithFormat:@"🍽️ 正在大众点评搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"dianping://search?keyword=%@", encoded]];
+    } else if ([plt containsString:@"hema"] || [plt containsString:@"盒马"]) {
+        pillText = [NSString stringWithFormat:@"🦛 正在盒马搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"freshhema://"];
+    } else if ([plt containsString:@"ddmc"] || [plt containsString:@"叮咚"]) {
+        pillText = [NSString stringWithFormat:@"🥦 正在叮咚买菜搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"ddmc://"];
+    } else if ([plt containsString:@"pupu"] || [plt containsString:@"朴朴"]) {
+        pillText = [NSString stringWithFormat:@"🛒 正在朴朴超市搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"pupu://"];
+    } else if ([plt containsString:@"sam"] || [plt containsString:@"山姆"]) {
+        pillText = [NSString stringWithFormat:@"🏬 正在山姆会员商店搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"samsclub://"];
+    } else if ([plt containsString:@"luckin"] || [plt containsString:@"瑞幸"]) {
+        pillText = [NSString stringWithFormat:@"☕ 正在打开瑞幸咖啡点单..."];
+        targetURL = [NSURL URLWithString:@"luckincoffee://"];
+    } else if ([plt containsString:@"heytea"] || [plt containsString:@"喜茶"]) {
+        pillText = [NSString stringWithFormat:@"🧋 正在打开喜茶点单..."];
+        targetURL = [NSURL URLWithString:@"heytea://"];
+    } else if ([plt containsString:@"starbucks"] || [plt containsString:@"星巴克"]) {
+        pillText = [NSString stringWithFormat:@"☕ 正在打开星巴克啡快..."];
+        targetURL = [NSURL URLWithString:@"starbucks://"];
+    } else if ([plt containsString:@"kfc"] || [plt containsString:@"肯德基"]) {
+        pillText = [NSString stringWithFormat:@"🍗 正在打开肯德基宅急送..."];
+        targetURL = [NSURL URLWithString:@"kfcapp://"];
+    } else if ([plt containsString:@"mcdonald"] || [plt containsString:@"麦当劳"]) {
+        pillText = [NSString stringWithFormat:@"🍟 正在打开麦当劳点餐..."];
+        targetURL = [NSURL URLWithString:@"mcdmobileapp://"];
+    } else if ([plt containsString:@"haidilao"] || [plt containsString:@"海底捞"]) {
+        pillText = [NSString stringWithFormat:@"🍲 正在打开海底捞火锅排号..."];
+        targetURL = [NSURL URLWithString:@"haidilao://"];
+    }
+    // 3. 社交网络、社区与潮流
+    else if ([plt containsString:@"douyin"] || [plt containsString:@"抖音"]) {
+        pillText = [NSString stringWithFormat:@"🎵 正在抖音搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"snssdk1128://search/?keyword=%@", encoded]];
+    } else if ([plt containsString:@"kuaishou"] || [plt containsString:@"快手"]) {
+        pillText = [NSString stringWithFormat:@"⚡ 正在快手搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"kwai://search?keyword=%@", encoded]];
+    } else if ([plt containsString:@"bilibili"] || [plt containsString:@"b站"] || [plt containsString:@"哔哩哔哩"]) {
+        pillText = [NSString stringWithFormat:@"📺 正在 B 站搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"bilibili://search?keyword=%@", encoded]];
     } else if ([plt containsString:@"xiaohongshu"] || [plt containsString:@"xhs"] || [plt containsString:@"小红书"]) {
-        pillText = [NSString stringWithFormat:@"📕 正在小红书搜索: %@...", keyword];
+        pillText = [NSString stringWithFormat:@"📕 正在小红书搜索: %@...", cleanKw];
         targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"xhsdiscover://search/result?keyword=%@", encoded]];
-    } else {
-        pillText = [NSString stringWithFormat:@"🔍 正在百度搜索: %@...", keyword];
-        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"https://www.baidu.com/s?wd=%@", encoded]];
+    } else if ([plt containsString:@"weibo"] || [plt containsString:@"微博"]) {
+        pillText = [NSString stringWithFormat:@"👁️ 正在微博搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"sinaweibo://searchall?q=%@", encoded]];
+    } else if ([plt containsString:@"zhihu"] || [plt containsString:@"知乎"]) {
+        pillText = [NSString stringWithFormat:@"💡 正在知乎搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"zhihu://search?q=%@", encoded]];
+    } else if ([plt containsString:@"douban"] || [plt containsString:@"豆瓣"]) {
+        pillText = [NSString stringWithFormat:@"🎬 正在豆瓣搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"douban://douban.com/search?q=%@", encoded]];
+    } else if ([plt containsString:@"tieba"] || [plt containsString:@"贴吧"]) {
+        pillText = [NSString stringWithFormat:@"💬 正在贴吧搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"com.baidu.tieba://?searchkey=%@", encoded]];
+    } else if ([plt containsString:@"hupu"] || [plt containsString:@"虎扑"]) {
+        pillText = [NSString stringWithFormat:@"🏀 正在虎扑查看: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"hupu://"];
+    } else if ([plt containsString:@"mihoyobbs"] || [plt containsString:@"米游社"]) {
+        pillText = [NSString stringWithFormat:@"🎮 正在打开米游社..."];
+        targetURL = [NSURL URLWithString:@"mihoyobbs://"];
+    } else if ([plt containsString:@"xiaoheihe"] || [plt containsString:@"小黑盒"]) {
+        pillText = [NSString stringWithFormat:@"🕹️ 正在打开小黑盒..."];
+        targetURL = [NSURL URLWithString:@"xiaoheihe://"];
+    } else if ([plt containsString:@"taptap"]) {
+        pillText = [NSString stringWithFormat:@"🎯 正在打开 TapTap 发现新游戏..."];
+        targetURL = [NSURL URLWithString:@"taptap://"];
+    }
+    // 4. 音频流媒体、音乐与播客
+    else if ([plt containsString:@"netease"] || [plt containsString:@"网易云"]) {
+        pillText = [NSString stringWithFormat:@"🎵 正在网易云搜歌: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"orpheus://song/search/%@", encoded]];
+    } else if ([plt containsString:@"qqmusic"] || [plt containsString:@"qq音乐"]) {
+        pillText = [NSString stringWithFormat:@"🎧 正在 QQ 音乐搜歌: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"qqmusic://search?key=%@", encoded]];
+    } else if ([plt containsString:@"kugou"] || [plt containsString:@"酷狗"]) {
+        pillText = [NSString stringWithFormat:@"🎵 正在酷狗音乐搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"kugouURL://"];
+    } else if ([plt containsString:@"kuwo"] || [plt containsString:@"酷我"]) {
+        pillText = [NSString stringWithFormat:@"🎶 正在酷我音乐搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"kuwo://"];
+    } else if ([plt containsString:@"qishui"] || [plt containsString:@"汽水音乐"]) {
+        pillText = [NSString stringWithFormat:@"🥤 正在打开汽水音乐..."];
+        targetURL = [NSURL URLWithString:@"qishui://"];
+    } else if ([plt containsString:@"ximalaya"] || [plt containsString:@"喜马拉雅"]) {
+        pillText = [NSString stringWithFormat:@"📻 正在喜马拉雅搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"iting://search?keyword=%@", encoded]];
+    } else if ([plt containsString:@"xiaoyuzhou"] || [plt containsString:@"小宇宙"]) {
+        pillText = [NSString stringWithFormat:@"🎙️ 正在小宇宙听播客..."];
+        targetURL = [NSURL URLWithString:@"xiaoyuzhou://"];
+    } else if ([plt containsString:@"lizhi"] || [plt containsString:@"荔枝"]) {
+        pillText = [NSString stringWithFormat:@"🎙️ 正在打开荔枝 FM..."];
+        targetURL = [NSURL URLWithString:@"lizhifm://"];
+    } else if ([plt containsString:@"qingting"] || [plt containsString:@"蜻蜓"]) {
+        pillText = [NSString stringWithFormat:@"📻 正在打开蜻蜓 FM 收音机..."];
+        targetURL = [NSURL URLWithString:@"qtfm://"];
+    } else if ([plt containsString:@"iqiyi"] || [plt containsString:@"爱奇艺"]) {
+        pillText = [NSString stringWithFormat:@"🎬 正在爱奇艺搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"iqiyi://mobile/webview?url=https%%3A%%2F%%2Fso.iqiyi.com%%2Fso%%2Fq_%@", encoded]];
+    } else if ([plt containsString:@"tenvideo"] || [plt containsString:@"腾讯视频"]) {
+        pillText = [NSString stringWithFormat:@"📺 正在腾讯视频搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"tenvideo://search?keyword=%@", encoded]];
+    } else if ([plt containsString:@"youku"] || [plt containsString:@"优酷"]) {
+        pillText = [NSString stringWithFormat:@"🎞️ 正在打开优酷视频..."];
+        targetURL = [NSURL URLWithString:@"youku://"];
+    } else if ([plt containsString:@"mgtv"] || [plt containsString:@"芒果"]) {
+        pillText = [NSString stringWithFormat:@"🥭 正在打开芒果 TV 看综艺..."];
+        targetURL = [NSURL URLWithString:@"mgtv://"];
+    } else if ([plt containsString:@"douyu"] || [plt containsString:@"斗鱼"]) {
+        pillText = [NSString stringWithFormat:@"🐟 正在打开斗鱼看直播..."];
+        targetURL = [NSURL URLWithString:@"douyutv://"];
+    } else if ([plt containsString:@"huya"] || [plt containsString:@"虎牙"]) {
+        pillText = [NSString stringWithFormat:@"🐯 正在打开虎牙看直播..."];
+        targetURL = [NSURL URLWithString:@"huya://"];
+    }
+    // 5. 地图导航、出行与打车
+    else if ([plt containsString:@"amap"] || [plt containsString:@"高德"]) {
+        pillText = [NSString stringWithFormat:@"🗺️ 正在高德搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"iosamap://poi?sourceApplication=TimeGuardian&name=%@", encoded]];
+    } else if ([plt containsString:@"baidumap"] || [plt containsString:@"百度地图"]) {
+        pillText = [NSString stringWithFormat:@"🗺️ 正在百度地图搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"baidumap://map/place/search?query=%@&src=TimeGuardian", encoded]];
+    } else if ([plt containsString:@"qqmap"] || [plt containsString:@"腾讯地图"]) {
+        pillText = [NSString stringWithFormat:@"🗺️ 正在腾讯地图搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"qqmap://map/search?keyword=%@", encoded]];
+    } else if ([plt containsString:@"didi"] || [plt containsString:@"滴滴"]) {
+        pillText = [NSString stringWithFormat:@"🚖 正在打开滴滴打车..."];
+        targetURL = [NSURL URLWithString:@"diditaxi://"];
+    } else if ([plt containsString:@"huaxiaozhu"] || [plt containsString:@"花小猪"]) {
+        pillText = [NSString stringWithFormat:@"🐷 正在打开花小猪打车..."];
+        targetURL = [NSURL URLWithString:@"huaxiaozhu://"];
+    } else if ([plt containsString:@"hellobike"] || [plt containsString:@"哈啰"]) {
+        pillText = [NSString stringWithFormat:@"🚲 正在打开哈啰单车/打车..."];
+        targetURL = [NSURL URLWithString:@"hellobike://"];
+    } else if ([plt containsString:@"t3"]) {
+        pillText = [NSString stringWithFormat:@"🚗 正在打开 T3 出行叫车..."];
+        targetURL = [NSURL URLWithString:@"t3travel://"];
+    } else if ([plt containsString:@"caocao"] || [plt containsString:@"曹操"]) {
+        pillText = [NSString stringWithFormat:@"🚗 正在打开曹操出行..."];
+        targetURL = [NSURL URLWithString:@"caocao://"];
+    } else if ([plt containsString:@"12306"] || [plt containsString:@"火车票"]) {
+        pillText = [NSString stringWithFormat:@"🚄 正在打开 12306 火车票..."];
+        targetURL = [NSURL URLWithString:@"cn.12306.railway://"];
+    } else if ([plt containsString:@"zhixing"] || [plt containsString:@"智行"]) {
+        pillText = [NSString stringWithFormat:@"🎫 正在打开智行火车票抢票..."];
+        targetURL = [NSURL URLWithString:@"zhixing://"];
+    } else if ([plt containsString:@"ctrip"] || [plt containsString:@"携程"]) {
+        pillText = [NSString stringWithFormat:@"✈️ 正在携程搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"ctrip://"];
+    } else if ([plt containsString:@"qunar"] || [plt containsString:@"去哪儿"]) {
+        pillText = [NSString stringWithFormat:@"✈️ 正在去哪儿比价: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"qunarphone://"];
+    } else if ([plt containsString:@"fliggy"] || [plt containsString:@"飞猪"]) {
+        pillText = [NSString stringWithFormat:@"🛫 正在飞猪旅行搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"alitrip://"];
+    } else if ([plt containsString:@"umetrip"] || [plt containsString:@"航旅纵横"]) {
+        pillText = [NSString stringWithFormat:@"🛫 正在航旅纵横追踪航班..."];
+        targetURL = [NSURL URLWithString:@"umetrip://"];
+    } else if ([plt containsString:@"variflight"] || [plt containsString:@"飞常准"]) {
+        pillText = [NSString stringWithFormat:@"✈️ 正在飞常准查延误..."];
+        targetURL = [NSURL URLWithString:@"variflight://"];
+    } else if ([plt containsString:@"dadouhui"] || [plt containsString:@"大都会"]) {
+        pillText = [NSString stringWithFormat:@"🚇 正在打开 Metro 大都会刷码坐地铁..."];
+        targetURL = [NSURL URLWithString:@"metrodadouhui://"];
+    } else if ([plt containsString:@"yitongxing"] || [plt containsString:@"亿通行"]) {
+        pillText = [NSString stringWithFormat:@"🚇 正在打开亿通行刷码乘车..."];
+        targetURL = [NSURL URLWithString:@"yitongxing://"];
+    }
+    // 6. 演艺演出与电影票务
+    else if ([plt containsString:@"damai"] || [plt containsString:@"大麦"]) {
+        pillText = [NSString stringWithFormat:@"🎤 正在大麦网搜索演出: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"damai://"];
+    } else if ([plt containsString:@"showstart"] || [plt containsString:@"秀动"]) {
+        pillText = [NSString stringWithFormat:@"🎸 正在秀动看 Livehouse 演出..."];
+        targetURL = [NSURL URLWithString:@"showstart://"];
+    } else if ([plt containsString:@"maoyan"] || [plt containsString:@"猫眼"]) {
+        pillText = [NSString stringWithFormat:@"🎟️ 正在猫眼看电影票: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"meituanmovie://"];
+    } else if ([plt containsString:@"taopiaopiao"] || [plt containsString:@"淘票票"]) {
+        pillText = [NSString stringWithFormat:@"🍿 正在淘票票选座购票..."];
+        targetURL = [NSURL URLWithString:@"taopiaopiao://"];
+    } else if ([plt containsString:@"motianlun"] || [plt containsString:@"摩天轮"]) {
+        pillText = [NSString stringWithFormat:@"🎡 正在摩天轮看折扣演出票..."];
+        targetURL = [NSURL URLWithString:@"motianlun://"];
+    }
+    // 7. 协同办公、工具与学习效率
+    else if ([plt containsString:@"dingtalk"] || [plt containsString:@"钉钉"]) {
+        pillText = [NSString stringWithFormat:@"💼 正在打开钉钉..."];
+        targetURL = [NSURL URLWithString:@"dingtalk://"];
+    } else if ([plt containsString:@"feishu"] || [plt containsString:@"飞书"]) {
+        pillText = [NSString stringWithFormat:@"🕊️ 正在打开飞书工作台..."];
+        targetURL = [NSURL URLWithString:@"feishu://"];
+    } else if ([plt containsString:@"wemeet"] || [plt containsString:@"腾讯会议"]) {
+        pillText = [NSString stringWithFormat:@"👥 正在加入腾讯会议: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"wemeet://page/inmeeting?meeting_code=%@", encoded]];
+    } else if ([plt containsString:@"wxwork"] || [plt containsString:@"企业微信"]) {
+        pillText = [NSString stringWithFormat:@"💼 正在打开企业微信..."];
+        targetURL = [NSURL URLWithString:@"wxwork://"];
+    } else if ([plt containsString:@"wps"]) {
+        pillText = [NSString stringWithFormat:@"📄 正在打开 WPS Office 查看文档..."];
+        targetURL = [NSURL URLWithString:@"KingsoftOfficeApp://"];
+    } else if ([plt containsString:@"baiduyun"] || [plt containsString:@"百度网盘"]) {
+        pillText = [NSString stringWithFormat:@"☁️ 正在打开百度网盘..."];
+        targetURL = [NSURL URLWithString:@"baiduyun://"];
+    } else if ([plt containsString:@"alipan"] || [plt containsString:@"阿里云盘"]) {
+        pillText = [NSString stringWithFormat:@"☁️ 正在打开阿里云盘..."];
+        targetURL = [NSURL URLWithString:@"alipan://"];
+    } else if ([plt containsString:@"quark"] || [plt containsString:@"夸克"]) {
+        pillText = [NSString stringWithFormat:@"🔬 正在打开夸克搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"quark://"];
+    } else if ([plt containsString:@"ticktick"] || [plt containsString:@"滴答清单"]) {
+        pillText = [NSString stringWithFormat:@"✅ 正在滴答清单添加待办: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"ticktick://v1/add?title=%@", encoded]];
+    } else if ([plt containsString:@"camscanner"] || [plt containsString:@"扫描全能王"]) {
+        pillText = [NSString stringWithFormat:@"📷 正在打开扫描全能王..."];
+        targetURL = [NSURL URLWithString:@"camscanner://"];
+    } else if ([plt containsString:@"baimiao"] || [plt containsString:@"白描"]) {
+        pillText = [NSString stringWithFormat:@"📝 正在打开白描 OCR 提取文字..."];
+        targetURL = [NSURL URLWithString:@"baimiao://"];
+    } else if ([plt containsString:@"eudic"] || [plt containsString:@"欧路词典"]) {
+        pillText = [NSString stringWithFormat:@"📖 正在欧路词典查询: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"eudic://dict/%@", encoded]];
+    } else if ([plt containsString:@"youdao"] || [plt containsString:@"有道词典"] || [plt containsString:@"有道"]) {
+        pillText = [NSString stringWithFormat:@"📖 正在有道词典查询: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"yddictproapp://search?word=%@", encoded]];
+    } else if ([plt containsString:@"weread"] || [plt containsString:@"微信读书"]) {
+        pillText = [NSString stringWithFormat:@"📚 正在打开微信读书..."];
+        targetURL = [NSURL URLWithString:@"weread://"];
+    } else if ([plt containsString:@"baicizhan"] || [plt containsString:@"百词斩"]) {
+        pillText = [NSString stringWithFormat:@"🔤 正在打开百词斩背单词..."];
+        targetURL = [NSURL URLWithString:@"baicizhan://"];
+    } else if ([plt containsString:@"duolingo"] || [plt containsString:@"多邻国"]) {
+        pillText = [NSString stringWithFormat:@"🦉 正在打开多邻国打卡..."];
+        targetURL = [NSURL URLWithString:@"duolingo://"];
+    } else if ([plt containsString:@"xuexi"] || [plt containsString:@"学习强国"]) {
+        pillText = [NSString stringWithFormat:@"🇨🇳 正在打开学习强国..."];
+        targetURL = [NSURL URLWithString:@"xuexi://"];
+    } else if ([plt containsString:@"luojilab"] || [plt containsString:@"得到"]) {
+        pillText = [NSString stringWithFormat:@"💡 正在打开得到听课程..."];
+        targetURL = [NSURL URLWithString:@"luojilab://"];
+    } else if ([plt containsString:@"qidian"] || [plt containsString:@"起点"]) {
+        pillText = [NSString stringWithFormat:@"📖 正在起点读书阅读小说..."];
+        targetURL = [NSURL URLWithString:@"qidian://"];
+    } else if ([plt containsString:@"jjwxc"] || [plt containsString:@"晋江"]) {
+        pillText = [NSString stringWithFormat:@"🌸 正在打开晋江文学城..."];
+        targetURL = [NSURL URLWithString:@"jjwxc://"];
+    } else if ([plt containsString:@"dragonread"] || [plt containsString:@"番茄小说"]) {
+        pillText = [NSString stringWithFormat:@"🍅 正在打开番茄免费小说..."];
+        targetURL = [NSURL URLWithString:@"dragonread://"];
+    } else if ([plt containsString:@"kuaikan"] || [plt containsString:@"快看漫画"]) {
+        pillText = [NSString stringWithFormat:@"🎨 正在打开快看漫画..."];
+        targetURL = [NSURL URLWithString:@"kuaikan://"];
+    } else if ([plt containsString:@"bilibilimanga"] || [plt containsString:@"b站漫画"]) {
+        pillText = [NSString stringWithFormat:@"📕 正在打开 B 站漫画..."];
+        targetURL = [NSURL URLWithString:@"bilibilimanga://"];
+    } else if ([plt containsString:@"ireader"] || [plt containsString:@"掌阅"]) {
+        pillText = [NSString stringWithFormat:@"📱 正在打开掌阅 iReader..."];
+        targetURL = [NSURL URLWithString:@"ireader://"];
+    } else if ([plt containsString:@"yuque"] || [plt containsString:@"语雀"]) {
+        pillText = [NSString stringWithFormat:@"🐦 正在打开语雀知识库..."];
+        targetURL = [NSURL URLWithString:@"yuque://"];
+    } else if ([plt containsString:@"shimo"] || [plt containsString:@"石墨"]) {
+        pillText = [NSString stringWithFormat:@"📝 正在打开石墨文档..."];
+        targetURL = [NSURL URLWithString:@"shimo://"];
+    } else if ([plt containsString:@"mubu"] || [plt containsString:@"幕布"]) {
+        pillText = [NSString stringWithFormat:@"🌳 正在打开幕布做思维导图..."];
+        targetURL = [NSURL URLWithString:@"mubu://"];
+    }
+    // 8. 快递物流与跑腿
+    else if ([plt containsString:@"cainiao"] || [plt containsString:@"菜鸟"]) {
+        pillText = [NSString stringWithFormat:@"📦 正在打开菜鸟取件码..."];
+        targetURL = [NSURL URLWithString:@"cainiao://desktop/station_code"];
+    } else if ([plt containsString:@"sfexpress"] || [plt containsString:@"顺丰"]) {
+        pillText = [NSString stringWithFormat:@"📦 正在打开顺丰速运..."];
+        targetURL = [NSURL URLWithString:@"sfexpress://"];
+    } else if ([plt containsString:@"fcbox"] || [plt containsString:@"丰巢"]) {
+        pillText = [NSString stringWithFormat:@"📬 正在打开丰巢智能柜取件..."];
+        targetURL = [NSURL URLWithString:@"fcbox://"];
+    } else if ([plt containsString:@"huolala"] || [plt containsString:@"货拉拉"]) {
+        pillText = [NSString stringWithFormat:@"🚚 正在打开货拉拉拉货/搬家..."];
+        targetURL = [NSURL URLWithString:@"huolala://"];
+    } else if ([plt containsString:@"shansong"] || [plt containsString:@"闪送"]) {
+        pillText = [NSString stringWithFormat:@"⚡ 正在打开闪送专人急送..."];
+        targetURL = [NSURL URLWithString:@"ishansong://"];
+    }
+    // 9. 三大运营商掌厅
+    else if ([plt containsString:@"chinamobile"] || [plt containsString:@"移动"] || [plt containsString:@"10086"]) {
+        pillText = [NSString stringWithFormat:@"📱 正在打开中国移动掌厅查话费..."];
+        targetURL = [NSURL URLWithString:@"chinamobile://"];
+    } else if ([plt containsString:@"unicom"] || [plt containsString:@"联通"] || [plt containsString:@"10010"]) {
+        pillText = [NSString stringWithFormat:@"📱 正在打开中国联通营业厅..."];
+        targetURL = [NSURL URLWithString:@"unicomclient://"];
+    } else if ([plt containsString:@"ctclient"] || [plt containsString:@"电信"] || [plt containsString:@"10000"]) {
+        pillText = [NSString stringWithFormat:@"📱 正在打开中国电信掌厅..."];
+        targetURL = [NSURL URLWithString:@"ctclient://"];
+    }
+    // 10. 交管政务、社保办事与地方一网通办
+    else if ([plt containsString:@"12123"] || [plt containsString:@"违章"] || [plt containsString:@"交管"]) {
+        pillText = [NSString stringWithFormat:@"👮 正在打开交管12123查违章..."];
+        targetURL = [NSURL URLWithString:@"tmri12123://"];
+    } else if ([plt containsString:@"taxpayer"] || [plt containsString:@"个税"] || [plt containsString:@"个人所得税"]) {
+        pillText = [NSString stringWithFormat:@"🧾 正在打开个人所得税汇算清缴..."];
+        targetURL = [NSURL URLWithString:@"taxpayer://"];
+    } else if ([plt containsString:@"suishenban"] || [plt containsString:@"随申办"]) {
+        pillText = [NSString stringWithFormat:@"🏙️ 正在打开上海随申办一网通办..."];
+        targetURL = [NSURL URLWithString:@"suishenban://"];
+    } else if ([plt containsString:@"zheliban"] || [plt containsString:@"浙里办"]) {
+        pillText = [NSString stringWithFormat:@"🏛️ 正在打开浙江浙里办政务服务..."];
+        targetURL = [NSURL URLWithString:@"zheliban://"];
+    } else if ([plt containsString:@"wuba"] || [plt containsString:@"58同城"]) {
+        pillText = [NSString stringWithFormat:@"🏠 正在打开 58 同城便民生活..."];
+        targetURL = [NSURL URLWithString:@"wbmain://"];
+    }
+    // 11. 新能源车机互联与汽车资讯
+    else if ([plt containsString:@"nio"] || [plt containsString:@"蔚来"]) {
+        pillText = [NSString stringWithFormat:@"🚗 正在打开蔚来控车..."];
+        targetURL = [NSURL URLWithString:@"nio://"];
+    } else if ([plt containsString:@"xiaopeng"] || [plt containsString:@"小鹏"]) {
+        pillText = [NSString stringWithFormat:@"🚗 正在打开小鹏汽车座舱..."];
+        targetURL = [NSURL URLWithString:@"xiaopeng://"];
+    } else if ([plt containsString:@"lixiang"] || [plt containsString:@"理想"]) {
+        pillText = [NSString stringWithFormat:@"🚗 正在打开理想汽车诊断..."];
+        targetURL = [NSURL URLWithString:@"lixiang://"];
+    } else if ([plt containsString:@"byd"] || [plt containsString:@"比亚迪"]) {
+        pillText = [NSString stringWithFormat:@"🚗 正在打开比亚迪云服务..."];
+        targetURL = [NSURL URLWithString:@"bydapp://"];
+    } else if ([plt containsString:@"tesla"] || [plt containsString:@"特斯拉"]) {
+        pillText = [NSString stringWithFormat:@"⚡ 正在打开特斯拉钥匙控车..."];
+        targetURL = [NSURL URLWithString:@"tesla://"];
+    } else if ([plt containsString:@"dongchedi"] || [plt containsString:@"懂车帝"]) {
+        pillText = [NSString stringWithFormat:@"🚘 正在懂车帝看成交价: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"dongchedi://"];
+    } else if ([plt containsString:@"autohome"] || [plt containsString:@"汽车之家"]) {
+        pillText = [NSString stringWithFormat:@"🚘 正在汽车之家看报价: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"autohome://"];
+    } else if ([plt containsString:@"yiche"] || [plt containsString:@"易车"]) {
+        pillText = [NSString stringWithFormat:@"🚘 正在易车看汽车对比..."];
+        targetURL = [NSURL URLWithString:@"yicheapp://"];
+    } else if ([plt containsString:@"guazi"] || [plt containsString:@"瓜子"]) {
+        pillText = [NSString stringWithFormat:@"🚙 正在瓜子看二手车严选..."];
+        targetURL = [NSURL URLWithString:@"guazi://"];
+    }
+    // 12. 智能家居与安居房产
+    else if ([plt containsString:@"mihome"] || [plt containsString:@"米家"]) {
+        pillText = [NSString stringWithFormat:@"🏠 正在打开米家全屋智能设备..."];
+        targetURL = [NSURL URLWithString:@"mihome://"];
+    } else if ([plt containsString:@"huaweihonor"] || [plt containsString:@"智慧生活"]) {
+        pillText = [NSString stringWithFormat:@"🏠 正在打开华为智慧生活控制台..."];
+        targetURL = [NSURL URLWithString:@"huaweihonor://"];
+    } else if ([plt containsString:@"meiju"] || [plt containsString:@"美居"]) {
+        pillText = [NSString stringWithFormat:@"❄️ 正在打开美的美居调空调..."];
+        targetURL = [NSURL URLWithString:@"meiju://"];
+    } else if ([plt containsString:@"haier"] || [plt containsString:@"海尔智家"]) {
+        pillText = [NSString stringWithFormat:@"🧺 正在打开海尔智家管理设备..."];
+        targetURL = [NSURL URLWithString:@"haierzhijia://"];
+    } else if ([plt containsString:@"beike"] || [plt containsString:@"贝壳"]) {
+        pillText = [NSString stringWithFormat:@"🏢 正在贝壳看二手房/租房: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"lianjiabeike://"];
+    } else if ([plt containsString:@"anjuke"] || [plt containsString:@"安居客"]) {
+        pillText = [NSString stringWithFormat:@"🏠 正在安居客找房子: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:@"anjuke://"];
+    }
+    // 13. 剪辑修图、求职招聘与证券
+    else if ([plt containsString:@"jianying"] || [plt containsString:@"剪映"]) {
+        pillText = [NSString stringWithFormat:@"✂️ 正在打开剪映剪视频..."];
+        targetURL = [NSURL URLWithString:@"jianying://"];
+    } else if ([plt containsString:@"mtxx"] || [plt containsString:@"美图秀秀"]) {
+        pillText = [NSString stringWithFormat:@"✨ 正在美图秀秀修图..."];
+        targetURL = [NSURL URLWithString:@"mtxx://"];
+    } else if ([plt containsString:@"xingtu"] || [plt containsString:@"醒图"]) {
+        pillText = [NSString stringWithFormat:@"📸 正在醒图一键修图..."];
+        targetURL = [NSURL URLWithString:@"xingtusdk://"];
+    } else if ([plt containsString:@"boss"] || [plt containsString:@"boss直聘"]) {
+        pillText = [NSString stringWithFormat:@"💼 正在 BOSS 直聘跟老板直聊..."];
+        targetURL = [NSURL URLWithString:@"bosszhipin://"];
+    } else if ([plt containsString:@"zhaopin"] || [plt containsString:@"智联招聘"]) {
+        pillText = [NSString stringWithFormat:@"💼 正在智联招聘看岗位..."];
+        targetURL = [NSURL URLWithString:@"zhaopin://"];
+    } else if ([plt containsString:@"liepin"] || [plt containsString:@"猎聘"]) {
+        pillText = [NSString stringWithFormat:@"💼 正在猎聘看中高端职位..."];
+        targetURL = [NSURL URLWithString:@"liepin://"];
+    } else if ([plt containsString:@"amihexin"] || [plt containsString:@"同花顺"]) {
+        pillText = [NSString stringWithFormat:@"📈 正在同花顺看自选股行情..."];
+        targetURL = [NSURL URLWithString:@"amihexin://"];
+    } else if ([plt containsString:@"eastmoney"] || [plt containsString:@"东方财富"]) {
+        pillText = [NSString stringWithFormat:@"📊 正在东方财富看大盘异动..."];
+        targetURL = [NSURL URLWithString:@"eastmoney://"];
+    } else if ([plt containsString:@"xueqiu"] || [plt containsString:@"雪球"]) {
+        pillText = [NSString stringWithFormat:@"❄️ 正在雪球看股票组合讨论..."];
+        targetURL = [NSURL URLWithString:@"xueqiu://"];
+    } else if ([plt containsString:@"futunn"] || [plt containsString:@"富途牛牛"]) {
+        pillText = [NSString stringWithFormat:@"🐂 正在富途牛牛看港美股行情..."];
+        targetURL = [NSURL URLWithString:@"futunn://"];
+    }
+    // 14. 国产大模型 AI 助手
+    else if ([plt containsString:@"doubao"] || [plt containsString:@"豆包"]) {
+        pillText = [NSString stringWithFormat:@"🤖 正在打开豆包 AI 助手..."];
+        targetURL = [NSURL URLWithString:@"doubao://"];
+    } else if ([plt containsString:@"kimi"]) {
+        pillText = [NSString stringWithFormat:@"🤖 正在打开 Kimi 分析研报..."];
+        targetURL = [NSURL URLWithString:@"kimi://"];
+    } else if ([plt containsString:@"chatglm"] || [plt containsString:@"智谱清言"]) {
+        pillText = [NSString stringWithFormat:@"🤖 正在打开智谱清言大模型..."];
+        targetURL = [NSURL URLWithString:@"chatglm://"];
+    } else if ([plt containsString:@"yiyan"] || [plt containsString:@"文心一言"]) {
+        pillText = [NSString stringWithFormat:@"🤖 正在打开文心一言..."];
+        targetURL = [NSURL URLWithString:@"yiyan://"];
+    }
+    // 15. 支付/金融
+    else if ([plt containsString:@"alipay"] || [plt containsString:@"支付宝"]) {
+        pillText = [NSString stringWithFormat:@"🔵 正在支付宝搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"alipays://platformapi/startapp?appId=20001003&keyword=%@", encoded]];
+    } else if ([plt containsString:@"upwallet"] || [plt containsString:@"云闪付"]) {
+        pillText = [NSString stringWithFormat:@"🔴 正在打开云闪付..."];
+        targetURL = [NSURL URLWithString:@"upwallet://"];
+    } else if ([plt containsString:@"cmbmobilebank"] || [plt containsString:@"招商银行"]) {
+        pillText = [NSString stringWithFormat:@"🏦 正在打开招商银行..."];
+        targetURL = [NSURL URLWithString:@"cmbmobilebank://"];
+    } else if ([plt containsString:@"cmblife"] || [plt containsString:@"掌上生活"]) {
+        pillText = [NSString stringWithFormat:@"💳 正在打开招行掌上生活..."];
+        targetURL = [NSURL URLWithString:@"cmblife://"];
+    } else if ([plt containsString:@"icbc"] || [plt containsString:@"工商银行"]) {
+        pillText = [NSString stringWithFormat:@"🏦 正在打开工商银行..."];
+        targetURL = [NSURL URLWithString:@"com.icbc.iphoneclient://"];
+    } else if ([plt containsString:@"ccb"] || [plt containsString:@"建设银行"]) {
+        pillText = [NSString stringWithFormat:@"🏦 正在打开建设银行..."];
+        targetURL = [NSURL URLWithString:@"ccbmobilebank://"];
+    } else if ([plt containsString:@"boc"] || [plt containsString:@"中国银行"]) {
+        pillText = [NSString stringWithFormat:@"🏦 正在打开中国银行..."];
+        targetURL = [NSURL URLWithString:@"BOCMBCIphone://"];
+    } else if ([plt containsString:@"bankabc"] || [plt containsString:@"农业银行"]) {
+        pillText = [NSString stringWithFormat:@"🏦 正在打开农业银行..."];
+        targetURL = [NSURL URLWithString:@"bankabc://"];
+    } else if ([plt containsString:@"bankcomm"] || [plt containsString:@"交通银行"]) {
+        pillText = [NSString stringWithFormat:@"🏦 正在打开交通银行..."];
+        targetURL = [NSURL URLWithString:@"bankcomm://"];
+    } else if ([plt containsString:@"pingan"] || [plt containsString:@"平安银行"]) {
+        pillText = [NSString stringWithFormat:@"🏦 正在打开平安口袋银行..."];
+        targetURL = [NSURL URLWithString:@"pinganbank://"];
+    } else if ([plt containsString:@"spdb"] || [plt containsString:@"浦发银行"]) {
+        pillText = [NSString stringWithFormat:@"🏦 正在打开浦发银行..."];
+        targetURL = [NSURL URLWithString:@"spdbmb://"];
+    } else if ([plt containsString:@"citic"] || [plt containsString:@"中信银行"]) {
+        pillText = [NSString stringWithFormat:@"🏦 正在打开中信银行..."];
+        targetURL = [NSURL URLWithString:@"citicbank://"];
+    } else if ([plt containsString:@"cmbc"] || [plt containsString:@"民生银行"]) {
+        pillText = [NSString stringWithFormat:@"🏦 正在打开民生银行..."];
+        targetURL = [NSURL URLWithString:@"cmbc://"];
+    } else if ([plt containsString:@"ceb"] || [plt containsString:@"光大银行"]) {
+        pillText = [NSString stringWithFormat:@"🏦 正在打开光大银行..."];
+        targetURL = [NSURL URLWithString:@"cebbank://"];
+    } else if ([plt containsString:@"cgb"] || [plt containsString:@"广发银行"]) {
+        pillText = [NSString stringWithFormat:@"🏦 正在打开广发银行..."];
+        targetURL = [NSURL URLWithString:@"cgbmobile://"];
+    } else if ([plt containsString:@"cib"] || [plt containsString:@"兴业银行"]) {
+        pillText = [NSString stringWithFormat:@"🏦 正在打开兴业银行..."];
+        targetURL = [NSURL URLWithString:@"cibmb://"];
+    } else if ([plt containsString:@"jdmobile"] || [plt containsString:@"京东金融"]) {
+        pillText = [NSString stringWithFormat:@"💰 正在打开京东金融查白条..."];
+        targetURL = [NSURL URLWithString:@"jdmobile://"];
+    }
+    // 16. 百度与系统应用商店
+    else if ([plt containsString:@"baiduboxapp"] || [plt containsString:@"百度"]) {
+        pillText = [NSString stringWithFormat:@"🔍 正在百度搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"baiduboxapp://browser?url=https%%3A%%2F%%2Fwww.baidu.com%%2Fs%%3Fwd%%3D%@", encoded]];
+    } else if ([plt containsString:@"appstore"] || [plt containsString:@"应用商店"]) {
+        pillText = [NSString stringWithFormat:@"🛍️ 正在 App Store 搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"itms-apps://search.itunes.apple.com/WebObjects/MZSearch.woa/wa/search?term=%@", encoded]];
     }
 
-    [[AGGlobalActionPillWindow sharedPill] showActionPill:pillText];
-    [self dismissOverlay];
-    agSafeLaunchURL(targetURL);
-}
+    if (targetURL) {
+        [[AGGlobalActionPillWindow sharedPill] showActionPill:pillText];
+        [self dismissOverlay];
+        agSafeLaunchURL(targetURL);
+        return;
+    }
 
+    // 17. 若非预置清单应用，动态扫描本机已安装的所有应用，走剪贴板预置 + 原生 BundleID 启动
+    NSString *cleanPlt = plt;
+    NSString *bundleID = self.builtinAppMap[cleanPlt];
+    if (!bundleID && self.cachedInstalledApps.count > 0) {
+        bundleID = self.cachedInstalledApps[cleanPlt];
+        if (!bundleID) {
+            for (NSString *loc in self.cachedInstalledApps) {
+                if ([loc containsString:cleanPlt] || [cleanPlt containsString:loc]) {
+                    bundleID = self.cachedInstalledApps[loc];
+                    break;
+                }
+            }
+        }
+    }
+    if (!bundleID) {
+        NSArray<LSApplicationProxy *> *apps = [[%c(LSApplicationWorkspace) defaultWorkspace] allInstalledApplications];
+        for (LSApplicationProxy *proxy in apps) {
+            NSString *locName = [proxy.localizedName lowercaseString];
+            if (locName && ([locName containsString:cleanPlt] || [cleanPlt containsString:locName])) {
+                bundleID = proxy.applicationIdentifier;
+                self.cachedInstalledApps[locName] = bundleID;
+                break;
+            }
+        }
+    }
+
+    if (bundleID) {
+        // 本地安装了该应用：自动将关键词写入剪贴板，秒开该 App 并提示粘贴
+        [UIPasteboard generalPasteboard].string = cleanKw;
+        [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"📋 已复制「%@」并打开【%@】，直接粘贴即可", cleanKw, platform ?: @"应用"]];
+        [self dismissOverlay];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+            @try {
+                [[%c(LSApplicationWorkspace) defaultWorkspace] openApplicationWithBundleID:bundleID];
+            } @catch (NSException *e) {}
+        });
+        return;
+    }
+
+    // 18. 若明确要求进行网页搜索（如百度/网页/谷歌），则打开网页；否则严禁降级到 Safari 访问官方网页！
+    if ([cleanPlt containsString:@"web"] || [cleanPlt containsString:@"网页"] || [cleanPlt containsString:@"google"] || [cleanPlt containsString:@"谷歌"]) {
+        pillText = [NSString stringWithFormat:@"🔍 正在百度搜索: %@...", cleanKw];
+        targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"https://www.baidu.com/s?wd=%@", encoded]];
+        [[AGGlobalActionPillWindow sharedPill] showActionPill:pillText];
+        [self dismissOverlay];
+        agSafeLaunchURL(targetURL);
+        return;
+    }
+
+    // 坚决不降级打开 Safari，直接明确提示未安装
+    [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"⚠️ 手机未安装「%@」", platform ?: @"目标应用"]];
+    [self showActionBanner:[NSString stringWithFormat:@"⚠️ 手机未安装「%@」", platform ?: @"目标应用"]];
+    [self dismissOverlay];
+}
 - (void)handleMediaControl:(NSString *)action {
     dispatch_async(dispatch_get_main_queue(), ^{
         SBMediaController *mc = [%c(SBMediaController) sharedInstance];
