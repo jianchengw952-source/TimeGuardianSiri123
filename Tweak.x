@@ -6165,7 +6165,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
         fmt.dateFormat = @"yyyy-MM-dd HH:mm:ss";
         NSString *nowStr = [fmt stringFromDate:[NSDate date]];
-        sysInstruction = [sysInstruction stringByAppendingFormat:@"\n【实时联网已开启】当前系统准确时间：%@。遇到实时新闻、今日天气、股价汇率、最新动态等问题时，请直接调用联网检索最新信息作答。", nowStr];
+        sysInstruction = [sysInstruction stringByAppendingFormat:@"\n【实时联网已开启】当前系统准确时间：%@。遇到实时新闻、今日天气、股价汇率、最新动态等问题时，请直接调用 google_search 工具检索最新信息作答。", nowStr];
     }
 
     NSString *permMemory = agBuildUniversalMemoryPromptBlockForQuery(@"");
@@ -6187,15 +6187,30 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             setupDict[@"inputAudioTranscription"] = @{};
             setupDict[@"outputAudioTranscription"] = @{};
         }
-        if ([rawModel containsString:@"3.8-live"]) {
-            self.disableToolsInSetup = YES; // 3.8-live 不支持服务端 googleSearch 参数，直接标记使用客户端实时网页检索，免去断连重试
+        if (agIsWebSearchEnabled() && !self.disableToolsInSetup) {
+            setupDict[@"tools"] = @[
+                @{
+                    @"functionDeclarations": @[
+                        @{
+                            @"name": @"google_search",
+                            @"description": @"实时搜索互联网获取最新资讯、新闻、今日天气、实时汇率、股价、赛事结果等最新事实信息",
+                            @"parameters": @{
+                                @"type": @"OBJECT",
+                                @"properties": @{
+                                    @"query": @{
+                                        @"type": @"STRING",
+                                        @"description": @"要检索的关键词"
+                                    }
+                                },
+                                @"required": @[ @"query" ]
+                            }
+                        }
+                    ]
+                }
+            ];
         }
-        BOOL attachGoogleSearch = (agIsWebSearchEnabled() && !self.disableToolsInSetup);
-        if (attachGoogleSearch) {
-            setupDict[@"tools"] = @[ @{ @"googleSearch": @{} } ];
-        }
-        agLiveDiagLog(@"WS_SETUP_DIAG", @"Sending setup: model=%@ | protocol=GoogleBidi(v1alpha=%d) | webSearchPref=%d | googleSearchTool=%d | transcription=%d",
-                      fullModelPath, self.useGoogleV1AlphaWS, agIsWebSearchEnabled(), attachGoogleSearch, !self.disableTranscriptionInSetup);
+        agLiveDiagLog(@"WS_SETUP_DIAG", @"Sending setup: model=%@ | protocol=GoogleBidi(v1alpha=%d) | webSearchPref=%d | funcTool=%d | transcription=%d",
+                      fullModelPath, self.useGoogleV1AlphaWS, agIsWebSearchEnabled(), (setupDict[@"tools"] != nil), !self.disableTranscriptionInSetup);
 
         [self sendJSONDictionaryOverWebSocket:@{ @"setup": setupDict }];
     } else {
@@ -6353,6 +6368,83 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         return;
     }
 
+    // 【方案 A：Google Bidi & OpenAI Realtime 官方 Function Calling 智能联网闭环】
+    NSDictionary *toolCall = json[@"toolCall"] ?: (json[@"serverContent"][@"toolCall"] ?: nil);
+    if ([toolCall isKindOfClass:[NSDictionary class]]) {
+        NSArray *functionCalls = toolCall[@"functionCalls"];
+        if ([functionCalls isKindOfClass:[NSArray class]]) {
+            for (NSDictionary *call in functionCalls) {
+                if (![call isKindOfClass:[NSDictionary class]]) continue;
+                NSString *name = call[@"name"];
+                NSString *callId = call[@"id"];
+                NSDictionary *args = call[@"args"];
+                if ([name isEqualToString:@"google_search"]) {
+                    NSString *searchQuery = args[@"query"];
+                    if (![searchQuery isKindOfClass:[NSString class]] || searchQuery.length == 0) {
+                        searchQuery = self.currentVoiceQueryBuffer ?: @"";
+                    }
+                    agLiveDiagLog(@"TOOL_CALL", @"AI requested search for: '%@', callId: %@", searchQuery, callId);
+                    self.subStatusLabel.text = [NSString stringWithFormat:@"🌐 正在联网检索：「%@」...", searchQuery];
+
+                    NSString *proxy = agProxyForTab(self.activeModeTab);
+                    __weak typeof(self) weakSelf = self;
+                    agFetchRealtimeWebSearchContextForQuery(searchQuery, proxy, ^(NSString *summary) {
+                        __strong typeof(weakSelf) strongSelf = weakSelf;
+                        if (!strongSelf || strongSelf.isDismissed || !strongSelf.isWebSocketConnected) return;
+                        NSString *resText = (summary.length > 0) ? summary : @"未检索到相关内容";
+                        agLiveDiagLog(@"TOOL_RESP", @"Sending search response (%lu chars) for callId: %@", (unsigned long)resText.length, callId);
+                        [strongSelf sendJSONDictionaryOverWebSocket:@{
+                            @"toolResponse": @{
+                                @"functionResponses": @[
+                                    @{
+                                        @"id": callId ?: @"",
+                                        @"name": @"google_search",
+                                        @"response": @{ @"output": resText }
+                                    }
+                                ]
+                            }
+                        }];
+                    });
+                }
+            }
+        }
+        return;
+    }
+
+    // OpenAI Realtime function call format support
+    if ([json[@"type"] isEqualToString:@"response.function_call_arguments.done"]) {
+        NSString *name = json[@"name"];
+        NSString *callId = json[@"call_id"];
+        NSString *argsStr = json[@"arguments"];
+        if ([name isEqualToString:@"google_search"]) {
+            NSString *searchQuery = nil;
+            if (argsStr.length > 0) {
+                NSDictionary *argsObj = [NSJSONSerialization JSONObjectWithData:[argsStr dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+                if ([argsObj isKindOfClass:[NSDictionary class]]) searchQuery = argsObj[@"query"];
+            }
+            if (!searchQuery || searchQuery.length == 0) searchQuery = self.currentVoiceQueryBuffer ?: @"";
+            agLiveDiagLog(@"TOOL_CALL_OPENAI", @"OpenAI requested search: '%@', callId: %@", searchQuery, callId);
+            self.subStatusLabel.text = [NSString stringWithFormat:@"🌐 正在联网检索：「%@」...", searchQuery];
+            NSString *proxy = agProxyForTab(self.activeModeTab);
+            __weak typeof(self) weakSelf = self;
+            agFetchRealtimeWebSearchContextForQuery(searchQuery, proxy, ^(NSString *summary) {
+                __strong typeof(weakSelf) strongSelf = weakSelf;
+                if (!strongSelf || strongSelf.isDismissed || !strongSelf.isWebSocketConnected) return;
+                NSString *resText = (summary.length > 0) ? summary : @"未检索到相关内容";
+                [strongSelf sendJSONDictionaryOverWebSocket:@{
+                    @"type": @"conversation.item.create",
+                    @"item": @{
+                        @"type": @"function_call_output",
+                        @"call_id": callId ?: @"",
+                        @"output": resText
+                    }
+                }];
+                [strongSelf sendJSONDictionaryOverWebSocket:@{ @"type": @"response.create" }];
+            });
+        }
+        return;
+    }
+
     NSDictionary *serverContent = json[@"serverContent"];
     if ([serverContent isKindOfClass:[NSDictionary class]]) {
         if ([serverContent[@"interrupted"] boolValue]) {
@@ -6420,11 +6512,6 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
         NSArray *parts = serverContent[@"modelTurn"][@"parts"];
         if ([parts isKindOfClass:[NSArray class]]) {
-            if (self.currentVoiceQueryBuffer.length > 0) {
-                [self checkDeferredVoiceLocalCommand];
-                [self.currentVoiceQueryBuffer setString:@""];
-            }
-
             for (NSDictionary *part in parts) {
                 if (![part isKindOfClass:[NSDictionary class]]) continue;
                 if ([part[@"thought"] boolValue]) continue;
@@ -7290,49 +7377,6 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             [self.pcmPlayerNode stop];
         }
         return;
-    }
-
-    // 当开启了联网开关，且当前模型未挂载原生 googleSearch（如 disableToolsInSetup=YES 或非 Google 原生工具）时，自动执行客户端实时联网检索注入
-    if (agIsWebSearchEnabled() && self.isWebSocketConnected && self.isSetupHandshakeCompleted &&
-        (self.disableToolsInSetup || !self.isGoogleBidiProtocol)) {
-        NSString *cleanQ = [fullCmd stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (cleanQ.length >= 2 && ![cleanQ isEqualToString:self.lastWebSearchedVoiceQuery]) {
-            self.lastWebSearchedVoiceQuery = cleanQ;
-            NSString *proxy = agProxyForTab(self.activeModeTab);
-            agFetchRealtimeWebSearchContextForQuery(cleanQ, proxy, ^(NSString *searchSummary) {
-                if (searchSummary.length > 0 && self.isWebSocketConnected && self.isSetupHandshakeCompleted) {
-                    // 打断模型未联网前的盲猜语音，立即用最新检索结果重新语音作答
-                    self.currentTurnPlaybackID++;
-                    self.pendingPlayBuffersCount = 0;
-                    dispatch_async(self.audioPlayQueue, ^{
-                        if (self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
-                            [self.pcmPlayerNode stop];
-                            [self.pcmPlayerNode play];
-                        }
-                    });
-                    NSDateFormatter *df = [[NSDateFormatter alloc] init];
-                    df.dateFormat = @"yyyy-MM-dd HH:mm";
-                    NSString *nowStr = [df stringFromDate:[NSDate date]];
-                    NSString *injectPrompt = [NSString stringWithFormat:@"【系统实时联网检索结果（当前时间：%@，针对用户刚才的问题「%@」）】\n%@\n请立即根据以上最新联网数据简明自然地语音回答用户。", nowStr, cleanQ, searchSummary];
-                    agLiveDiagLog(@"WEB_SEARCH_DIAG", @"Injected %lu chars of live web context into WebSocket for query '%@'", (unsigned long)searchSummary.length, cleanQ);
-                    if (self.isGoogleBidiProtocol) {
-                        [self sendJSONDictionaryOverWebSocket:@{
-                            @"realtimeInput": @{ @"text": injectPrompt }
-                        }];
-                    } else {
-                        [self sendJSONDictionaryOverWebSocket:@{
-                            @"type": @"conversation.item.create",
-                            @"item": @{
-                                @"type": @"message",
-                                @"role": @"user",
-                                @"content": @[ @{ @"type": @"input_text", @"text": injectPrompt } ]
-                            }
-                        }];
-                        [self sendJSONDictionaryOverWebSocket:@{ @"type": @"response.create" }];
-                    }
-                }
-            });
-        }
     }
 }
 
