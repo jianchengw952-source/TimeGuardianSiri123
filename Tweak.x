@@ -10531,7 +10531,9 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     if (self.isInternalRecordingMode) {
         // 🔇 静音内录优先模式：保存当前音量并将外放设为极微弱 0.005f，确保 iOS 混音器不断流，且用户听不到声音
         if (avsc && [avsc respondsToSelector:@selector(getVolume:forCategory:)]) {
-            [avsc getVolume:&self.savedSystemVolume forCategory:@"Audio/Video"];
+            float vol = 0.5f;
+            [avsc getVolume:&vol forCategory:@"Audio/Video"];
+            self.savedSystemVolume = vol;
         }
         if (avsc && [avsc respondsToSelector:@selector(setVolumeTo:forCategory:)]) {
             [avsc setVolumeTo:0.005f forCategory:@"Audio/Video"];
