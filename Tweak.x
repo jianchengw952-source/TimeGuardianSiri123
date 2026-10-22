@@ -3430,6 +3430,18 @@ static void agSimulateScreenSwipe(CGPoint startPt, CGPoint endPt, NSTimeInterval
 @property (nonatomic, assign) NSTimeInterval aiTurnAudioStartTime;
 @property (nonatomic, assign) NSInteger camInterruptCount;
 @property (nonatomic, strong) NSMutableData *pcm24kStagingBuffer;
+// 🍎 原厂 Siri 级：苹果本地神经网络语音检测器 (On-Device Neural VAD)
+@property (nonatomic, strong) SFSpeechRecognizer *nativeNeuralVADRecognizer;
+@property (nonatomic, strong) SFSpeechAudioBufferRecognitionRequest *nativeNeuralVADRequest;
+@property (nonatomic, strong) SFSpeechRecognitionTask *nativeNeuralVADTask;
+@property (nonatomic, assign) NSUInteger lastNeuralRecognizedCharCount;
+@property (nonatomic, assign) NSTimeInterval lastNeuralSpeechActiveTime;
+@property (nonatomic, assign) BOOL neuralUserSpeakingActive;
+@property (nonatomic, assign) NSTimeInterval lastStreamEndSignalTime;
+- (void)startNativeAppleNeuralVADIfNeeded;
+- (void)stopNativeAppleNeuralVAD;
+- (void)triggerNativeSiriGradeInstantBargeIn:(NSString *)sourceTag;
+- (void)flushAOPPreRollBufferOnHandshake;
 - (void)flushPCM24kStagingBuffer;
 - (void)showActionBanner:(NSString *)msg;
 - (void)checkDeferredVoiceLocalCommand;
@@ -5792,6 +5804,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     self.currentTurnPlaybackID++;
     self.pendingPlayBuffersCount = 0;
     self.inFlightWSMessageCount = 0;
+    [self stopNativeAppleNeuralVAD];
 
     [self.meterTimer invalidate];
     self.meterTimer = nil;
@@ -6169,6 +6182,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         if (!self.isSetupHandshakeCompleted) {
             self.isSetupHandshakeCompleted = YES;
             self.wsReconnectCount = 0;
+            // ✅ 像原厂 Siri 一样：握手完成的瞬间，把用户唤醒时已经说出口的话从环形缓存一次性发给大模型，绝不漏掉开头第一个字！
+            [self flushAOPPreRollBufferOnHandshake];
             agLiveDiagLog(@"WS_SETUP_COMPLETE", @"Handshake completed for model %@", self.activeWebSocketModel);
             self.subStatusLabel.text = (self.activeModeTab == AGConfigTabVideoAI)
                 ? @"📞📹 实时视频通话中 (请直接说话，支持随时插话打断)..."
@@ -6321,6 +6336,126 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             [self setWaveBarsLevel:0.0];
         });
     }
+}
+
+// 1. 复刻原厂 Siri 的 AOP 环形预录缓冲冲刷：唤醒瞬间说的第一个字都不漏
+- (void)flushAOPPreRollBufferOnHandshake {
+    NSData *preRoll = nil;
+    @synchronized (self.wsPreRollPCMBuffer) {
+        if (self.wsPreRollPCMBuffer.length > 0) {
+            preRoll = [self.wsPreRollPCMBuffer copy];
+            [self.wsPreRollPCMBuffer setLength:0];
+        }
+    }
+    if (!preRoll || preRoll.length == 0) return;
+
+    // 先推 100ms 静音建立云端 VAD 基准，再把唤醒期间缓存的语音包高速发出
+    NSMutableData *silenceLead = [NSMutableData dataWithLength:3200];
+    NSString *silenceB64 = [silenceLead base64EncodedStringWithOptions:0];
+    if (self.isGoogleBidiProtocol) {
+        [self sendJSONDictionaryOverWebSocket:@{
+            @"realtimeInput": @{ @"audio": @{ @"mimeType": @"audio/pcm;rate=16000", @"data": silenceB64 } }
+        }];
+    } else {
+        [self sendJSONDictionaryOverWebSocket:@{ @"type": @"input_audio_buffer.append", @"audio": silenceB64 }];
+    }
+
+    NSUInteger chunkSz = 3200;
+    for (NSUInteger offset = 0; offset < preRoll.length; offset += chunkSz) {
+        NSUInteger thisLen = MIN(chunkSz, preRoll.length - offset);
+        NSData *sub = [preRoll subdataWithRange:NSMakeRange(offset, thisLen)];
+        NSString *b64 = [sub base64EncodedStringWithOptions:0];
+        if (self.isGoogleBidiProtocol) {
+            [self sendJSONDictionaryOverWebSocket:@{
+                @"realtimeInput": @{ @"audio": @{ @"mimeType": @"audio/pcm;rate=16000", @"data": b64 } }
+            }];
+        } else {
+            [self sendJSONDictionaryOverWebSocket:@{ @"type": @"input_audio_buffer.append", @"audio": b64 }];
+        }
+    }
+    agLiveDiagLog(@"AOP_PREROLL_SENT", @"Flushed %lu bytes of AOP pre-roll speech", (unsigned long)preRoll.length);
+}
+
+// 2. 原厂 Siri 级 0 毫秒瞬时打断器
+- (void)triggerNativeSiriGradeInstantBargeIn:(NSString *)sourceTag {
+    self.wsBargeInVoiceTicks = 0;
+    self.currentTurnPlaybackID++;
+    self.pendingPlayBuffersCount = 0;
+    self.aiPlaybackEndTime = 0;
+    if (self.pcm24kStagingBuffer) [self.pcm24kStagingBuffer setLength:0];
+    self.neuralUserSpeakingActive = YES;
+    self.lastNeuralSpeechActiveTime = [[NSDate date] timeIntervalSince1970];
+
+    agLiveDiagLog(@"BARGE_IN_LOCAL", @"Apple Neural VAD barge-in (%@), turnID=%lu", sourceTag, (unsigned long)self.currentTurnPlaybackID);
+
+    dispatch_async(self.audioPlayQueue, ^{
+        if (self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
+            [self.pcmPlayerNode stop];
+            [self.pcmPlayerNode play];
+        }
+    });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.subStatusLabel.text = @"⚡ 正在倾听您说话...";
+        [self setWaveBarsLevel:0.72];
+    });
+    if (!self.isGoogleBidiProtocol) {
+        [self sendJSONDictionaryOverWebSocket:@{ @"type": @"response.cancel" }];
+    }
+}
+
+// 3. 启动苹果 iOS 本地芯片级语音活动检测 (不依赖分贝大小，只要吐出音节立即感知)
+- (void)startNativeAppleNeuralVADIfNeeded {
+    [self stopNativeAppleNeuralVAD];
+    @try {
+        if (!self.nativeNeuralVADRecognizer) {
+            self.nativeNeuralVADRecognizer = [[SFSpeechRecognizer alloc] initWithLocale:[NSLocale localeWithLocaleIdentifier:@"zh-CN"]];
+        }
+        if (!self.nativeNeuralVADRecognizer || !self.nativeNeuralVADRecognizer.isAvailable) return;
+
+        self.nativeNeuralVADRequest = [[SFSpeechAudioBufferRecognitionRequest alloc] init];
+        self.nativeNeuralVADRequest.shouldReportPartialResults = YES;
+        if (@available(iOS 13.0, *)) {
+            if (self.nativeNeuralVADRecognizer.supportsOnDeviceRecognition) {
+                self.nativeNeuralVADRequest.requiresOnDeviceRecognition = YES; // 强制跑在苹果本地神经引擎芯片，0网络延迟
+            }
+        }
+        self.lastNeuralRecognizedCharCount = 0;
+
+        __weak typeof(self) weakSelf = self;
+        self.nativeNeuralVADTask = [self.nativeNeuralVADRecognizer recognitionTaskWithRequest:self.nativeNeuralVADRequest resultHandler:^(SFSpeechRecognitionResult * _Nullable result, NSError * _Nullable error) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf || strongSelf.isDismissed) return;
+            if (result && result.bestTranscription.formattedString.length > 0) {
+                NSUInteger curLen = result.bestTranscription.formattedString.length;
+                if (curLen != strongSelf.lastNeuralRecognizedCharCount) {
+                    strongSelf.lastNeuralRecognizedCharCount = curLen;
+                    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+                    strongSelf.neuralUserSpeakingActive = YES;
+                    strongSelf.lastNeuralSpeechActiveTime = now;
+
+                    // 只要苹果本地芯片确认用户吐出了新字（哪怕声音极轻只有 -45dB），且当前 AI 正在播音，立即 0 毫秒打断！
+                    BOOL isAIPlaying = (strongSelf.pendingPlayBuffersCount > 0 || now < strongSelf.aiPlaybackEndTime);
+                    if (isAIPlaying && (now - strongSelf.aiTurnAudioStartTime > 0.22)) {
+                        [strongSelf triggerNativeSiriGradeInstantBargeIn:@"APPLE_NEURAL_SYLLABLE"];
+                    }
+                }
+            }
+        }];
+    } @catch (NSException *e) {}
+}
+
+- (void)stopNativeAppleNeuralVAD {
+    @try {
+        if (self.nativeNeuralVADRequest) {
+            [self.nativeNeuralVADRequest endAudio];
+            self.nativeNeuralVADRequest = nil;
+        }
+        if (self.nativeNeuralVADTask) {
+            [self.nativeNeuralVADTask cancel];
+            self.nativeNeuralVADTask = nil;
+        }
+        self.lastNeuralRecognizedCharCount = 0;
+    } @catch (NSException *e) {}
 }
 
 - (void)flushPCM24kStagingBuffer {
@@ -6508,6 +6643,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 self.liveAudioEngine = engine;
                 self.pcmPlayerNode = player;
                 self.playerOutputFormat = mixerFormat;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self startNativeAppleNeuralVADIfNeeded];
+                });
                 agLiveDiagLog(@"AEC_AUDIO_ENGINE", @"Started FullDuplex Engine (inRate=%.0f, outRate=%.0f, vpErr=%@)", tapFormat.sampleRate, mixerFormat.sampleRate, vpErr.localizedDescription ?: @"none");
             } else {
                 agLiveDiagLog(@"AUDIO_ERR", @"AVAudioEngine start error: %@", startErr.localizedDescription);
@@ -6521,6 +6659,11 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 - (void)processMicrophoneInputPCMBuffer:(AVAudioPCMBuffer *)buffer {
     if (!buffer || buffer.frameLength == 0 || buffer.floatChannelData == NULL) return;
 
+    // 1. 同步将原始硬件音频流喂给苹果本地神经网络识别器 (0 阻塞识别人类音节)
+    if (self.nativeNeuralVADRequest) {
+        @try { [self.nativeNeuralVADRequest appendAudioPCMBuffer:buffer]; } @catch (NSException *e) {}
+    }
+
     AVAudioFrameCount inFrames = buffer.frameLength;
     double inSampleRate = buffer.format.sampleRate > 0 ? buffer.format.sampleRate : 48000.0;
     NSData *copiedFloats = [NSData dataWithBytes:buffer.floatChannelData[0] length:inFrames * sizeof(float)];
@@ -6533,93 +6676,105 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         const float *floatSamples = (const float *)copiedFloats.bytes;
         float sum = 0.0f;
         float peakVal = 0.0f;
+        float voiceBandEnergy = 0.0f; // 人类声带基频与共振峰频段 (300Hz ~ 3400Hz) 能量
+        uint32_t zeroCrossings = 0;
+        float prevSample = floatSamples[0];
+        float lpState = 0.0f;
+
         for (AVAudioFrameCount i = 0; i < inFrames; i++) {
             float s = floatSamples[i];
             sum += s * s;
             float absS = fabsf(s);
             if (absS > peakVal) peakVal = absS;
-        }
-        float db = 20.0f * log10f(MAX(sqrtf(sum / MAX(1, inFrames)), 1e-7f));
-        float peakDb = 20.0f * log10f(MAX(peakVal, 1e-7f));
-        NSTimeInterval nowTs = [[NSDate date] timeIntervalSince1970];
 
+            // 一阶带通近似提取人类语音核心频段 (滤除低频环境轰鸣与高频杂音)
+            float diff = s - prevSample;
+            lpState = lpState * 0.72f + diff * 0.28f;
+            voiceBandEnergy += lpState * lpState;
+
+            if ((s >= 0.0f && prevSample < 0.0f) || (s < 0.0f && prevSample >= 0.0f)) {
+                zeroCrossings++;
+            }
+            prevSample = s;
+        }
+
+        float rms = sqrtf(sum / MAX(1, inFrames));
+        float db = 20.0f * log10f(MAX(rms, 1e-7f));
+        float peakDb = 20.0f * log10f(MAX(peakVal, 1e-7f));
+        // 计算过零率对应的等效主频 (Hz) 与人声频段集中度，精准区分“真人在说话”与“环境杂音/回声”
+        float estFreqHz = ((float)zeroCrossings * (float)inSampleRate) / (2.0f * (float)MAX(1, inFrames));
+        float voiceBandRatio = voiceBandEnergy / MAX(sum, 1e-9f);
+        BOOL hasHumanVocalFormant = (estFreqHz >= 180.0f && estFreqHz <= 3200.0f && voiceBandRatio > 0.035f);
+
+        NSTimeInterval nowTs = [[NSDate date] timeIntervalSince1970];
         BOOL isAIPlaying = (strongSelf.pendingPlayBuffersCount > 0 || nowTs < strongSelf.aiPlaybackEndTime);
 
-        // 1. 提高声波视觉灵敏度：从 -55dB 即开始灵敏律动（不再局限于 -42dB）
+        // 2. 丝滑声波反馈：只要检测到人声频谱或轻声细语 (>-56dB)，立即驱动流光声波
         if (!isAIPlaying) {
-            if (db > -55.0f) {
-                [strongSelf setWaveBarsLevel:MAX(0.22, MIN(1.0, (db + 56.0f) / 34.0f))];
+            if (db > -56.0f && (hasHumanVocalFormant || db > -44.0f)) {
+                [strongSelf setWaveBarsLevel:MAX(0.24, MIN(1.0, (db + 56.0f) / 32.0f))];
             } else {
                 [strongSelf setWaveBarsLevel:0.0];
             }
         }
 
-        if (!strongSelf.isWebSocketConnected || !strongSelf.isSetupHandshakeCompleted) return;
-
+        // 3. 自适应动态 AGC 人声放大：当用户离远小声说话 (-48dB~-30dB) 时自动给予 2.8x 增益，贴近原厂 Siri 远场拾音灵敏度
         double targetRate = strongSelf.isGoogleBidiProtocol ? 16000.0 : 24000.0;
         double ratio = inSampleRate / targetRate;
         NSUInteger outFrames = (NSUInteger)((double)inFrames / ratio);
         if (outFrames == 0) return;
 
-        // 2. 提升麦克风收音灵敏度增益至 2.45f，让正常距离和轻声说话也能被模型瞬间识别
+        float dynamicGain = (db < -30.0f && hasHumanVocalFormant) ? 2.75f : 2.25f;
         NSMutableData *pcm16Chunk = [NSMutableData dataWithLength:outFrames * sizeof(int16_t)];
         int16_t *outPtr = (int16_t *)pcm16Chunk.mutableBytes;
         for (NSUInteger i = 0; i < outFrames; i++) {
             double srcIdx = (double)i * ratio;
             NSUInteger idx0 = (NSUInteger)srcIdx;
             NSUInteger idx1 = MIN(idx0 + 1, (NSUInteger)(inFrames - 1));
-            float sample = (float)((1.0 - (srcIdx - idx0)) * floatSamples[idx0] + (srcIdx - idx0) * floatSamples[idx1]) * 2.45f;
+            float sample = (float)((1.0 - (srcIdx - idx0)) * floatSamples[idx0] + (srcIdx - idx0) * floatSamples[idx1]) * dynamicGain;
             sample = MAX(-1.0f, MIN(1.0f, sample));
             outPtr[i] = (int16_t)(sample * 32767.0f);
         }
 
-        // 3. 高灵敏度语音打断：正常音量 (db > -28.5f && peakDb > -16.5f) 连续 2 帧 (~40ms) 即断，大声说话 1 帧瞬断！
-        static BOOL sUserWasSpeaking = NO;
-        static NSTimeInterval sLastVoiceTime = 0;
-        static NSTimeInterval sLastStreamEndSent = 0;
+        // 4. 像原厂 Siri AOP 协处理器一样：若握手尚未完成，将用户唤醒瞬间说的话全部存入环形缓存，绝不丢弃！
+        if (!strongSelf.isWebSocketConnected || !strongSelf.isSetupHandshakeCompleted) {
+            @synchronized (strongSelf.wsPreRollPCMBuffer) {
+                [strongSelf.wsPreRollPCMBuffer appendData:pcm16Chunk];
+                if (strongSelf.wsPreRollPCMBuffer.length > 128000) {
+                    NSRange dropRange = NSMakeRange(0, strongSelf.wsPreRollPCMBuffer.length - 128000);
+                    [strongSelf.wsPreRollPCMBuffer replaceBytesInRange:dropRange withBytes:NULL length:0];
+                }
+            }
+            return;
+        }
 
-        if (isAIPlaying) {
-            if (db > -22.0f && peakDb > -11.5f) {
-                strongSelf.wsBargeInVoiceTicks += 2; // 清晰起音 1 帧直接满足打断
-            } else if (db > -28.5f && peakDb > -16.5f) {
-                strongSelf.wsBargeInVoiceTicks += 1; // 自然说话 2 帧即打断
+        // 5. 原厂 Siri 级人声打断：结合人声共振峰特征 (hasHumanVocalFormant)，哪怕轻声说话 (-31dB) 仅需 2 帧 (~40ms) 立即打断！
+        BOOL pastEchoGrace = (nowTs - strongSelf.aiTurnAudioStartTime > 0.22);
+        if (isAIPlaying && pastEchoGrace) {
+            BOOL isClearHumanBargeIn  = (hasHumanVocalFormant && db > -31.0f && peakDb > -18.5f);
+            BOOL isDirectStrongVoice  = (db > -22.5f && peakDb > -11.5f);
+            if (isDirectStrongVoice) {
+                strongSelf.wsBargeInVoiceTicks += 2; // 强起音 1 帧 (20ms) 瞬断
+            } else if (isClearHumanBargeIn) {
+                strongSelf.wsBargeInVoiceTicks += 1; // 符合人声共振特征的轻声说话 2 帧 (40ms) 瞬断
             } else {
                 strongSelf.wsBargeInVoiceTicks = MAX(0, strongSelf.wsBargeInVoiceTicks - 1);
             }
 
             if (strongSelf.wsBargeInVoiceTicks >= 2) {
-                strongSelf.wsBargeInVoiceTicks = 0;
-                strongSelf.currentTurnPlaybackID++;
-                strongSelf.pendingPlayBuffersCount = 0;
-                strongSelf.aiPlaybackEndTime = 0;
-                sUserWasSpeaking = YES;
-                sLastVoiceTime = nowTs;
-                agLiveDiagLog(@"BARGE_IN_LOCAL", @"User barge-in detected (db=%.1f, peak=%.1f), clearing local playback queue", db, peakDb);
-                dispatch_async(strongSelf.audioPlayQueue, ^{
-                    if (strongSelf.pcmPlayerNode && strongSelf.pcmPlayerNode.isPlaying) {
-                        [strongSelf.pcmPlayerNode stop];
-                        [strongSelf.pcmPlayerNode play];
-                    }
-                });
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    strongSelf.subStatusLabel.text = @"⚡ 已打断 AI，正在倾听您说话...";
-                    [strongSelf setWaveBarsLevel:0.65];
-                });
-                if (!strongSelf.isGoogleBidiProtocol) {
-                    [strongSelf sendJSONDictionaryOverWebSocket:@{ @"type": @"response.cancel" }];
-                }
+                [strongSelf triggerNativeSiriGradeInstantBargeIn:[NSString stringWithFormat:@"FORMANT_VAD(db=%.1f,freq=%.0fHz)", db, estFreqHz]];
             }
         } else {
             strongSelf.wsBargeInVoiceTicks = 0;
-            // 4. 恢复 0.6s 静音自动发送 audioStreamEnd：话音刚落 0.6 秒立即触发云端秒回！
-            if (db > -40.0f && peakDb > -26.0f) {
-                sUserWasSpeaking = YES;
-                sLastVoiceTime = nowTs;
-            } else if (sUserWasSpeaking && (nowTs - sLastVoiceTime >= 0.60)) {
-                sUserWasSpeaking = NO;
-                if (nowTs - sLastStreamEndSent >= 1.0) {
-                    sLastStreamEndSent = nowTs;
-                    agLiveDiagLog(@"AUDIO_STREAM_END", @"User silence 0.6s detected, sending audioStreamEnd");
+            // 6. 本地端点断句加速：当检测到人声说完并停顿 0.50 秒，立即通知云端秒回，无需干等海外服务器判断静音！
+            if (hasHumanVocalFormant && db > -42.0f && peakDb > -28.0f) {
+                strongSelf.neuralUserSpeakingActive = YES;
+                strongSelf.lastNeuralSpeechActiveTime = nowTs;
+            } else if (strongSelf.neuralUserSpeakingActive && (nowTs - strongSelf.lastNeuralSpeechActiveTime >= 0.50)) {
+                strongSelf.neuralUserSpeakingActive = NO;
+                if (nowTs - strongSelf.lastStreamEndSignalTime >= 0.90) {
+                    strongSelf.lastStreamEndSignalTime = nowTs;
+                    agLiveDiagLog(@"AUDIO_STREAM_END", @"Local Siri VAD detected end-of-speech (0.50s), triggering instant reply");
                     if (strongSelf.isGoogleBidiProtocol) {
                         [strongSelf sendJSONDictionaryOverWebSocket:@{
                             @"realtimeInput": @{ @"audioStreamEnd": @YES }
@@ -6629,15 +6784,16 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             }
         }
 
-        // 5. 持续推送 PCM 音频流
+        // 7. 极速低延迟推流：人声起音瞬间每 800 字节 (25ms) 立即发送，平时每 1600 字节 (50ms) 发送
         [strongSelf.outgoingPCMBuffer appendData:pcm16Chunk];
-        if (strongSelf.outgoingPCMBuffer.length >= 1600) {
+        NSUInteger pktThreshold = (strongSelf.neuralUserSpeakingActive || isAIPlaying) ? 800 : 1600;
+        if (strongSelf.outgoingPCMBuffer.length >= pktThreshold) {
             NSData *packet = [strongSelf.outgoingPCMBuffer copy];
             [strongSelf.outgoingPCMBuffer setLength:0];
             NSString *b64PCM = [packet base64EncodedStringWithOptions:0];
             strongSelf.txAudioPacketsCount++;
             if (strongSelf.txAudioPacketsCount % 25 == 1) {
-                agLiveDiagLog(@"MIC_AUDIO_TX", @"Sent audio packet #%lu (%lu bytes, db=%.1f)", (unsigned long)strongSelf.txAudioPacketsCount, (unsigned long)packet.length, db);
+                agLiveDiagLog(@"MIC_AUDIO_TX", @"Sent audio packet #%lu (%lu bytes, db=%.1f, freq=%.0fHz)", (unsigned long)strongSelf.txAudioPacketsCount, (unsigned long)packet.length, db, estFreqHz);
             }
             if (strongSelf.isGoogleBidiProtocol) {
                 [strongSelf sendJSONDictionaryOverWebSocket:@{
