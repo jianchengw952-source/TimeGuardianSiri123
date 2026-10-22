@@ -222,9 +222,31 @@ static NSString *geminiPrefsFilePath(void) {
 }
 
 static void reloadGeminiPrefsCache(void) {
-    NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithContentsOfFile:geminiPrefsFilePath()];
-    if (!dict) dict = [NSMutableDictionary dictionary];
-    gCachedPrefs = dict;
+    NSArray<NSString *> *paths = @[
+        @"/var/jb/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist",
+        @"/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist",
+        geminiPrefsFilePath()
+    ];
+    NSMutableDictionary *merged = [NSMutableDictionary dictionary];
+    NSDate *newestDate = nil;
+    NSDictionary *newestDict = nil;
+
+    for (NSString *p in paths) {
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
+        if ([d isKindOfClass:[NSDictionary class]] && d.count > 0) {
+            [merged addEntriesFromDictionary:d];
+            NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
+            NSDate *modDate = attrs[NSFileModificationDate];
+            if (!newestDate || (modDate && [modDate compare:newestDate] == NSOrderedDescending)) {
+                newestDate = modDate;
+                newestDict = d;
+            }
+        }
+    }
+    if (newestDict) {
+        [merged addEntriesFromDictionary:newestDict];
+    }
+    gCachedPrefs = merged;
 }
 
 static NSDictionary *agReadOnlyPrefs(void) {
@@ -1881,7 +1903,9 @@ static NSURLSession *agCreateSessionWithProxy(NSString *proxyStr, id<NSURLSessio
 // 全模型通用：iOS 客户端并发实时网页检索 (赋能无自带联网的第三方 API / DeepSeek / 任意中转模型)
 static void agFetchRealtimeWebSearchContextForQuery(NSString *query, NSString *proxy, void(^completion)(NSString *searchSummary)) {
     NSString *cleanQ = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (!agIsWebSearchEnabled() || cleanQ.length < 2) {
+    BOOL webEnabled = agIsWebSearchEnabled();
+    if (!webEnabled || cleanQ.length < 2) {
+        agLiveDiagLog(@"WEB_SEARCH_DIAG", @"Skipped: enabled=%d, queryLen=%lu", webEnabled, (unsigned long)cleanQ.length);
         if (completion) completion(nil);
         return;
     }
@@ -1891,21 +1915,30 @@ static void agFetchRealtimeWebSearchContextForQuery(NSString *query, NSString *p
         return;
     }
 
-    NSString *rssURLStr = [NSString stringWithFormat:@"https://www.bing.com/news/search?q=%@&format=rss&setlang=zh-cn", encodedQ];
+    // 使用 cn.bing.com 综合+新闻双兼容 RSS，覆盖天气、实时数据、百科与最新资讯
+    NSString *rssURLStr = [NSString stringWithFormat:@"https://cn.bing.com/search?q=%@&format=rss&setlang=zh-cn", encodedQ];
     NSURL *url = [NSURL URLWithString:rssURLStr];
     if (!url) {
         if (completion) completion(nil);
         return;
     }
 
+    NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
+    agLiveDiagLog(@"WEB_SEARCH_DIAG", @"Starting web search for query='%@', proxy='%@'", cleanQ, proxy ?: @"none");
+
     NSURLSession *session = agCreateSessionWithProxy(proxy, nil, nil);
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.HTTPMethod = @"GET";
-    req.timeoutInterval = 1.6;
+    req.timeoutInterval = 3.2;
     [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15" forHTTPHeaderField:@"User-Agent"];
 
     [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        NSInteger costMs = (NSInteger)(([NSDate timeIntervalSinceReferenceDate] - t0) * 1000.0);
+        NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)resp;
+        NSInteger statusCode = [httpResp isKindOfClass:[NSHTTPURLResponse class]] ? httpResp.statusCode : 0;
+
         if (err || !data || data.length < 50) {
+            agLiveDiagLog(@"WEB_SEARCH_DIAG", @"Failed (%ldms, HTTP %ld): %@", (long)costMs, (long)statusCode, err.localizedDescription ?: @"empty data");
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (completion) completion(nil);
             });
@@ -1913,6 +1946,7 @@ static void agFetchRealtimeWebSearchContextForQuery(NSString *query, NSString *p
         }
         NSString *xml = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
         if (!xml) {
+            agLiveDiagLog(@"WEB_SEARCH_DIAG", @"Failed (%ldms): UTF8 decode nil", (long)costMs);
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (completion) completion(nil);
             });
@@ -1945,11 +1979,12 @@ static void agFetchRealtimeWebSearchContextForQuery(NSString *query, NSString *p
             tStr = [[tStr stringByReplacingOccurrencesOfString:@"&quot;" withString:@"\""] stringByReplacingOccurrencesOfString:@"&amp;" withString:@"&"];
             dStr = [[dStr stringByReplacingOccurrencesOfString:@"&quot;" withString:@"\""] stringByReplacingOccurrencesOfString:@"&amp;" withString:@"&"];
             if (tStr.length > 0) {
-                [snippets addObject:[NSString stringWithFormat:@"- %@：%@", tStr, (dStr.length > 100 ? [dStr substringToIndex:100] : dStr)]];
+                [snippets addObject:[NSString stringWithFormat:@"- %@：%@", tStr, (dStr.length > 120 ? [dStr substringToIndex:120] : dStr)]];
             }
         }
 
         NSString *finalContext = (snippets.count > 0) ? [snippets componentsJoinedByString:@"\n"] : nil;
+        agLiveDiagLog(@"WEB_SEARCH_DIAG", @"Done (%ldms, HTTP %ld): found %lu snippets for '%@'", (long)costMs, (long)statusCode, (unsigned long)snippets.count, cleanQ);
         dispatch_async(dispatch_get_main_queue(), ^{
             if (completion) completion(finalContext);
         });
@@ -3554,6 +3589,10 @@ static void agSimulateScreenSwipe(CGPoint startPt, CGPoint endPt, NSTimeInterval
 @property (nonatomic, assign) BOOL neuralUserSpeakingActive;
 @property (nonatomic, assign) NSTimeInterval lastStreamEndSignalTime;
 @property (nonatomic, assign) BOOL useGoogleV1AlphaWS;
+@property (nonatomic, assign) NSTimeInterval engineStartTimestamp;
+@property (nonatomic, assign) NSUInteger micFramesSinceEngineStart;
+@property (nonatomic, copy) NSString *lastWebSearchedVoiceQuery;
+- (void)primeFullDuplexAudioEngineWithSilentPulse:(NSString *)reasonTag;
 - (void)startNativeAppleNeuralVADIfNeeded;
 - (void)stopNativeAppleNeuralVAD;
 - (void)triggerNativeSiriGradeInstantBargeIn:(NSString *)sourceTag;
@@ -6040,6 +6079,11 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
     self.isGoogleBidiProtocol = agIsGoogleNativeProtocol(endpoint, cleanModel);
     self.isSetupHandshakeCompleted = NO;
+    AVAudioSession * curSess = [AVAudioSession sharedInstance];
+    AVAudioSessionPortDescription *outPort = curSess.currentRoute.outputs.firstObject;
+    reloadGeminiPrefsCache();
+    agLiveDiagLog(@"SESSION_START_DIAG", @"tab=%ld | model=%@ | webSearch=%d | category=%@ | mode=%@ | outPort=%@ | outVol=%.2f",
+                  (long)tab, cleanModel, agIsWebSearchEnabled(), curSess.category, curSess.mode, outPort.portType ?: @"none", curSess.outputVolume);
     self.aiPlaybackEndTime = 0;
     self.subStatusLabel.text = [NSString stringWithFormat:@"📞 正在连接 %@ 实时通话 (%@)...", [self currentVendorBrandName], exactModelID];
 
@@ -6066,13 +6110,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     [self.liveWebSocketTask resume];
     [self receiveNextWebSocketMessage];
 
-    // 仅在此处唯一一次启动音频引擎，杜绝并发二次创建 AVAudioEngine 导致安全模式崩溃！
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (launchToken != self.sessionGenerationToken) return;
-        if (self.overlayWindow && !self.overlayWindow.hidden && self.activeModeTab != AGConfigTabPureText && self.liveWebSocketTask) {
-            [self setupAndStartFullDuplexPCMAudioEngine];
-        }
-    });
+    if (self.overlayWindow && !self.overlayWindow.hidden && self.activeModeTab != AGConfigTabPureText && self.liveWebSocketTask) {
+        [self setupAndStartFullDuplexPCMAudioEngine];
+    }
 }
 
 - (void)URLSession:(NSURLSession *)session webSocketTask:(NSURLSessionWebSocketTask *)webSocketTask didOpenWithProtocol:(NSString *)protocol {
@@ -6147,9 +6187,12 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             setupDict[@"inputAudioTranscription"] = @{};
             setupDict[@"outputAudioTranscription"] = @{};
         }
-        if (agIsWebSearchEnabled() && !self.disableToolsInSetup && ![rawModel containsString:@"3.8-live"]) {
+        BOOL attachGoogleSearch = (agIsWebSearchEnabled() && !self.disableToolsInSetup);
+        if (attachGoogleSearch) {
             setupDict[@"tools"] = @[ @{ @"googleSearch": @{} } ];
         }
+        agLiveDiagLog(@"WS_SETUP_DIAG", @"Sending setup: model=%@ | protocol=GoogleBidi(v1alpha=%d) | webSearchPref=%d | googleSearchTool=%d | transcription=%d",
+                      fullModelPath, self.useGoogleV1AlphaWS, agIsWebSearchEnabled(), attachGoogleSearch, !self.disableTranscriptionInSetup);
 
         [self sendJSONDictionaryOverWebSocket:@{ @"setup": setupDict }];
     } else {
@@ -6296,9 +6339,10 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         if (!self.isSetupHandshakeCompleted) {
             self.isSetupHandshakeCompleted = YES;
             self.wsReconnectCount = 0;
-            // ✅ 像原厂 Siri 一样：握手完成的瞬间，把用户唤醒时已经说出口的话从环形缓存一次性发给大模型，绝不漏掉开头第一个字！
+            // 握手完成瞬间发送静音脉冲锁定全双工时钟，确保麦克风与扬声器 100% 处于激活态
+            [self primeFullDuplexAudioEngineWithSilentPulse:@"WS_SETUP_COMPLETE"];
             [self flushAOPPreRollBufferOnHandshake];
-            agLiveDiagLog(@"WS_SETUP_COMPLETE", @"Handshake completed for model %@", self.activeWebSocketModel);
+            agLiveDiagLog(@"WS_SETUP_COMPLETE", @"Handshake completed for model %@ (toolsDisabled=%d)", self.activeWebSocketModel, self.disableToolsInSetup);
             self.subStatusLabel.text = (self.activeModeTab == AGConfigTabVideoAI)
                 ? @"📞📹 实时视频通话中 (请直接说话，支持随时插话打断)..."
                 : @"📞 实时语音通话中 (请直接说话，支持随时插话打断)...";
@@ -6391,6 +6435,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         }
         if ([serverContent[@"turnComplete"] boolValue]) {
             agRecordDialogueTurnToUniversalMemory(self.currentVoiceQueryBuffer ?: @"", self.accumulatedReplyText ?: @"");
+            [self.currentVoiceQueryBuffer setString:@""];
             [self flushPCM24kStagingBuffer];
             self.isLastTranscriptLineUser = NO;
             if ([self.accumulatedReplyText containsString:@"[ACTION:"]) {
@@ -6633,6 +6678,15 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
         if (self.pendingPlayBuffersCount == 0) {
             self.aiTurnAudioStartTime = now;
+            AVAudioSession *sess = [AVAudioSession sharedInstance];
+            NSString *outPortType = sess.currentRoute.outputs.firstObject.portType ?: @"unknown";
+            // 若输出意外掉回听筒(Receiver)，立即强制切回扬声器，防止首句无声
+            if ([outPortType isEqualToString:AVAudioSessionPortBuiltInReceiver]) {
+                [sess overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:nil];
+                outPortType = sess.currentRoute.outputs.firstObject.portType ?: @"SpeakerOverridden";
+            }
+            agLiveDiagLog(@"SPEAKER_FIRST_PLAY_DIAG", @"Turn first audio packet #%lu: samples=%lu | engineRunning=%d | playerPlaying=%d | outPort=%@ | vol=%.2f",
+                          (unsigned long)pktIdx, (unsigned long)inSampleCount, self.liveAudioEngine.isRunning, self.pcmPlayerNode.isPlaying, outPortType, sess.outputVolume);
         }
         self.pendingPlayBuffersCount++;
         double chunkDuration = (double)inSampleCount / 24000.0;
@@ -6671,6 +6725,35 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     });
 }
 
+// 发送 40ms 零分贝静音脉冲，像当年播放提示音一样 0ms 激活 VoiceProcessingIO 全双工时钟与功放，人耳完全无感
+- (void)primeFullDuplexAudioEngineWithSilentPulse:(NSString *)reasonTag {
+    dispatch_async(self.audioPlayQueue, ^{
+        if (self.isDismissed || !self.liveAudioEngine || !self.pcmPlayerNode || !self.playerOutputFormat) return;
+        @try {
+            if (!self.liveAudioEngine.isRunning) {
+                NSError *reErr = nil;
+                [self.liveAudioEngine startAndReturnError:&reErr];
+                agLiveDiagLog(@"AUDIO_PRIME_DIAG", @"Restarted stopped engine during prime (%@), err=%@", reasonTag, reErr.localizedDescription ?: @"none");
+            }
+            if (!self.pcmPlayerNode.isPlaying) {
+                [self.pcmPlayerNode play];
+            }
+            AVAudioFrameCount silentFrames = 1920; // 约 40ms 静音帧
+            AVAudioPCMBuffer *silentBuf = [[AVAudioPCMBuffer alloc] initWithPCMFormat:self.playerOutputFormat frameCapacity:silentFrames];
+            silentBuf.frameLength = silentFrames;
+            for (AVAudioChannelCount ch = 0; ch < self.playerOutputFormat.channelCount; ch++) {
+                if (silentBuf.floatChannelData[ch]) {
+                    memset(silentBuf.floatChannelData[ch], 0, silentFrames * sizeof(float));
+                }
+            }
+            [self.pcmPlayerNode scheduleBuffer:silentBuf completionHandler:nil];
+            agLiveDiagLog(@"AUDIO_PRIME_DIAG", @"Primed pcmPlayerNode with 40ms silent pulse (%@)", reasonTag);
+        } @catch (NSException *e) {
+            agLiveDiagLog(@"AUDIO_PRIME_ERR", @"Exception priming engine (%@): %@", reasonTag, e.reason);
+        }
+    });
+}
+
 - (void)setupAndStartFullDuplexPCMAudioEngine {
     NSUInteger expectedToken = self.sessionGenerationToken;
     dispatch_async(agAudioSerialQueue(), ^{
@@ -6682,6 +6765,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                     [self.pcmPlayerNode play];
                 }
                 agLiveDiagLog(@"AEC_AUDIO_ENGINE", @"Reusing active FullDuplex Engine (rate=%.0f)", self.playerOutputFormat.sampleRate);
+                self.micFramesSinceEngineStart = 0;
+                self.engineStartTimestamp = [[NSDate date] timeIntervalSince1970];
+                [self primeFullDuplexAudioEngineWithSilentPulse:@"REUSE_ENGINE"];
                 return;
             }
 
@@ -6749,6 +6835,31 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 self.pcmPlayerNode = player;
                 self.playerOutputFormat = mixerFormat;
                 agLiveDiagLog(@"AEC_AUDIO_ENGINE", @"Started FullDuplex Engine (inRate=%.0f, outRate=%.0f, vpErr=%@)", tapFormat.sampleRate, mixerFormat.sampleRate, vpErr.localizedDescription ?: @"none");
+
+                self.micFramesSinceEngineStart = 0;
+                self.engineStartTimestamp = [[NSDate date] timeIntervalSince1970];
+                // 若当前外放落入听筒，强制切到扬声器
+                AVAudioSessionPortDescription *curOut = session.currentRoute.outputs.firstObject;
+                if ([curOut.portType isEqualToString:AVAudioSessionPortBuiltInReceiver]) {
+                    [session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:nil];
+                }
+                [self primeFullDuplexAudioEngineWithSilentPulse:@"FRESH_START"];
+
+                // 0.85 秒麦克风硬件看门狗：若因系统路由抖动导致 0.85s 内未收到任何麦克风帧，自动执行热重启自愈
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.85 * NSEC_PER_SEC)), agAudioSerialQueue(), ^{
+                    if (self.isDismissed || expectedToken != self.sessionGenerationToken || self.activeModeTab == AGConfigTabPureText) return;
+                    if (self.micFramesSinceEngineStart == 0 && self.liveAudioEngine) {
+                        agLiveDiagLog(@"MIC_WATCHDOG_HEAL", @"0 mic frames 850ms after start! Auto-healing input tap & engine...");
+                        @try {
+                            [self.liveAudioEngine stop];
+                            NSError *healErr = nil;
+                            [self.liveAudioEngine startAndReturnError:&healErr];
+                            [self.pcmPlayerNode play];
+                            [self primeFullDuplexAudioEngineWithSilentPulse:@"WATCHDOG_HEAL"];
+                            agLiveDiagLog(@"MIC_WATCHDOG_HEAL", @"Watchdog heal completed (engineRunning=%d, err=%@)", self.liveAudioEngine.isRunning, healErr.localizedDescription ?: @"none");
+                        } @catch (NSException *e) {}
+                    }
+                });
             } else {
                 agLiveDiagLog(@"AUDIO_ERR", @"AVAudioEngine start error: %@", startErr.localizedDescription);
             }
@@ -6782,6 +6893,13 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
         float db = 20.0f * log10f(MAX(sqrtf(sum / MAX(1, inFrames)), 1e-7f));
         float peakDb = 20.0f * log10f(MAX(peakVal, 1e-7f));
+
+        strongSelf.micFramesSinceEngineStart++;
+        if (strongSelf.micFramesSinceEngineStart == 1) {
+            NSInteger firstFrameMs = (NSInteger)(([[NSDate date] timeIntervalSince1970] - strongSelf.engineStartTimestamp) * 1000.0);
+            agLiveDiagLog(@"MIC_FIRST_FRAME_OK", @"First mic hardware buffer arrived in %ldms (inFrames=%u, rate=%.0f, db=%.1f)",
+                          (long)firstFrameMs, (unsigned int)inFrames, inSampleRate, db);
+        }
 
         NSTimeInterval nowTs = [[NSDate date] timeIntervalSince1970];
         BOOL isAIPlaying = (strongSelf.pendingPlayBuffersCount > 0 || nowTs < strongSelf.aiPlaybackEndTime);
@@ -6823,7 +6941,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         }
 
         // 本地人声插话打断检测（与 ag_live_diagnostic(24).log 稳定阈值完全一致）
-        BOOL pastEchoGrace = (nowTs - strongSelf.aiTurnAudioStartTime > 0.35);
+        BOOL pastEchoGrace = (nowTs - strongSelf.aiTurnAudioStartTime > 0.55);
         if (isAIPlaying && pastEchoGrace) {
             if (db > -24.5f && peakDb > -12.5f) {
                 strongSelf.wsBargeInVoiceTicks++;
@@ -6873,7 +6991,29 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 - (void)handleAudioSessionRouteChange:(NSNotification *)note {
     if (self.isDismissed || !self.overlayWindow || self.overlayWindow.hidden) return;
     NSUInteger reason = [note.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
-    agLiveDiagLog(@"AUDIO_ROUTE", @"Route changed reason=%lu", (unsigned long)reason);
+    AVAudioSession *sess = [AVAudioSession sharedInstance];
+    NSString *inPort = sess.currentRoute.inputs.firstObject.portType ?: @"none";
+    NSString *outPort = sess.currentRoute.outputs.firstObject.portType ?: @"none";
+    agLiveDiagLog(@"AUDIO_ROUTE", @"Route changed reason=%lu | in=%@ | out=%@ | engineRunning=%d",
+                  (unsigned long)reason, inPort, outPort, (self.liveAudioEngine ? self.liveAudioEngine.isRunning : 0));
+
+    if (self.activeModeTab != AGConfigTabPureText) {
+        dispatch_async(agAudioSerialQueue(), ^{
+            if (self.isDismissed || !self.liveAudioEngine) return;
+            if ([outPort isEqualToString:AVAudioSessionPortBuiltInReceiver]) {
+                [sess overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:nil];
+            }
+            if (!self.liveAudioEngine.isRunning) {
+                NSError *err = nil;
+                [self.liveAudioEngine startAndReturnError:&err];
+                agLiveDiagLog(@"AUDIO_ROUTE_HEAL", @"Restarted engine after route change (running=%d, err=%@)", self.liveAudioEngine.isRunning, err.localizedDescription ?: @"none");
+            }
+            if (self.pcmPlayerNode && !self.pcmPlayerNode.isPlaying) {
+                [self.pcmPlayerNode play];
+            }
+            [self primeFullDuplexAudioEngineWithSilentPulse:@"ROUTE_CHANGE"];
+        });
+    }
 }
 
 #pragma mark - 引擎 B：高敏 WAV 语音直录直传
@@ -7132,6 +7272,41 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         [self.currentVoiceQueryBuffer setString:@""];
         if (self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
             [self.pcmPlayerNode stop];
+        }
+        return;
+    }
+
+    // 当开启了联网开关，且当前模型未挂载原生 googleSearch（如 disableToolsInSetup=YES 或非 Google 原生工具）时，自动执行客户端实时联网检索注入
+    if (agIsWebSearchEnabled() && self.isWebSocketConnected && self.isSetupHandshakeCompleted &&
+        (self.disableToolsInSetup || !self.isGoogleBidiProtocol)) {
+        NSString *cleanQ = [fullCmd stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (cleanQ.length >= 2 && ![cleanQ isEqualToString:self.lastWebSearchedVoiceQuery]) {
+            self.lastWebSearchedVoiceQuery = cleanQ;
+            NSString *proxy = agProxyForTab(self.activeModeTab);
+            agFetchRealtimeWebSearchContextForQuery(cleanQ, proxy, ^(NSString *searchSummary) {
+                if (searchSummary.length > 0 && self.isWebSocketConnected && self.isSetupHandshakeCompleted) {
+                    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+                    df.dateFormat = @"yyyy-MM-dd HH:mm";
+                    NSString *nowStr = [df stringFromDate:[NSDate date]];
+                    NSString *injectPrompt = [NSString stringWithFormat:@"【系统实时联网检索结果（当前时间：%@，针对用户刚才的问题「%@」）】\n%@\n请直接根据以上最新联网数据简明自然地语音回答用户。", nowStr, cleanQ, searchSummary];
+                    agLiveDiagLog(@"WEB_SEARCH_DIAG", @"Injected %lu chars of live web context into WebSocket for query '%@'", (unsigned long)searchSummary.length, cleanQ);
+                    if (self.isGoogleBidiProtocol) {
+                        [self sendJSONDictionaryOverWebSocket:@{
+                            @"realtimeInput": @{ @"text": injectPrompt }
+                        }];
+                    } else {
+                        [self sendJSONDictionaryOverWebSocket:@{
+                            @"type": @"conversation.item.create",
+                            @"item": @{
+                                @"type": @"message",
+                                @"role": @"user",
+                                @"content": @[ @{ @"type": @"input_text", @"text": injectPrompt } ]
+                            }
+                        }];
+                        [self sendJSONDictionaryOverWebSocket:@{ @"type": @"response.create" }];
+                    }
+                }
+            });
         }
     }
 }
