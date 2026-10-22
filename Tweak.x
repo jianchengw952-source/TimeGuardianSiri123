@@ -363,6 +363,13 @@ static NSArray<NSDictionary *> *agVerifiedDefaultModelsForTab(AGConfigTab tab) {
 - (void)clickedMenuButton;
 @end
 
+@interface SBLockScreenManager : NSObject
++ (instancetype)sharedInstance;
++ (instancetype)sharedInstanceIfExists;
+@property (readonly, nonatomic) BOOL isUILocked;
+- (BOOL)lockUIFromSource:(NSInteger)source withOptions:(id)options;
+@end
+
 @interface SBBacklightController : NSObject
 + (instancetype)sharedInstance;
 + (instancetype)sharedInstanceIfExists;
@@ -409,13 +416,6 @@ static void agWakeScreenBacklightIfNeeded(void) {
         } @catch (NSException *e) {}
     });
 }
-
-@interface SBLockScreenManager : NSObject
-+ (instancetype)sharedInstance;
-+ (instancetype)sharedInstanceIfExists;
-@property (readonly, nonatomic) BOOL isUILocked;
-- (BOOL)lockUIFromSource:(NSInteger)source withOptions:(id)options;
-@end
 
 @interface SBAssistantController : NSObject
 + (instancetype)sharedInstance;
