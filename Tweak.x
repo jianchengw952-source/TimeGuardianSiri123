@@ -1915,8 +1915,8 @@ static void agFetchRealtimeWebSearchContextForQuery(NSString *query, NSString *p
         return;
     }
 
-    // 使用 cn.bing.com 综合+新闻双兼容 RSS，覆盖天气、实时数据、百科与最新资讯
-    NSString *rssURLStr = [NSString stringWithFormat:@"https://cn.bing.com/search?q=%@&format=rss&setlang=zh-cn", encodedQ];
+    // 使用 bing.com 新闻与实时资讯最稳定 RSS
+    NSString *rssURLStr = [NSString stringWithFormat:@"https://www.bing.com/news/search?q=%@&format=rss&setlang=zh-cn", encodedQ];
     NSURL *url = [NSURL URLWithString:rssURLStr];
     if (!url) {
         if (completion) completion(nil);
@@ -6187,6 +6187,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             setupDict[@"inputAudioTranscription"] = @{};
             setupDict[@"outputAudioTranscription"] = @{};
         }
+        if ([rawModel containsString:@"3.8-live"]) {
+            self.disableToolsInSetup = YES; // 3.8-live 不支持服务端 googleSearch 参数，直接标记使用客户端实时网页检索，免去断连重试
+        }
         BOOL attachGoogleSearch = (agIsWebSearchEnabled() && !self.disableToolsInSetup);
         if (attachGoogleSearch) {
             setupDict[@"tools"] = @[ @{ @"googleSearch": @{} } ];
@@ -6382,13 +6385,13 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 }
                 [curTrans appendString:userDelta];
                 [self.currentVoiceQueryBuffer appendString:userDelta];
+                agLiveDiagLog(@"VOICE_RECOG_DIAG", @"User speech delta='%@' | buffer='%@'", userDelta, self.currentVoiceQueryBuffer);
                 [self updateResponseTextViewSmoothly:curTrans];
                 self.subStatusLabel.text = [NSString stringWithFormat:@"🎙️ 正在听您说：%@", self.currentVoiceQueryBuffer];
                 [self throttledExpandAndScrollTextViewForce:NO];
 
-                // 防抖机制：等待用户停顿 0.70 秒确认整句话说完后再执行本地自动化指令，严禁半句话抢跑截胡！
                 [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(checkDeferredVoiceLocalCommand) object:nil];
-                [self performSelector:@selector(checkDeferredVoiceLocalCommand) withObject:nil afterDelay:0.70];
+                [self performSelector:@selector(checkDeferredVoiceLocalCommand) withObject:nil afterDelay:0.42];
             }
         }
 
@@ -6397,6 +6400,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(checkDeferredVoiceLocalCommand) object:nil];
             if (self.currentVoiceQueryBuffer.length > 0) {
                 NSString *fullVoiceCmd = [self.currentVoiceQueryBuffer copy];
+                // 【关键修复】在清空 currentVoiceQueryBuffer 前，先执行 checkDeferredVoiceLocalCommand（内含本地命令与客户端实时联网检索！）
+                [self checkDeferredVoiceLocalCommand];
                 [self.currentVoiceQueryBuffer setString:@""];
                 if ([self tryExecuteDirectLocalCommand:fullVoiceCmd]) {
                     if (self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) [self.pcmPlayerNode stop];
@@ -6415,6 +6420,11 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
         NSArray *parts = serverContent[@"modelTurn"][@"parts"];
         if ([parts isKindOfClass:[NSArray class]]) {
+            if (self.currentVoiceQueryBuffer.length > 0) {
+                [self checkDeferredVoiceLocalCommand];
+                [self.currentVoiceQueryBuffer setString:@""];
+            }
+
             for (NSDictionary *part in parts) {
                 if (![part isKindOfClass:[NSDictionary class]]) continue;
                 if ([part[@"thought"] boolValue]) continue;
@@ -6668,10 +6678,13 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             }
         }
 
-        if (!self.liveAudioEngine.isRunning) {
+        BOOL engineWasOff = !self.liveAudioEngine.isRunning;
+        if (engineWasOff) {
             [self.liveAudioEngine startAndReturnError:nil];
         }
-        if (!self.pcmPlayerNode.isPlaying) {
+        // 【核心修复】当引擎刚拉起，或这是本轮 AI 回复的第 1 个音频包（pendingPlayBuffersCount == 0）时，重置 player 时间轴确保首句 100% 出声
+        if (engineWasOff || self.pendingPlayBuffersCount == 0 || !self.pcmPlayerNode.isPlaying) {
+            [self.pcmPlayerNode stop];
             [self.pcmPlayerNode play];
         }
 
@@ -6730,15 +6743,18 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     dispatch_async(self.audioPlayQueue, ^{
         if (self.isDismissed || !self.liveAudioEngine || !self.pcmPlayerNode || !self.playerOutputFormat) return;
         @try {
-            if (!self.liveAudioEngine.isRunning) {
+            BOOL engineWasStopped = !self.liveAudioEngine.isRunning;
+            if (engineWasStopped) {
                 NSError *reErr = nil;
                 [self.liveAudioEngine startAndReturnError:&reErr];
                 agLiveDiagLog(@"AUDIO_PRIME_DIAG", @"Restarted stopped engine during prime (%@), err=%@", reasonTag, reErr.localizedDescription ?: @"none");
             }
-            if (!self.pcmPlayerNode.isPlaying) {
+            // 【核心修复】只要引擎发生过重启，或者当前没有正在播放的 AI 语音，必须先 stop 再 play 重新绑定渲染时钟，否则第一句必无声！
+            if (engineWasStopped || self.pendingPlayBuffersCount == 0 || !self.pcmPlayerNode.isPlaying) {
+                [self.pcmPlayerNode stop];
                 [self.pcmPlayerNode play];
             }
-            AVAudioFrameCount silentFrames = 1920; // 约 40ms 静音帧
+            AVAudioFrameCount silentFrames = 1920;
             AVAudioPCMBuffer *silentBuf = [[AVAudioPCMBuffer alloc] initWithPCMFormat:self.playerOutputFormat frameCapacity:silentFrames];
             silentBuf.frameLength = silentFrames;
             for (AVAudioChannelCount ch = 0; ch < self.playerOutputFormat.channelCount; ch++) {
@@ -6747,7 +6763,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 }
             }
             [self.pcmPlayerNode scheduleBuffer:silentBuf completionHandler:nil];
-            agLiveDiagLog(@"AUDIO_PRIME_DIAG", @"Primed pcmPlayerNode with 40ms silent pulse (%@)", reasonTag);
+            agLiveDiagLog(@"AUDIO_PRIME_DIAG", @"Primed & resynced pcmPlayerNode (%@, engineReStarted=%d)", reasonTag, engineWasStopped);
         } @catch (NSException *e) {
             agLiveDiagLog(@"AUDIO_PRIME_ERR", @"Exception priming engine (%@): %@", reasonTag, e.reason);
         }
@@ -7285,10 +7301,19 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             NSString *proxy = agProxyForTab(self.activeModeTab);
             agFetchRealtimeWebSearchContextForQuery(cleanQ, proxy, ^(NSString *searchSummary) {
                 if (searchSummary.length > 0 && self.isWebSocketConnected && self.isSetupHandshakeCompleted) {
+                    // 打断模型未联网前的盲猜语音，立即用最新检索结果重新语音作答
+                    self.currentTurnPlaybackID++;
+                    self.pendingPlayBuffersCount = 0;
+                    dispatch_async(self.audioPlayQueue, ^{
+                        if (self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
+                            [self.pcmPlayerNode stop];
+                            [self.pcmPlayerNode play];
+                        }
+                    });
                     NSDateFormatter *df = [[NSDateFormatter alloc] init];
                     df.dateFormat = @"yyyy-MM-dd HH:mm";
                     NSString *nowStr = [df stringFromDate:[NSDate date]];
-                    NSString *injectPrompt = [NSString stringWithFormat:@"【系统实时联网检索结果（当前时间：%@，针对用户刚才的问题「%@」）】\n%@\n请直接根据以上最新联网数据简明自然地语音回答用户。", nowStr, cleanQ, searchSummary];
+                    NSString *injectPrompt = [NSString stringWithFormat:@"【系统实时联网检索结果（当前时间：%@，针对用户刚才的问题「%@」）】\n%@\n请立即根据以上最新联网数据简明自然地语音回答用户。", nowStr, cleanQ, searchSummary];
                     agLiveDiagLog(@"WEB_SEARCH_DIAG", @"Injected %lu chars of live web context into WebSocket for query '%@'", (unsigned long)searchSummary.length, cleanQ);
                     if (self.isGoogleBidiProtocol) {
                         [self sendJSONDictionaryOverWebSocket:@{
