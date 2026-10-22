@@ -354,7 +354,7 @@ static void agRecordDialogueTurnToUniversalMemory(NSString *userText, NSString *
     }
 
     if ([aClean containsString:@"[MEMORY:"]) {
-        NSRegularExpression *memRe = [NSRegularExpression regularExpressionWithPattern:@"\[MEMORY:(\{.*?\})\]" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
+        NSRegularExpression *memRe = [NSRegularExpression regularExpressionWithPattern:@"\\[MEMORY:(\\{.*?\\})\\]" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
         NSArray<NSTextCheckingResult *> *matches = [memRe matchesInString:aClean options:0 range:NSMakeRange(0, aClean.length)];
         for (NSTextCheckingResult *m in matches) {
             if (m.numberOfRanges > 1) {
@@ -412,21 +412,15 @@ static NSString *agBuildUniversalMemoryPromptBlockForQuery(NSString *currentQuer
     NSArray *recentTurns = mem[@"recentTurns"];
     if (facts.count == 0 && summaries.count == 0 && recentTurns.count == 0) return @"";
 
-    NSMutableString *blk = [NSMutableString stringWithString:@"
-【全模型永久记忆中枢（请结合以下用户长期记忆与历史上下文自然回答；当用户透露新个人偏好或要求记住某事时，请在回答末尾附带 [MEMORY:{"fact":"核心事实"}]）】
-"];
+    NSMutableString *blk = [NSMutableString stringWithString:@"\n【全模型永久记忆中枢（请结合以下用户长期记忆与历史上下文自然回答；当用户透露新个人偏好或要求记住某事时，请在回答末尾附带 [MEMORY:{\"fact\":\"核心事实\"}]）】\n"];
     if (facts.count > 0) {
-        [blk appendString:@"📌 永久核心记忆：
-"];
-        for (NSString *f in facts) [blk appendFormat:@"- %@
-", f];
+        [blk appendString:@"📌 永久核心记忆：\n"];
+        for (NSString *f in facts) [blk appendFormat:@"- %@\n", f];
     }
     if (summaries.count > 0) {
-        [blk appendString:@"🗂️ 历史阶段纪要：
-"];
+        [blk appendString:@"🗂️ 历史阶段纪要：\n"];
         NSUInteger sStart = (summaries.count > 12) ? (summaries.count - 12) : 0;
-        for (NSUInteger i = sStart; i < summaries.count; i++) [blk appendFormat:@"- %@
-", summaries[i]];
+        for (NSUInteger i = sStart; i < summaries.count; i++) [blk appendFormat:@"- %@\n", summaries[i]];
     }
     NSString *cleanQ = [currentQuery stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (cleanQ.length >= 2 && fullArchive.count > recentTurns.count) {
@@ -445,22 +439,17 @@ static NSString *agBuildUniversalMemoryPromptBlockForQuery(NSString *currentQuer
             if (matched) [recalled addObject:[NSString stringWithFormat:@"[%@] 用户：%@ | 助手：%@", entry[@"t"] ?: @"", uHist, aHist]];
         }
         if (recalled.count > 0) {
-            [blk appendString:@"🔍 远期相关对话回忆：
-"];
-            for (NSString *line in recalled) [blk appendFormat:@"- %@
-", line];
+            [blk appendString:@"🔍 远期相关对话回忆：\n"];
+            for (NSString *line in recalled) [blk appendFormat:@"- %@\n", line];
         }
     }
     if (recentTurns.count > 0) {
-        [blk appendString:@"💬 最近对话上下文：
-"];
+        [blk appendString:@"💬 最近对话上下文：\n"];
         NSUInteger rStart = (recentTurns.count > 15) ? (recentTurns.count - 15) : 0;
         for (NSUInteger i = rStart; i < recentTurns.count; i++) {
             NSDictionary *t = recentTurns[i];
-            if ([t[@"u"] length] > 0) [blk appendFormat:@"用户(%@)：%@
-", t[@"t"] ?: @"", t[@"u"]];
-            if ([t[@"a"] length] > 0) [blk appendFormat:@"助手：%@
-", t[@"a"]];
+            if ([t[@"u"] length] > 0) [blk appendFormat:@"用户(%@)：%@\n", t[@"t"] ?: @"", t[@"u"]];
+            if ([t[@"a"] length] > 0) [blk appendFormat:@"助手：%@\n", t[@"a"]];
         }
     }
     return blk;
