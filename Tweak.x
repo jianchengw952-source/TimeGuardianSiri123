@@ -2205,7 +2205,7 @@ static double agCalculateModelNewestScore(NSString *modelID, NSDictionary *mDict
     NSString *lower = [[modelID lowercaseString] stringByReplacingOccurrencesOfString:@"models/" withString:@""];
     double score = 100.0;
 
-    NSRegularExpression *verRe = [NSRegularExpression regularExpressionWithPattern:@"(?:^|-|[a-z])(\d+)(?:\.(\d+))?" options:0 error:nil];
+    NSRegularExpression *verRe = [NSRegularExpression regularExpressionWithPattern:@"(?:^|-|[a-z])(\\d+)(?:\\.(\\d+))?" options:0 error:nil];
     NSTextCheckingResult *verMatch = [verRe firstMatchInString:lower options:0 range:NSMakeRange(0, lower.length)];
     if (verMatch && verMatch.numberOfRanges > 1) {
         double major = [[lower substringWithRange:[verMatch rangeAtIndex:1]] doubleValue];
