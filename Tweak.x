@@ -3531,6 +3531,7 @@ static void agSimulateScreenSwipe(CGPoint startPt, CGPoint endPt, NSTimeInterval
 @property (nonatomic, assign) BOOL isLastTranscriptLineUser; // 标记当前最后一行是否为正在实时弹出的用户语音字幕
 @property (nonatomic, copy) NSString *activeWebSocketModel;
 @property (nonatomic, assign) BOOL disableTranscriptionInSetup;
+@property (nonatomic, assign) BOOL disableToolsInSetup;
 @property (nonatomic, strong) dispatch_queue_t audioPlayQueue;
 @property (nonatomic, assign) NSUInteger sessionGenerationToken;
 @property (nonatomic, assign) NSUInteger currentTurnPlaybackID;
@@ -5997,21 +5998,19 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     [self stopAllVoiceEngines];
     pauseBackgroundMediaPlayback();
     self.wsReconnectCount = 0;
+    self.disableToolsInSetup = NO;
     self.disableTranscriptionInSetup = NO;
+    self.useGoogleV1AlphaWS = NO;
     self.hasAutoMigratedDeprecatedModel = NO;
 
     [self ensureCloudModelsLoadedForTab:tab completion:^(NSString *readyModel) {
         if (tab == AGConfigTabNativeLive || tab == AGConfigTabVideoAI || agIsWebSocketBidiCapableModel(readyModel, tab)) {
             NSString *targetModel = readyModel;
-            if (!agIsWebSocketBidiCapableModel(targetModel, tab)) {
-                for (NSDictionary *m in agCachedModelsForTab(tab)) {
-                    if ([m[@"bidi"] boolValue]) {
-                        targetModel = m[@"id"];
-                        break;
-                    }
-                }
+            if (!targetModel || targetModel.length == 0) {
+                NSArray<NSDictionary *> *cached = agCachedModelsForTab(tab);
+                if (cached.count > 0) targetModel = cached.firstObject[@"id"];
             }
-            if (!targetModel || targetModel.length == 0 || !agIsWebSocketBidiCapableModel(targetModel, tab)) {
+            if (!targetModel || targetModel.length == 0) {
                 targetModel = @"models/gemini-2.5-flash-native-audio-preview-09-2025";
             }
             self.activeWebSocketModel = targetModel;
@@ -6148,7 +6147,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             setupDict[@"inputAudioTranscription"] = @{};
             setupDict[@"outputAudioTranscription"] = @{};
         }
-        if (agIsWebSearchEnabled()) {
+        if (agIsWebSearchEnabled() && !self.disableToolsInSetup && ![rawModel containsString:@"3.8-live"]) {
             setupDict[@"tools"] = @[ @{ @"googleSearch": @{} } ];
         }
 
@@ -6234,48 +6233,34 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (boundTask != strongSelf.liveWebSocketTask || !strongSelf.overlayWindow || strongSelf.overlayWindow.hidden || strongSelf.activeModeTab == AGConfigTabPureText) return;
 
-                if (strongSelf.wsReconnectCount == 0 && strongSelf.isGoogleBidiProtocol && !strongSelf.useGoogleV1AlphaWS) {
-                    // 第 1 次重试：针对最新 Google Live 模型（如 3.x-live），自动切换 v1alpha 协议端点重试用户当前选中的模型
+                // 第 1 次重试：去掉 googleSearch tools（解决 gemini-3.8-live 等模型开启联网开关时握手被拒问题）
+                if (strongSelf.wsReconnectCount == 0 && !strongSelf.disableToolsInSetup) {
                     strongSelf.wsReconnectCount = 1;
-                    strongSelf.useGoogleV1AlphaWS = YES;
-                    agLiveDiagLog(@"WS_RETRY", @"Switching to v1alpha endpoint for model %@", boundModel);
+                    strongSelf.disableToolsInSetup = YES;
+                    agLiveDiagLog(@"WS_RETRY", @"Retrying without googleSearch tools for model %@", boundModel);
                     [strongSelf startWebSocketBidiSessionWithModel:boundModel forTab:strongSelf.activeModeTab];
                     return;
                 }
-                if (strongSelf.wsReconnectCount == 1 && !strongSelf.disableTranscriptionInSetup) {
-                    // 第 2 次重试：精简 Setup 転写字段重试
+                // 第 2 次重试：精简 transcription 字段重试
+                if (strongSelf.wsReconnectCount <= 1 && !strongSelf.disableTranscriptionInSetup) {
                     strongSelf.wsReconnectCount = 2;
                     strongSelf.disableTranscriptionInSetup = YES;
                     agLiveDiagLog(@"WS_RETRY", @"Retrying without transcription fields for model %@", boundModel);
                     [strongSelf startWebSocketBidiSessionWithModel:boundModel forTab:strongSelf.activeModeTab];
                     return;
                 }
-
-                // 若当前模型在 v1beta 和 v1alpha 均无法握手，从已实测通过的缓存模型列表中动态选取下一个可用 WebSocket 模型（不写死任何版本号）
-                NSArray<NSDictionary *> *verifiedModels = agCachedModelsForTab(strongSelf.activeModeTab);
-                NSString *nextVerifiedModel = nil;
-                for (NSDictionary *m in verifiedModels) {
-                    NSString *candID = m[@"id"];
-                    if ([m[@"isUsable"] boolValue] && [m[@"verified"] boolValue] && ![candID isEqualToString:boundModel]) {
-                        nextVerifiedModel = candID;
-                        break;
-                    }
-                }
-                if (nextVerifiedModel.length > 0 && strongSelf.wsReconnectCount < 3) {
+                // 第 3 次重试：尝试 v1alpha 端点
+                if (strongSelf.wsReconnectCount <= 2 && strongSelf.isGoogleBidiProtocol && !strongSelf.useGoogleV1AlphaWS) {
                     strongSelf.wsReconnectCount = 3;
-                    strongSelf.useGoogleV1AlphaWS = NO;
-                    strongSelf.disableTranscriptionInSetup = NO;
-                    strongSelf.activeWebSocketModel = nextVerifiedModel;
-                    NSMutableDictionary *p = loadGeminiPrefs();
-                    p[[NSString stringWithFormat:@"%@_Model", agPrefixForTab(strongSelf.activeModeTab)]] = nextVerifiedModel;
-                    saveGeminiPrefs(p);
-                    [strongSelf updateHeaderBadges];
-                    agLiveDiagLog(@"WS_FALLBACK", @"Switching to dynamically verified WebSocket model: %@", nextVerifiedModel);
-                    [strongSelf startWebSocketBidiSessionWithModel:nextVerifiedModel forTab:strongSelf.activeModeTab];
-                } else {
-                    [strongSelf stopAllVoiceEngines];
-                    strongSelf.subStatusLabel.text = [NSString stringWithFormat:@"❌ 实时连接断开 (%@)，请点右上角⚙️刷新可用模型", [boundModel stringByReplacingOccurrencesOfString:@"models/" withString:@""]];
+                    strongSelf.useGoogleV1AlphaWS = YES;
+                    agLiveDiagLog(@"WS_RETRY", @"Switching to v1alpha endpoint for model %@", boundModel);
+                    [strongSelf startWebSocketBidiSessionWithModel:boundModel forTab:strongSelf.activeModeTab];
+                    return;
                 }
+
+                // 严禁自动改写 saveGeminiPrefs 把用户的模型跳回默认！保持用户所选模型提示状态
+                [strongSelf stopAllVoiceEngines];
+                strongSelf.subStatusLabel.text = [NSString stringWithFormat:@"⚠️ 实时连接中断 (%@)，请轻点下方🎙️重连", [boundModel stringByReplacingOccurrencesOfString:@"models/" withString:@""]];
             });
             return;
         }
@@ -6472,37 +6457,28 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     NSData *preRoll = nil;
     @synchronized (self.wsPreRollPCMBuffer) {
         if (self.wsPreRollPCMBuffer.length > 0) {
-            preRoll = [self.wsPreRollPCMBuffer copy];
+            // 仅保留最近 1.5 秒（48000 字节）有效预录语音，单包发送不触发 inFlight 限流丢包
+            if (self.wsPreRollPCMBuffer.length > 48000) {
+                preRoll = [self.wsPreRollPCMBuffer subdataWithRange:NSMakeRange(self.wsPreRollPCMBuffer.length - 48000, 48000)];
+            } else {
+                preRoll = [self.wsPreRollPCMBuffer copy];
+            }
             [self.wsPreRollPCMBuffer setLength:0];
         }
     }
     if (!preRoll || preRoll.length == 0) return;
 
-    // 先推 100ms 静音建立云端 VAD 基准，再把唤醒期间缓存的语音包高速发出
-    NSMutableData *silenceLead = [NSMutableData dataWithLength:3200];
-    NSString *silenceB64 = [silenceLead base64EncodedStringWithOptions:0];
+    NSMutableData *combined = [NSMutableData dataWithLength:3200]; // 100ms 静音引导头
+    [combined appendData:preRoll];
+    NSString *b64 = [combined base64EncodedStringWithOptions:0];
     if (self.isGoogleBidiProtocol) {
         [self sendJSONDictionaryOverWebSocket:@{
-            @"realtimeInput": @{ @"audio": @{ @"mimeType": @"audio/pcm;rate=16000", @"data": silenceB64 } }
+            @"realtimeInput": @{ @"audio": @{ @"mimeType": @"audio/pcm;rate=16000", @"data": b64 } }
         }];
     } else {
-        [self sendJSONDictionaryOverWebSocket:@{ @"type": @"input_audio_buffer.append", @"audio": silenceB64 }];
+        [self sendJSONDictionaryOverWebSocket:@{ @"type": @"input_audio_buffer.append", @"audio": b64 }];
     }
-
-    NSUInteger chunkSz = 3200;
-    for (NSUInteger offset = 0; offset < preRoll.length; offset += chunkSz) {
-        NSUInteger thisLen = MIN(chunkSz, preRoll.length - offset);
-        NSData *sub = [preRoll subdataWithRange:NSMakeRange(offset, thisLen)];
-        NSString *b64 = [sub base64EncodedStringWithOptions:0];
-        if (self.isGoogleBidiProtocol) {
-            [self sendJSONDictionaryOverWebSocket:@{
-                @"realtimeInput": @{ @"audio": @{ @"mimeType": @"audio/pcm;rate=16000", @"data": b64 } }
-            }];
-        } else {
-            [self sendJSONDictionaryOverWebSocket:@{ @"type": @"input_audio_buffer.append", @"audio": b64 }];
-        }
-    }
-    agLiveDiagLog(@"AOP_PREROLL_SENT", @"Flushed %lu bytes of AOP pre-roll speech", (unsigned long)preRoll.length);
+    agLiveDiagLog(@"PREROLL_SENT", @"Flushed 3200B silence lead + %lu bytes of pre-roll audio on setupComplete", (unsigned long)preRoll.length);
 }
 
 // 2. 原厂 Siri 级 0 毫秒瞬时打断器
@@ -6772,9 +6748,6 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 self.liveAudioEngine = engine;
                 self.pcmPlayerNode = player;
                 self.playerOutputFormat = mixerFormat;
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [self startNativeAppleNeuralVADIfNeeded];
-                });
                 agLiveDiagLog(@"AEC_AUDIO_ENGINE", @"Started FullDuplex Engine (inRate=%.0f, outRate=%.0f, vpErr=%@)", tapFormat.sampleRate, mixerFormat.sampleRate, vpErr.localizedDescription ?: @"none");
             } else {
                 agLiveDiagLog(@"AUDIO_ERR", @"AVAudioEngine start error: %@", startErr.localizedDescription);
@@ -6788,11 +6761,6 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 - (void)processMicrophoneInputPCMBuffer:(AVAudioPCMBuffer *)buffer {
     if (!buffer || buffer.frameLength == 0 || buffer.floatChannelData == NULL) return;
 
-    // 1. 同步将原始硬件音频流喂给苹果本地神经网络识别器 (0 阻塞识别人类音节)
-    if (self.nativeNeuralVADRequest) {
-        @try { [self.nativeNeuralVADRequest appendAudioPCMBuffer:buffer]; } @catch (NSException *e) {}
-    }
-
     AVAudioFrameCount inFrames = buffer.frameLength;
     double inSampleRate = buffer.format.sampleRate > 0 ? buffer.format.sampleRate : 48000.0;
     NSData *copiedFloats = [NSData dataWithBytes:buffer.floatChannelData[0] length:inFrames * sizeof(float)];
@@ -6805,124 +6773,79 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         const float *floatSamples = (const float *)copiedFloats.bytes;
         float sum = 0.0f;
         float peakVal = 0.0f;
-        float voiceBandEnergy = 0.0f; // 人类声带基频与共振峰频段 (300Hz ~ 3400Hz) 能量
-        uint32_t zeroCrossings = 0;
-        float prevSample = floatSamples[0];
-        float lpState = 0.0f;
-
         for (AVAudioFrameCount i = 0; i < inFrames; i++) {
             float s = floatSamples[i];
             sum += s * s;
             float absS = fabsf(s);
             if (absS > peakVal) peakVal = absS;
-
-            // 一阶带通近似提取人类语音核心频段 (滤除低频环境轰鸣与高频杂音)
-            float diff = s - prevSample;
-            lpState = lpState * 0.72f + diff * 0.28f;
-            voiceBandEnergy += lpState * lpState;
-
-            if ((s >= 0.0f && prevSample < 0.0f) || (s < 0.0f && prevSample >= 0.0f)) {
-                zeroCrossings++;
-            }
-            prevSample = s;
         }
 
-        float rms = sqrtf(sum / MAX(1, inFrames));
-        float db = 20.0f * log10f(MAX(rms, 1e-7f));
+        float db = 20.0f * log10f(MAX(sqrtf(sum / MAX(1, inFrames)), 1e-7f));
         float peakDb = 20.0f * log10f(MAX(peakVal, 1e-7f));
-        // 计算过零率对应的等效主频 (Hz) 与人声频段集中度，精准区分“真人在说话”与“环境杂音/回声”
-        float estFreqHz = ((float)zeroCrossings * (float)inSampleRate) / (2.0f * (float)MAX(1, inFrames));
-        float voiceBandRatio = voiceBandEnergy / MAX(sum, 1e-9f);
-        BOOL hasHumanVocalFormant = (estFreqHz >= 180.0f && estFreqHz <= 3200.0f && voiceBandRatio > 0.035f);
 
         NSTimeInterval nowTs = [[NSDate date] timeIntervalSince1970];
         BOOL isAIPlaying = (strongSelf.pendingPlayBuffersCount > 0 || nowTs < strongSelf.aiPlaybackEndTime);
 
-        // 2. 丝滑声波反馈：只要检测到人声频谱或轻声细语 (>-56dB)，立即驱动流光声波
         if (!isAIPlaying) {
-            if (db > -56.0f && (hasHumanVocalFormant || db > -44.0f)) {
-                [strongSelf setWaveBarsLevel:MAX(0.24, MIN(1.0, (db + 56.0f) / 32.0f))];
+            if (db > -44.0f) {
+                [strongSelf setWaveBarsLevel:MAX(0.24, MIN(1.0, (db + 46.0f) / 26.0f))];
             } else {
                 [strongSelf setWaveBarsLevel:0.0];
             }
         }
 
-        // 3. 自适应动态 AGC 人声放大：当用户离远小声说话 (-48dB~-30dB) 时自动给予 2.8x 增益，贴近原厂 Siri 远场拾音灵敏度
         double targetRate = strongSelf.isGoogleBidiProtocol ? 16000.0 : 24000.0;
         double ratio = inSampleRate / targetRate;
         NSUInteger outFrames = (NSUInteger)((double)inFrames / ratio);
         if (outFrames == 0) return;
 
-        float dynamicGain = (db < -30.0f && hasHumanVocalFormant) ? 2.75f : 2.25f;
         NSMutableData *pcm16Chunk = [NSMutableData dataWithLength:outFrames * sizeof(int16_t)];
         int16_t *outPtr = (int16_t *)pcm16Chunk.mutableBytes;
         for (NSUInteger i = 0; i < outFrames; i++) {
             double srcIdx = (double)i * ratio;
             NSUInteger idx0 = (NSUInteger)srcIdx;
             NSUInteger idx1 = MIN(idx0 + 1, (NSUInteger)(inFrames - 1));
-            float sample = (float)((1.0 - (srcIdx - idx0)) * floatSamples[idx0] + (srcIdx - idx0) * floatSamples[idx1]) * dynamicGain;
+            float sample = (float)((1.0 - (srcIdx - idx0)) * floatSamples[idx0] + (srcIdx - idx0) * floatSamples[idx1]) * 2.10f;
             sample = MAX(-1.0f, MIN(1.0f, sample));
             outPtr[i] = (int16_t)(sample * 32767.0f);
         }
 
-        // 4. 像原厂 Siri AOP 协处理器一样：若握手尚未完成，将用户唤醒瞬间说的话全部存入环形缓存，绝不丢弃！
+        // 握手完成前存入环形缓冲，握手完成瞬间自动冲刷
         if (!strongSelf.isWebSocketConnected || !strongSelf.isSetupHandshakeCompleted) {
             @synchronized (strongSelf.wsPreRollPCMBuffer) {
                 [strongSelf.wsPreRollPCMBuffer appendData:pcm16Chunk];
-                if (strongSelf.wsPreRollPCMBuffer.length > 128000) {
-                    NSRange dropRange = NSMakeRange(0, strongSelf.wsPreRollPCMBuffer.length - 128000);
+                if (strongSelf.wsPreRollPCMBuffer.length > 48000) {
+                    NSRange dropRange = NSMakeRange(0, strongSelf.wsPreRollPCMBuffer.length - 48000);
                     [strongSelf.wsPreRollPCMBuffer replaceBytesInRange:dropRange withBytes:NULL length:0];
                 }
             }
             return;
         }
 
-        // 5. 原厂 Siri 级人声打断：结合人声共振峰特征 (hasHumanVocalFormant)，哪怕轻声说话 (-31dB) 仅需 2 帧 (~40ms) 立即打断！
-        BOOL pastEchoGrace = (nowTs - strongSelf.aiTurnAudioStartTime > 0.22);
+        // 本地人声插话打断检测（与 ag_live_diagnostic(24).log 稳定阈值完全一致）
+        BOOL pastEchoGrace = (nowTs - strongSelf.aiTurnAudioStartTime > 0.35);
         if (isAIPlaying && pastEchoGrace) {
-            BOOL isClearHumanBargeIn  = (hasHumanVocalFormant && db > -31.0f && peakDb > -18.5f);
-            BOOL isDirectStrongVoice  = (db > -22.5f && peakDb > -11.5f);
-            if (isDirectStrongVoice) {
-                strongSelf.wsBargeInVoiceTicks += 2; // 强起音 1 帧 (20ms) 瞬断
-            } else if (isClearHumanBargeIn) {
-                strongSelf.wsBargeInVoiceTicks += 1; // 符合人声共振特征的轻声说话 2 帧 (40ms) 瞬断
+            if (db > -24.5f && peakDb > -12.5f) {
+                strongSelf.wsBargeInVoiceTicks++;
+                if (strongSelf.wsBargeInVoiceTicks >= 4) {
+                    [strongSelf triggerNativeSiriGradeInstantBargeIn:[NSString stringWithFormat:@"User barge-in (db=%.1f, peak=%.1f)", db, peakDb]];
+                }
             } else {
-                strongSelf.wsBargeInVoiceTicks = MAX(0, strongSelf.wsBargeInVoiceTicks - 1);
-            }
-
-            if (strongSelf.wsBargeInVoiceTicks >= 2) {
-                [strongSelf triggerNativeSiriGradeInstantBargeIn:[NSString stringWithFormat:@"FORMANT_VAD(db=%.1f,freq=%.0fHz)", db, estFreqHz]];
+                strongSelf.wsBargeInVoiceTicks = 0;
             }
         } else {
             strongSelf.wsBargeInVoiceTicks = 0;
-            // 6. 本地端点断句加速：当检测到人声说完并停顿 0.50 秒，立即通知云端秒回，无需干等海外服务器判断静音！
-            if (hasHumanVocalFormant && db > -42.0f && peakDb > -28.0f) {
-                strongSelf.neuralUserSpeakingActive = YES;
-                strongSelf.lastNeuralSpeechActiveTime = nowTs;
-            } else if (strongSelf.neuralUserSpeakingActive && (nowTs - strongSelf.lastNeuralSpeechActiveTime >= 0.50)) {
-                strongSelf.neuralUserSpeakingActive = NO;
-                if (nowTs - strongSelf.lastStreamEndSignalTime >= 0.90) {
-                    strongSelf.lastStreamEndSignalTime = nowTs;
-                    agLiveDiagLog(@"AUDIO_STREAM_END", @"Local Siri VAD detected end-of-speech (0.50s), triggering instant reply");
-                    if (strongSelf.isGoogleBidiProtocol) {
-                        [strongSelf sendJSONDictionaryOverWebSocket:@{
-                            @"realtimeInput": @{ @"audioStreamEnd": @YES }
-                        }];
-                    }
-                }
-            }
         }
 
-        // 7. 极速低延迟推流：人声起音瞬间每 800 字节 (25ms) 立即发送，平时每 1600 字节 (50ms) 发送
+        // 持续稳定推送 16kHz 音频流（严禁发送 audioStreamEnd 关停流！）
         [strongSelf.outgoingPCMBuffer appendData:pcm16Chunk];
-        NSUInteger pktThreshold = (strongSelf.neuralUserSpeakingActive || isAIPlaying) ? 800 : 1600;
-        if (strongSelf.outgoingPCMBuffer.length >= pktThreshold) {
+        if (strongSelf.outgoingPCMBuffer.length >= 1600) {
             NSData *packet = [strongSelf.outgoingPCMBuffer copy];
             [strongSelf.outgoingPCMBuffer setLength:0];
             NSString *b64PCM = [packet base64EncodedStringWithOptions:0];
             strongSelf.txAudioPacketsCount++;
             if (strongSelf.txAudioPacketsCount % 25 == 1) {
-                agLiveDiagLog(@"MIC_AUDIO_TX", @"Sent audio packet #%lu (%lu bytes, db=%.1f, freq=%.0fHz)", (unsigned long)strongSelf.txAudioPacketsCount, (unsigned long)packet.length, db, estFreqHz);
+                agLiveDiagLog(@"MIC_AUDIO_TX", @"Sent audio packet #%lu (%lu bytes, db=%.1f)", (unsigned long)strongSelf.txAudioPacketsCount, (unsigned long)packet.length, db);
             }
             if (strongSelf.isGoogleBidiProtocol) {
                 [strongSelf sendJSONDictionaryOverWebSocket:@{
@@ -6938,9 +6861,13 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 - (void)handleAudioSessionInterruption:(NSNotification *)note {
     NSUInteger type = [note.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
     agLiveDiagLog(@"AUDIO_INTERRUPT", @"AVAudioSession interruption type=%lu", (unsigned long)type);
-    if (type == AVAudioSessionInterruptionTypeEnded && !self.isDismissed && self.overlayWindow && !self.overlayWindow.hidden && self.isWebSocketConnected) {
-        [self setupAndStartFullDuplexPCMAudioEngine];
-    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.40 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!self.isDismissed && self.overlayWindow && !self.overlayWindow.hidden && self.activeModeTab != AGConfigTabPureText) {
+            if (!self.liveAudioEngine || !self.liveAudioEngine.isRunning) {
+                [self setupAndStartFullDuplexPCMAudioEngine];
+            }
+        }
+    });
 }
 
 - (void)handleAudioSessionRouteChange:(NSNotification *)note {
@@ -7170,37 +7097,19 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
 // 同时驱动顶部 5 根声波柱 + 底部双轨正弦流体波浪振幅 + 左上角 3D 球微脉动
 - (void)setWaveBarsLevel:(CGFloat)level {
+    CGFloat clamped = MAX(0.0, MIN(1.0, level));
+    // 静音且已归零时直接返回，0 主线程派发开销！
+    if (clamped <= 0.01 && self.targetVoiceAmplitude <= 0.01) {
+        return;
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
-        CGFloat clamped = MAX(0.0, MIN(1.0, level));
-        // 采用平滑物理阻尼插值：起音快 (0.45)，回落柔 (0.18)，彻底消除生硬跳变与卡顿
-        if (clamped > self.targetVoiceAmplitude) {
-            self.targetVoiceAmplitude = self.targetVoiceAmplitude * 0.55 + clamped * 0.45;
+        if (clamped <= 0.01) {
+            self.targetVoiceAmplitude = 0.0;
+        } else if (clamped > self.targetVoiceAmplitude) {
+            self.targetVoiceAmplitude = self.targetVoiceAmplitude * 0.45 + clamped * 0.55;
         } else {
-            self.targetVoiceAmplitude = self.targetVoiceAmplitude * 0.82 + clamped * 0.18;
-            if (self.targetVoiceAmplitude < 0.02) self.targetVoiceAmplitude = 0.0;
+            self.targetVoiceAmplitude = self.targetVoiceAmplitude * 0.78 + clamped * 0.22;
         }
-
-        CGFloat phase = self.wavePhase;
-        CGFloat amp = self.targetVoiceAmplitude;
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        NSArray<NSNumber *> *idleScales = @[@(0.55), @(0.85), @(0.62), @(0.88), @(0.55)];
-        NSArray<NSNumber *> *weights    = @[@(0.65), @(1.00), @(0.82), @(0.96), @(0.65)];
-        for (int i = 0; i < self.waveBars.count; i++) {
-            UIView *bar = self.waveBars[i];
-            CGFloat idleSy = [idleScales[i % idleScales.count] floatValue];
-            if (amp <= 0.01) {
-                bar.layer.transform = CATransform3DMakeScale(1.0, idleSy, 1.0);
-            } else {
-                CGFloat w = [weights[i % weights.count] floatValue];
-                CGFloat waveMod = 0.78 + 0.22 * sin(phase * 3.2 + i * 1.1);
-                CGFloat sy = MAX(0.40, MIN(1.42, 0.40 + amp * 1.05 * w * waveMod));
-                bar.layer.transform = CATransform3DMakeScale(1.0, sy, 1.0);
-            }
-        }
-        CGFloat orbScale = 1.0 + MIN(0.16, amp * 0.18);
-        self.aiOrbView.layer.transform = CATransform3DMakeScale(orbScale, orbScale, 1.0);
-        [CATransaction commit];
     });
 }
 
@@ -9666,14 +9575,39 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 - (void)tickFluidWaveAnimation {
     if (!self.overlayWindow || self.overlayWindow.hidden) return;
 
-    CGFloat target = MAX(0.16, self.targetVoiceAmplitude);
-    self.currentVoiceAmplitude += (target - self.currentVoiceAmplitude) * 0.16;
+    CGFloat rawTarget = self.targetVoiceAmplitude;
+    CGFloat target = MAX(0.16, rawTarget);
+    self.currentVoiceAmplitude += (target - self.currentVoiceAmplitude) * 0.18;
     self.wavePhase += (0.048 + self.currentVoiceAmplitude * 0.085);
 
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+
+    // 统一在同一次 VSync 垂直同步帧中更新所有视觉特效图层，60/120fps 满帧丝滑零卡顿
     [self.cardBgCanvas stepAnimationWithPhase:self.wavePhase amplitude:self.currentVoiceAmplitude];
     [self.orbCanvas stepAnimationWithPhase:self.wavePhase amplitude:self.currentVoiceAmplitude];
     [self.waveCanvas stepAnimationWithPhase:self.wavePhase amplitude:self.currentVoiceAmplitude];
     [self stepMarqueeAnimationWithPhase:self.wavePhase voiceAmp:self.currentVoiceAmplitude];
+
+    NSArray<NSNumber *> *idleScales = @[@(0.55), @(0.85), @(0.62), @(0.88), @(0.55)];
+    NSArray<NSNumber *> *weights    = @[@(0.65), @(1.00), @(0.82), @(0.96), @(0.65)];
+    for (int i = 0; i < self.waveBars.count; i++) {
+        UIView *bar = self.waveBars[i];
+        if (bar.hidden) continue;
+        if (rawTarget <= 0.01) {
+            CGFloat idleSy = [idleScales[i % idleScales.count] floatValue];
+            bar.layer.transform = CATransform3DMakeScale(1.0, idleSy, 1.0);
+        } else {
+            CGFloat w = [weights[i % weights.count] floatValue];
+            CGFloat waveMod = 0.78 + 0.22 * sin(self.wavePhase * 3.2 + i * 1.1);
+            CGFloat sy = MAX(0.40, MIN(1.42, 0.40 + rawTarget * 1.05 * w * waveMod));
+            bar.layer.transform = CATransform3DMakeScale(1.0, sy, 1.0);
+        }
+    }
+    CGFloat orbScale = (rawTarget <= 0.01) ? 1.0 : (1.0 + MIN(0.16, rawTarget * 0.18));
+    self.aiOrbView.layer.transform = CATransform3DMakeScale(orbScale, orbScale, 1.0);
+
+    [CATransaction commit];
 }
 
 
