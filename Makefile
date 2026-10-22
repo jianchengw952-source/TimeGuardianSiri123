@@ -7,7 +7,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = GeminiSiriOverlay
 GeminiSiriOverlay_FILES = Tweak.x
-GeminiSiriOverlay_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unguarded-availability-new -Wno-incomplete-implementation -Wno-unused-function -Wno-arc-performSelector-leaks -Wno-nonnull
+GeminiSiriOverlay_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unguarded-availability-new -Wno-incomplete-implementation -Wno-unused-function -Wno-arc-performSelector-leaks -Wno-nonnull -Wno-pointer-bool-conversion
 GeminiSiriOverlay_FRAMEWORKS = UIKit Foundation AVFoundation Contacts QuartzCore CoreGraphics CoreMedia CoreVideo CoreImage VideoToolbox ImageIO Speech AudioToolbox Vision ReplayKit
 
 TOOL_NAME = AngelCameraHelper

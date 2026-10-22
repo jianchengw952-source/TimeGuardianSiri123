@@ -9780,6 +9780,13 @@ UIKIT_EXTERN UIImage *_UICreateScreenUIImage(void);
 
 @property (nonatomic, strong) UIButton *compactLangBtn;
 @property (nonatomic, strong) UIButton *compactCloseBtn;
+@property (nonatomic, strong) UIButton *audioSourceToggleBtn;
+@property (nonatomic, assign) BOOL isInternalRecordingMode;
+@property (nonatomic, assign) NSTimeInterval lastAppAudioTime;
+@property (nonatomic, assign) float savedSystemVolume;
+@property (nonatomic, assign) BOOL isReplayKitCapturing;
+@property (nonatomic, strong) NSTimer *silentFallbackTimer;
+@property (nonatomic, copy) NSString *lastOcrRecognizedText;
 
 // 识别源语种切换 (0=英语, 1=日语, 2=韩语)
 @property (nonatomic, assign) NSInteger sourceLangIndex;
@@ -10586,7 +10593,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
             if (weakSelf.hidden || isDeviceCurrentlyLocked()) return;
             NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
             if (now - weakSelf.lastAppAudioTime >= 1.5) {
-                UIImage *screenImg = _UICreateScreenUIImage ? _UICreateScreenUIImage() : nil;
+                UIImage *screenImg = _UICreateScreenUIImage();
                 if (!screenImg || !screenImg.CGImage) return;
                 CGImageRef cgImg = screenImg.CGImage;
                 size_t w = CGImageGetWidth(cgImg);
