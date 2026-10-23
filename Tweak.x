@@ -557,6 +557,7 @@ static NSArray<NSDictionary *> *agVerifiedDefaultModelsForTab(AGConfigTab tab) {
 - (BOOL)pauseForType:(NSInteger)type;
 - (BOOL)togglePlayPauseForType:(NSInteger)type;
 - (BOOL)changeTrack:(NSInteger)direction eventSource:(NSInteger)source;
+- (id)nowPlayingApplication;
 @end
 
 @interface SBUIController : NSObject
@@ -647,6 +648,32 @@ static void agWakeScreenBacklightIfNeeded(void) {
 - (NSArray *)recentAppLayouts;
 - (void)_deleteAppLayoutsMatchingBundleIdentifier:(NSString *)bundleID;
 - (void)_deleteAppLayout:(id)appLayout forReason:(NSInteger)reason;
+@end
+
+@interface SBAppLayout : NSObject
+- (NSArray *)allItems;
+- (NSDictionary *)rolesToLayoutItemsMap;
+@end
+
+@interface SBMainSwitcherControllerCoordinator : NSObject
++ (instancetype)sharedInstance;
+- (NSArray *)recentAppLayouts;
+- (void)_deleteAppLayoutsMatchingBundleIdentifier:(NSString *)bundleID;
+- (void)_deleteAppLayout:(id)appLayout forReason:(NSInteger)reason;
+@end
+
+@interface FBProcess : NSObject
+- (int)pid;
+- (void)killForReason:(NSInteger)reason andReport:(BOOL)report withDescription:(NSString *)description;
+@end
+
+@interface FBApplicationProcess : FBProcess
+- (NSString *)bundleIdentifier;
+@end
+
+@interface FBProcessManager : NSObject
++ (instancetype)sharedInstance;
+- (NSArray *)allApplicationProcesses;
 @end
 
 @interface UIKeyboardImpl : NSObject
@@ -8949,7 +8976,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                     }
 
                     // POSIX SIGKILL 内核强行清空 (确保无任何僵尸/挂起常驻)
-                    int pid = [proc respondsToSelector:@selector(pid)] ? [proc pid] : 0;
+                    int pid = [proc respondsToSelector:@selector(pid)] ? (int)[(FBProcess *)proc pid] : 0;
                     if (pid > 0) {
                         kill(pid, SIGKILL);
                         killed = YES;
@@ -9209,7 +9236,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                             killed = YES;
                         } @catch (NSException *e) {}
                     }
-                    int pid = [proc respondsToSelector:@selector(pid)] ? [proc pid] : 0;
+                    int pid = [proc respondsToSelector:@selector(pid)] ? (int)[(FBProcess *)proc pid] : 0;
                     if (pid > 0) {
                         kill(pid, SIGKILL);
                         killed = YES;
