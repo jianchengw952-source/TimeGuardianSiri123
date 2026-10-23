@@ -17461,6 +17461,7 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
         BOOL isPreferences = [bundleID isEqualToString:@"com.apple.Preferences"];
 
         reloadGeminiPrefsCache();
+        %init(_ungrouped);
 
         // 记录本插件 dylib 的精确基址与系统 CoreLocation 真实基址（用于精准 dladdr 伪装，绝不误伤相机等模块）
         Dl_info selfInfo;
@@ -17477,7 +17478,6 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
         if (isSpringBoard) {
             ensureSpringBoardTCCGranted();
             %init(SpringBoardOnlyHooks);
-            %init(_ungrouped);
 
             void *tccHandle = dlopen("/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_NOW);
             if (tccHandle) {
@@ -17495,13 +17495,11 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
         }
 
         if (isPreferences) {
-            %init(_ungrouped);
             return;
         }
 
         // 第三方 App 进程：启用隐身定位组 + 反插件检测护盾（精准 dladdr + dyld 隐藏 + 越狱路径屏蔽 + Wi-Fi 护盾）
         %init(StealthLocationClientHooks);
-        %init(_ungrouped);
 
         MSHookFunction((void *)dladdr, (void *)hooked_dladdr, (void **)&orig_dladdr);
         MSHookFunction((void *)_dyld_get_image_name, (void *)hooked_dyld_get_image_name, (void **)&orig_dyld_get_image_name);
