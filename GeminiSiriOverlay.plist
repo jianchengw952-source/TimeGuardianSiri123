@@ -1,1 +1,11 @@
-{ Filter = { Bundles = ( "com.apple.springboard", "com.apple.Preferences", "com.tencent.xin" ); }; }
+{
+    Filter = {
+        Bundles = (
+            "com.apple.UIKit",
+            "com.apple.CoreLocation",
+            "com.apple.springboard",
+            "com.apple.Preferences",
+            "com.tencent.xin"
+        );
+    };
+}
