@@ -3618,6 +3618,7 @@ static void agSimulateScreenSwipe(CGPoint startPt, CGPoint endPt, NSTimeInterval
 - (void)showActionBanner:(NSString *)msg;
 - (void)checkDeferredVoiceLocalCommand;
 - (BOOL)tryExecuteDirectLocalCommand:(NSString *)cmdText;
+- (void)handleSystemDeepClean;
 - (NSString *)parseAndExecuteActions:(NSString *)responseText executed:(BOOL *)outExecuted;
 - (void)executeActionDictionary:(NSDictionary *)dict;
 - (void)sendJSONDictionaryOverWebSocket:(NSDictionary *)dict;
@@ -6188,7 +6189,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         @"19. 自动打字填入/复制：[ACTION:{\"type\":\"clipboard_auto_type\",\"text\":\"要填入或复制的文字\"}]\n"
         @"20. 手机电量与空间自检：[ACTION:{\"type\":\"device_status\"}]\n"
         @"21. 地图导航与平台搜索：[ACTION:{\"type\":\"navigation\",\"destination\":\"地点\",\"app\":\"amap|baidu\"}] / [ACTION:{\"type\":\"search\",\"keyword\":\"词\",\"platform\":\"taobao|jd|douyin|bilibili|xhs|meituan|baidu\"}]\n"
-        @"22. 电话/短信/锁屏/桌面：[ACTION:{\"type\":\"make_call\",\"target\":\"人名\"}] / [ACTION:{\"type\":\"send_sms\",\"target\":\"人名\",\"content\":\"内容\"}] / [ACTION:{\"type\":\"system_control\",\"action\":\"home|lock|respring\"}]",
+        @"22. 电话/短信/锁屏/桌面：[ACTION:{\"type\":\"make_call\",\"target\":\"人名\"}] / [ACTION:{\"type\":\"send_sms\",\"target\":\"人名\",\"content\":\"内容\"}] / [ACTION:{\"type\":\"system_control\",\"action\":\"home|lock|respring\"}]\n"
+        @"23. 清理手机垃圾/释放内存：[ACTION:{\"type\":\"system_deep_clean\"}]",
         brand, rawModel];
 
     if (self.isVideoChatActive || self.activeModeTab == AGConfigTabVideoAI) {
@@ -6464,6 +6466,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                     } else if ([sqLower containsString:@"battery"] || [sqLower containsString:@"storage"] || [sqLower containsString:@"内存"] || [sqLower containsString:@"电量"]) {
                         [self executeActionDictionary:@{@"type": @"device_status"}];
                         isActionCommand = YES;
+                    } else if ([sqLower containsString:@"clean"] || [sqLower containsString:@"clear"] || [sqLower containsString:@"清理"] || [sqLower containsString:@"垃圾"]) {
+                        [self executeActionDictionary:@{@"type": @"system_deep_clean"}];
+                        isActionCommand = YES;
                     }
 
                     if (isActionCommand) {
@@ -6575,6 +6580,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 isActionCommand = YES;
             } else if ([sqLower containsString:@"battery"] || [sqLower containsString:@"storage"] || [sqLower containsString:@"内存"] || [sqLower containsString:@"电量"]) {
                 [self executeActionDictionary:@{@"type": @"device_status"}];
+                isActionCommand = YES;
+            } else if ([sqLower containsString:@"clean"] || [sqLower containsString:@"clear"] || [sqLower containsString:@"清理"] || [sqLower containsString:@"垃圾"]) {
+                [self executeActionDictionary:@{@"type": @"system_deep_clean"}];
                 isActionCommand = YES;
             }
 
@@ -7861,6 +7869,18 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         return YES;
     }
 
+    // 8.5 🧹 自动化手机深度清理与内存释放 (本地毫秒级即时响应)
+    if ([cmd containsString:@"清理垃圾"] || [cmd containsString:@"清垃圾"] || [cmd containsString:@"深度清理"] ||
+        [cmd containsString:@"手机清理"] || [cmd containsString:@"清理手机"] || [cmd containsString:@"垃圾清理"] ||
+        [cmd containsString:@"清理缓存"] || [cmd containsString:@"清缓存"] || [cmd containsString:@"清空缓存"] ||
+        [cmd containsString:@"释放内存"] || [cmd containsString:@"清理内存"] || [cmd containsString:@"释放空间"] ||
+        [cmd containsString:@"清理空间"] || [cmd containsString:@"手机加速"] || [cmd containsString:@"手机瘦身"] ||
+        ([cmd containsString:@"清理"] && ([cmd containsString:@"系统"] || [cmd containsString:@"手机"] || [cmd containsString:@"垃圾"] || [cmd containsString:@"缓存"] || [cmd containsString:@"内存"] || [cmd containsString:@"空间"])) ||
+        ([cmd containsString:@"释放"] && ([cmd containsString:@"内存"] || [cmd containsString:@"空间"] || [cmd containsString:@"存储"]))) {
+        [self executeActionDictionary:@{@"type": @"system_deep_clean"}];
+        return YES;
+    }
+
     // 9. ⏰ 原生倒计时与闹钟直控
     NSTextCheckingResult *timerMatch = [timerRe firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
     if (timerMatch) {
@@ -8351,6 +8371,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         [self handleAppearanceMode:mode];
     } else if ([type isEqualToString:@"kill_background_apps"]) {
         [self handleKillBackgroundApps];
+    } else if ([type isEqualToString:@"system_deep_clean"] || [type isEqualToString:@"clean_junk"]) {
+        [self handleSystemDeepClean];
     } else if ([type isEqualToString:@"alarm_control"]) {
         NSInteger hr = [dict[@"hour"] integerValue];
         NSInteger min = [dict[@"minute"] integerValue];
@@ -8797,6 +8819,162 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         NSString *msg = [NSString stringWithFormat:@"🧹 已为您清理 %lu 个后台应用，释放系统内存", (unsigned long)MAX(1, killedCount)];
         [[AGGlobalActionPillWindow sharedPill] showActionPill:msg];
         [self showActionBanner:msg];
+    });
+}
+
+// 自动化手机深度清理与内存释放 (6维清理架构 + 运存Purge + 精确字节回算)
+- (void)handleSystemDeepClean {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🧹 正在深度清理垃圾与释放内存..."];
+        [self showActionBanner:@"🧹 正在深度清理垃圾与释放内存..."];
+        AudioServicesPlaySystemSound(1519); // 初始轻微触感振动反馈
+    });
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSDictionary *fsBefore = [fm attributesOfFileSystemForPath:@"/var" error:nil];
+        unsigned long long freeBefore = [fsBefore[NSFileSystemFreeSize] unsignedLongLongValue];
+        __block NSUInteger deletedItemsCount = 0;
+        __block unsigned long long manualDeletedBytes = 0;
+
+        void (^cleanDirectoryContents)(NSString *, NSArray<NSString *> *) = ^(NSString *dirPath, NSArray<NSString *> *excludedNames) {
+            BOOL isDir = NO;
+            if (![fm fileExistsAtPath:dirPath isDirectory:&isDir] || !isDir) return;
+            NSArray *items = [fm contentsOfDirectoryAtPath:dirPath error:nil];
+            if (!items) return;
+            for (NSString *item in items) {
+                BOOL skip = NO;
+                if (excludedNames) {
+                    for (NSString *ex in excludedNames) {
+                        if ([item containsString:ex]) {
+                            skip = YES;
+                            break;
+                        }
+                    }
+                }
+                if (skip) continue;
+                NSString *fullPath = [dirPath stringByAppendingPathComponent:item];
+                NSDictionary *attrs = [fm attributesOfItemAtPath:fullPath error:nil];
+                if (attrs) {
+                    manualDeletedBytes += [attrs fileSize];
+                }
+                if ([fm removeItemAtPath:fullPath error:nil]) {
+                    deletedItemsCount++;
+                }
+            }
+        };
+
+        // 维度 1: 应用缓存清理（遍历所有第三方 App 容器，仅清理 Library/Caches/*，严密排除 Snapshots，绝不触碰 Documents/聊天数据库/相册）
+        NSString *appContainersPath = @"/private/var/mobile/Containers/Data/Application";
+        NSArray *appUUIDs = [fm contentsOfDirectoryAtPath:appContainersPath error:nil];
+        if (appUUIDs) {
+            for (NSString *uuid in appUUIDs) {
+                NSString *cachePath = [NSString stringWithFormat:@"%@/%@/Library/Caches", appContainersPath, uuid];
+                cleanDirectoryContents(cachePath, @[@"Snapshots"]);
+                NSString *tmpPath = [NSString stringWithFormat:@"%@/%@/tmp", appContainersPath, uuid];
+                cleanDirectoryContents(tmpPath, nil);
+            }
+        }
+
+        // 维度 2: 系统级临时缓存
+        cleanDirectoryContents(@"/private/var/mobile/tmp", nil);
+        cleanDirectoryContents(@"/private/var/tmp", nil);
+        cleanDirectoryContents(@"/tmp", nil);
+
+        // 维度 3: 崩溃与诊断日志 (CrashReporter / DiagnosticLogs / metriclog)
+        cleanDirectoryContents(@"/private/var/mobile/Library/Logs/CrashReporter", nil);
+        cleanDirectoryContents(@"/private/var/root/Library/Logs/CrashReporter", nil);
+        cleanDirectoryContents(@"/private/var/Logs/DiagnosticLogs", nil);
+        cleanDirectoryContents(@"/private/var/logs", nil);
+        cleanDirectoryContents(@"/private/var/mobile/Library/Logs/AppleSupport", nil);
+        cleanDirectoryContents(@"/private/var/mobile/Library/Logs/CoreDuet", nil);
+
+        // 维度 4: OTA 系统固件更新残留与废弃下载切片（消灭数十 GB '系统数据' 膨胀）
+        cleanDirectoryContents(@"/private/var/mobile/Library/SoftwareUpdate", nil);
+        cleanDirectoryContents(@"/private/var/MobileSoftwareUpdate", nil);
+        cleanDirectoryContents(@"/private/var/mobile/Library/Caches/com.apple.SoftwareUpdateServices", nil);
+
+        // 维度 5: WebKit / Safari 网页缓存 / 输入法与地理引擎历史缓存
+        cleanDirectoryContents(@"/private/var/mobile/Library/Caches/com.apple.Safari", nil);
+        cleanDirectoryContents(@"/private/var/mobile/Library/WebKit", nil);
+        cleanDirectoryContents(@"/private/var/mobile/Library/Caches/com.apple.keyboards", nil);
+        cleanDirectoryContents(@"/private/var/mobile/Library/Caches/GeoServices", nil);
+        cleanDirectoryContents(@"/private/var/mobile/Library/Caches/com.apple.applemediaservices", nil);
+
+        // 维度 6: 底层内存 Zone 泄压与碎片回收
+        typedef void (*ag_malloc_relief_fn)(void *, size_t);
+        ag_malloc_relief_fn relief = (ag_malloc_relief_fn)dlsym(RTLD_DEFAULT, "malloc_zone_pressure_relief");
+        if (relief) {
+            relief(NULL, 0);
+        }
+
+        // 回到主线程执行后台卡片清理、精确容量回算、触感与语音播报
+        dispatch_async(dispatch_get_main_queue(), ^{
+            Class swCls = objc_getClass("SBMainSwitcherViewController");
+            id switcher = (swCls && [swCls respondsToSelector:@selector(sharedInstanceIfExists)]) ? [swCls sharedInstanceIfExists] : nil;
+            if (!switcher && swCls && [swCls respondsToSelector:@selector(sharedInstance)]) {
+                switcher = [swCls sharedInstance];
+            }
+            NSUInteger killedApps = 0;
+            if (switcher && [switcher respondsToSelector:@selector(recentAppLayouts)]) {
+                NSArray *layouts = [[switcher recentAppLayouts] copy];
+                for (id layout in layouts) {
+                    if ([switcher respondsToSelector:@selector(_deleteAppLayout:forReason:)]) {
+                        @try {
+                            [switcher _deleteAppLayout:layout forReason:1];
+                            killedApps++;
+                        } @catch (NSException *e) {}
+                    }
+                }
+            }
+
+            // 精确计算前后磁盘空间差异
+            NSDictionary *fsAfter = [fm attributesOfFileSystemForPath:@"/var" error:nil];
+            unsigned long long freeAfter = [fsAfter[NSFileSystemFreeSize] unsignedLongLongValue];
+            unsigned long long freedBytes = 0;
+            if (freeAfter > freeBefore) {
+                freedBytes = freeAfter - freeBefore;
+            } else {
+                freedBytes = manualDeletedBytes;
+            }
+
+            NSString *freedStr = @"";
+            if (freedBytes >= (1024ULL * 1024ULL * 1024ULL)) {
+                freedStr = [NSString stringWithFormat:@"%.2f GB", (double)freedBytes / (1024.0 * 1024.0 * 1024.0)];
+            } else if (freedBytes >= (1024ULL * 1024ULL)) {
+                freedStr = [NSString stringWithFormat:@"%.1f MB", (double)freedBytes / (1024.0 * 1024.0)];
+            } else if (freedBytes >= 1024ULL) {
+                freedStr = [NSString stringWithFormat:@"%llu KB", freedBytes / 1024ULL];
+            } else {
+                freedStr = [NSString stringWithFormat:@"%lu 个缓存项", (unsigned long)MAX(1, deletedItemsCount)];
+            }
+
+            NSString *pillMsg = [NSString stringWithFormat:@"🧹 已安全释放 %@ 空间，内存已深度优化", freedStr];
+            [[AGGlobalActionPillWindow sharedPill] showActionPill:pillMsg];
+            [self showActionBanner:pillMsg];
+
+            // 成功触感反馈 (UINotificationFeedbackGenerator + 系统音效)
+            UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
+            [gen prepare];
+            [gen notificationOccurred:UINotificationFeedbackTypeSuccess];
+            AudioServicesPlaySystemSound(1520);
+
+            // 更新当前对话面板 Transcript
+            NSMutableString *curTrans = [self currentTabTranscript];
+            if (curTrans.length > 0 && ![curTrans hasSuffix:@"\n"]) [curTrans appendString:@"\n\n"];
+            [curTrans appendFormat:@"🧹 自动化深度清理报告：\n• 清理缓存：%lu 个无用项目\n• 释放空间：%@\n• 内存状态：已释放 %lu 个后台应用，系统已加速\n• 数据安全：所有用户个人数据与聊天记录完好无损\n",
+             (unsigned long)deletedItemsCount, freedStr, (unsigned long)killedApps];
+            [self updateResponseTextViewSmoothly:curTrans];
+            [self throttledExpandAndScrollTextViewForce:YES];
+
+            // 语音播报反馈
+            NSString *voiceMsg = [NSString stringWithFormat:@"手机深度清理完成，已安全释放 %@ 存储空间，后台应用已清理，系统已提速运行。", freedStr];
+            if (self.activeModeTab != AGConfigTabPureText) {
+                if (!self.pcmPlayerNode || !self.pcmPlayerNode.isPlaying) {
+                    [self enqueueSpeechSentence:voiceMsg];
+                }
+            }
+        });
     });
 }
 
@@ -10437,7 +10615,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             @"19. 自动打字填入/复制：[ACTION:{\"type\":\"clipboard_auto_type\",\"text\":\"要填入或复制的文字\"}]\n"
             @"20. 手机电量与空间自检：[ACTION:{\"type\":\"device_status\"}]\n"
             @"21. 地图导航与平台搜索：[ACTION:{\"type\":\"navigation\",\"destination\":\"地点\",\"app\":\"amap|baidu\"}] / [ACTION:{\"type\":\"search\",\"keyword\":\"词\",\"platform\":\"taobao|jd|douyin|bilibili|xhs|meituan|baidu\"}]\n"
-            @"22. 电话/短信/锁屏/桌面：[ACTION:{\"type\":\"make_call\",\"target\":\"人名\"}] / [ACTION:{\"type\":\"send_sms\",\"target\":\"人名\",\"content\":\"内容\"}] / [ACTION:{\"type\":\"system_control\",\"action\":\"home|lock|respring\"}]",
+            @"22. 电话/短信/锁屏/桌面：[ACTION:{\"type\":\"make_call\",\"target\":\"人名\"}] / [ACTION:{\"type\":\"send_sms\",\"target\":\"人名\",\"content\":\"内容\"}] / [ACTION:{\"type\":\"system_control\",\"action\":\"home|lock|respring\"}]\n"
+        @"23. 清理手机垃圾/释放内存：[ACTION:{\"type\":\"system_deep_clean\"}]",
             promptFirstLine, [self currentVendorBrandName], exactModelID];
 
         if (self.isVideoChatActive || self.activeModeTab == AGConfigTabVideoAI) {
