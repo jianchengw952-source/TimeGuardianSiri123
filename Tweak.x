@@ -8796,33 +8796,221 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     });
 }
 
-// 一键清理手机后台进程
+// 一键智能清理手机后台应用 (模式 B: 兼容 iOS 14-17 全版本，智能保护音乐播放与当前前台，清空其余卡片与物理进程)
 - (void)handleKillBackgroundApps {
     dispatch_async(dispatch_get_main_queue(), ^{
-        Class swCls = objc_getClass("SBMainSwitcherViewController");
-        id switcher = (swCls && [swCls respondsToSelector:@selector(sharedInstanceIfExists)]) ? [swCls sharedInstanceIfExists] : nil;
-        if (!switcher && swCls && [swCls respondsToSelector:@selector(sharedInstance)]) {
-            switcher = [swCls sharedInstance];
-        }
-        NSUInteger killedCount = 0;
-        if (switcher && [switcher respondsToSelector:@selector(recentAppLayouts)]) {
-            NSArray *layouts = [[switcher recentAppLayouts] copy];
-            for (id layout in layouts) {
-                if ([switcher respondsToSelector:@selector(_deleteAppLayout:forReason:)]) {
-                    @try {
-                        [switcher _deleteAppLayout:layout forReason:1];
-                        killedCount++;
-                    } @catch (NSException *e) {}
+        [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🧹 正在智能清理后台应用与释放内存..."];
+        [self showActionBanner:@"🧹 正在智能清理后台应用与释放内存..."];
+        AudioServicesPlaySystemSound(1519); // 轻微触感反馈
+    });
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // 1. 🔍 获取当前智能保护白名单 (放歌 App + 当前前台 App + 核心系统)
+        NSMutableSet<NSString *> *excludedBIDs = [NSMutableSet setWithObjects:
+            @"com.apple.springboard",
+            @"com.apple.InCallService",
+            @"com.apple.mobilephone",
+            nil];
+
+        // 保护 A: 正在播放音乐/音频的 App (网易云、QQ音乐、Spotify、Apple Music 等)
+        @try {
+            Class mediaCtrlCls = objc_getClass("SBMediaController");
+            if (mediaCtrlCls && [mediaCtrlCls respondsToSelector:@selector(sharedInstance)]) {
+                id mediaCtrl = [mediaCtrlCls sharedInstance];
+                if ([mediaCtrl respondsToSelector:@selector(nowPlayingApplication)]) {
+                    id nowPlayingApp = [mediaCtrl nowPlayingApplication];
+                    if (nowPlayingApp && [nowPlayingApp respondsToSelector:@selector(bundleIdentifier)]) {
+                        NSString *npBID = [nowPlayingApp bundleIdentifier];
+                        if (npBID.length > 0) {
+                            [excludedBIDs addObject:npBID];
+                        }
+                    }
                 }
             }
-        }
-        NSString *msg = [NSString stringWithFormat:@"🧹 已为您清理 %lu 个后台应用，释放系统内存", (unsigned long)MAX(1, killedCount)];
-        [[AGGlobalActionPillWindow sharedPill] showActionPill:msg];
-        [self showActionBanner:msg];
+        } @catch (NSException *e) {}
+
+        // 保护 B: 当前用户正处于的前台 App (避免打断用户当前打字或浏览)
+        @try {
+            UIApplication *app = [UIApplication sharedApplication];
+            SEL fgSel = NSSelectorFromString(@"_accessibilityFrontMostApplication");
+            if ([app respondsToSelector:fgSel]) {
+                id frontApp = ((id(*)(id, SEL))objc_msgSend)(app, fgSel);
+                if (frontApp && [frontApp respondsToSelector:@selector(bundleIdentifier)]) {
+                    NSString *fgBID = [frontApp bundleIdentifier];
+                    if (fgBID.length > 0 && ![fgBID isEqualToString:@"com.apple.springboard"]) {
+                        [excludedBIDs addObject:fgBID];
+                    }
+                }
+            }
+        } @catch (NSException *e) {}
+
+        __block NSUInteger closedCardsCount = 0;
+        __block NSUInteger killedProcsCount = 0;
+
+        // 2. 🎴 视觉层：在主线程进行多任务卡片消除 (iOS 14-17 链式全自适应)
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            id switcher = nil;
+            // ① 优先探测 iOS 16 / 17 / 18 核心协调器
+            Class coordCls = objc_getClass("SBMainSwitcherControllerCoordinator");
+            if (coordCls && [coordCls respondsToSelector:@selector(sharedInstance)]) {
+                switcher = [coordCls sharedInstance];
+            }
+            // ② 降级探测 iOS 14 / 15 经典视图控制器
+            if (!switcher) {
+                Class swCls = objc_getClass("SBMainSwitcherViewController");
+                if (swCls) {
+                    if ([swCls respondsToSelector:@selector(sharedInstance)]) {
+                        switcher = [swCls sharedInstance];
+                    } else if ([swCls respondsToSelector:@selector(sharedInstanceIfExists)]) {
+                        switcher = [swCls sharedInstanceIfExists];
+                    }
+                }
+            }
+            // ③ 第三重容灾：SBMainWorkspace
+            if (!switcher) {
+                Class wsCls = objc_getClass("SBMainWorkspace");
+                if (wsCls && [wsCls respondsToSelector:@selector(sharedInstance)]) {
+                    id ws = [wsCls sharedInstance];
+                    if ([ws respondsToSelector:@selector(switcherController)]) {
+                        switcher = [ws valueForKey:@"switcherController"];
+                    }
+                }
+            }
+
+            if (switcher && [switcher respondsToSelector:@selector(recentAppLayouts)]) {
+                NSArray *layouts = [[switcher recentAppLayouts] copy];
+                for (id layout in layouts) {
+                    NSString *bid = nil;
+                    // 从 SBAppLayout 提取 BundleID
+                    if ([layout respondsToSelector:@selector(allItems)]) {
+                        NSArray *items = [layout allItems];
+                        if (items.count > 0 && [items[0] respondsToSelector:@selector(bundleIdentifier)]) {
+                            bid = [items[0] bundleIdentifier];
+                        }
+                    }
+                    if (!bid && [layout respondsToSelector:@selector(rolesToLayoutItemsMap)]) {
+                        NSDictionary *map = [layout valueForKey:@"rolesToLayoutItemsMap"];
+                        for (id k in map) {
+                            id it = map[k];
+                            if ([it respondsToSelector:@selector(bundleIdentifier)]) {
+                                bid = [it bundleIdentifier];
+                                break;
+                            }
+                        }
+                    }
+
+                    // 白名单保护判定 (保留音乐或当前前台 App)
+                    if (bid && [excludedBIDs containsObject:bid]) {
+                        continue;
+                    }
+
+                    BOOL cardRemoved = NO;
+                    // 轨 A：iOS 16/17 BundleID 直接物理抹除
+                    if (bid.length > 0 && [switcher respondsToSelector:@selector(_deleteAppLayoutsMatchingBundleIdentifier:)]) {
+                        @try {
+                            [switcher _deleteAppLayoutsMatchingBundleIdentifier:bid];
+                            cardRemoved = YES;
+                        } @catch (NSException *e) {}
+                    }
+                    // 轨 B：全代通用上滑移除 (Reason 1 = UserSwipeUp)
+                    if (!cardRemoved && [switcher respondsToSelector:@selector(_deleteAppLayout:forReason:)]) {
+                        @try {
+                            [switcher _deleteAppLayout:layout forReason:1];
+                            cardRemoved = YES;
+                        } @catch (NSException *e) {}
+                    }
+
+                    if (cardRemoved) {
+                        closedCardsCount++;
+                    }
+                }
+            }
+        });
+
+        // 3. ⚡ 物理进程层：FrontBoard 穿透杀除后台残留进程并硬回收物理 RAM (iOS 14-17 通用)
+        @try {
+            Class fbpmCls = objc_getClass("FBProcessManager");
+            id fbpm = (fbpmCls && [fbpmCls respondsToSelector:@selector(sharedInstance)]) ? [fbpmCls sharedInstance] : nil;
+            if (fbpm && [fbpm respondsToSelector:@selector(allApplicationProcesses)]) {
+                id procsObj = [fbpm allApplicationProcesses];
+                for (id proc in (id<NSFastEnumeration>)procsObj) {
+                    NSString *bid = [proc respondsToSelector:@selector(bundleIdentifier)] ? [proc bundleIdentifier] : nil;
+                    if (!bid || [excludedBIDs containsObject:bid]) {
+                        continue;
+                    }
+
+                    BOOL killed = NO;
+                    // FrontBoard 原生干净终止
+                    if ([proc respondsToSelector:@selector(killForReason:andReport:withDescription:)]) {
+                        @try {
+                            [proc killForReason:1 andReport:NO withDescription:@"Siri Clean"];
+                            killed = YES;
+                        } @catch (NSException *e) {}
+                    }
+
+                    // POSIX SIGKILL 内核强行清空 (确保无任何僵尸/挂起常驻)
+                    int pid = [proc respondsToSelector:@selector(pid)] ? [proc pid] : 0;
+                    if (pid > 0) {
+                        kill(pid, SIGKILL);
+                        killed = YES;
+                    }
+
+                    if (killed) {
+                        killedProcsCount++;
+                    }
+                }
+            }
+        } @catch (NSException *e) {}
+
+        // 4. 🧹 内存堆碎片泄压
+        typedef void (*ag_malloc_relief_fn)(void *, size_t);
+        ag_malloc_relief_fn relief = (ag_malloc_relief_fn)dlsym(RTLD_DEFAULT, "malloc_zone_pressure_relief");
+        if (relief) relief(NULL, 0);
+
+        // 5. 📢 回到主线程反馈真实结果 (HUD + 触感 + 对话面板 + 语音播报)
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSUInteger totalCleaned = MAX(closedCardsCount, killedProcsCount);
+            NSString *cleanMsg = @"";
+            if (totalCleaned > 0) {
+                cleanMsg = [NSString stringWithFormat:@"🧹 已成功关闭 %lu 个后台应用，运存已加速", (unsigned long)totalCleaned];
+            } else {
+                cleanMsg = @"🧹 手机后台已处于最纯净状态，无多余残留";
+            }
+
+            [[AGGlobalActionPillWindow sharedPill] showActionPill:cleanMsg];
+            [self showActionBanner:cleanMsg];
+
+            // 成功触感反馈
+            UINotificationFeedbackGenerator *gen = [[UINotificationFeedbackGenerator alloc] init];
+            [gen prepare];
+            [gen notificationOccurred:UINotificationFeedbackTypeSuccess];
+            AudioServicesPlaySystemSound(1520);
+
+            // 更新面板 Transcript
+            NSMutableString *curTrans = [self currentTabTranscript];
+            if (curTrans.length > 0 && ![curTrans hasSuffix:@"\n"]) [curTrans appendString:@"\n\n"];
+            [curTrans appendFormat:@"🧹 智能后台清理报告：\n• 关闭后台卡片：%lu 个\n• 终止后台进程：%lu 个\n• 智能保护：已自动保留当前前台应用与音乐播放\n• 运存状态：后台已彻底释放，系统更流畅\n",
+             (unsigned long)closedCardsCount, (unsigned long)killedProcsCount];
+            [self updateResponseTextViewSmoothly:curTrans];
+            [self throttledExpandAndScrollTextViewForce:YES];
+
+            // 语音反馈
+            if (self.activeModeTab != AGConfigTabPureText) {
+                if (!self.pcmPlayerNode || !self.pcmPlayerNode.isPlaying) {
+                    NSString *voiceMsg = @"";
+                    if (totalCleaned > 0) {
+                        voiceMsg = [NSString stringWithFormat:@"已为您成功关闭 %lu 个后台应用，内存已彻底释放。", (unsigned long)totalCleaned];
+                    } else {
+                        voiceMsg = @"手机后台已经非常干净了，没有多余的后台应用。";
+                    }
+                    [self enqueueSpeechSentence:voiceMsg];
+                }
+            }
+        });
     });
 }
 
-// 自动化手机深度清理与内存释放 (6维清理架构 + 运存Purge + 精确字节回算)
+// 自动化手机深度清理与内存释放 (6维清理架构 + 运存Purge + 模式 B 智能保护 + 精确字节回算)
 - (void)handleSystemDeepClean {
     dispatch_async(dispatch_get_main_queue(), ^{
         [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🧹 正在深度清理垃圾与释放内存..."];
@@ -8901,32 +9089,145 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         cleanDirectoryContents(@"/private/var/mobile/Library/Caches/GeoServices", nil);
         cleanDirectoryContents(@"/private/var/mobile/Library/Caches/com.apple.applemediaservices", nil);
 
-        // 维度 6: 底层内存 Zone 泄压与碎片回收
+        // 维度 6: 底层内存 Zone 泄压与模式 B 智能清理后台进程 (iOS 14-17 全版本自适应)
+        NSMutableSet<NSString *> *excludedBIDs = [NSMutableSet setWithObjects:
+            @"com.apple.springboard",
+            @"com.apple.InCallService",
+            @"com.apple.mobilephone",
+            nil];
+        @try {
+            Class mediaCtrlCls = objc_getClass("SBMediaController");
+            if (mediaCtrlCls && [mediaCtrlCls respondsToSelector:@selector(sharedInstance)]) {
+                id mediaCtrl = [mediaCtrlCls sharedInstance];
+                if ([mediaCtrl respondsToSelector:@selector(nowPlayingApplication)]) {
+                    id nowPlayingApp = [mediaCtrl nowPlayingApplication];
+                    if (nowPlayingApp && [nowPlayingApp respondsToSelector:@selector(bundleIdentifier)]) {
+                        NSString *npBID = [nowPlayingApp bundleIdentifier];
+                        if (npBID.length > 0) [excludedBIDs addObject:npBID];
+                    }
+                }
+            }
+        } @catch (NSException *e) {}
+
+        @try {
+            UIApplication *app = [UIApplication sharedApplication];
+            SEL fgSel = NSSelectorFromString(@"_accessibilityFrontMostApplication");
+            if ([app respondsToSelector:fgSel]) {
+                id frontApp = ((id(*)(id, SEL))objc_msgSend)(app, fgSel);
+                if (frontApp && [frontApp respondsToSelector:@selector(bundleIdentifier)]) {
+                    NSString *fgBID = [frontApp bundleIdentifier];
+                    if (fgBID.length > 0 && ![fgBID isEqualToString:@"com.apple.springboard"]) {
+                        [excludedBIDs addObject:fgBID];
+                    }
+                }
+            }
+        } @catch (NSException *e) {}
+
+        __block NSUInteger closedCardsCount = 0;
+        __block NSUInteger killedProcsCount = 0;
+
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            id switcher = nil;
+            Class coordCls = objc_getClass("SBMainSwitcherControllerCoordinator");
+            if (coordCls && [coordCls respondsToSelector:@selector(sharedInstance)]) {
+                switcher = [coordCls sharedInstance];
+            }
+            if (!switcher) {
+                Class swCls = objc_getClass("SBMainSwitcherViewController");
+                if (swCls) {
+                    if ([swCls respondsToSelector:@selector(sharedInstance)]) {
+                        switcher = [swCls sharedInstance];
+                    } else if ([swCls respondsToSelector:@selector(sharedInstanceIfExists)]) {
+                        switcher = [swCls sharedInstanceIfExists];
+                    }
+                }
+            }
+            if (!switcher) {
+                Class wsCls = objc_getClass("SBMainWorkspace");
+                if (wsCls && [wsCls respondsToSelector:@selector(sharedInstance)]) {
+                    id ws = [wsCls sharedInstance];
+                    if ([ws respondsToSelector:@selector(switcherController)]) {
+                        switcher = [ws valueForKey:@"switcherController"];
+                    }
+                }
+            }
+
+            if (switcher && [switcher respondsToSelector:@selector(recentAppLayouts)]) {
+                NSArray *layouts = [[switcher recentAppLayouts] copy];
+                for (id layout in layouts) {
+                    NSString *bid = nil;
+                    if ([layout respondsToSelector:@selector(allItems)]) {
+                        NSArray *items = [layout allItems];
+                        if (items.count > 0 && [items[0] respondsToSelector:@selector(bundleIdentifier)]) {
+                            bid = [items[0] bundleIdentifier];
+                        }
+                    }
+                    if (!bid && [layout respondsToSelector:@selector(rolesToLayoutItemsMap)]) {
+                        NSDictionary *map = [layout valueForKey:@"rolesToLayoutItemsMap"];
+                        for (id k in map) {
+                            id it = map[k];
+                            if ([it respondsToSelector:@selector(bundleIdentifier)]) {
+                                bid = [it bundleIdentifier];
+                                break;
+                            }
+                        }
+                    }
+                    if (bid && [excludedBIDs containsObject:bid]) continue;
+
+                    BOOL cardRemoved = NO;
+                    if (bid.length > 0 && [switcher respondsToSelector:@selector(_deleteAppLayoutsMatchingBundleIdentifier:)]) {
+                        @try {
+                            [switcher _deleteAppLayoutsMatchingBundleIdentifier:bid];
+                            cardRemoved = YES;
+                        } @catch (NSException *e) {}
+                    }
+                    if (!cardRemoved && [switcher respondsToSelector:@selector(_deleteAppLayout:forReason:)]) {
+                        @try {
+                            [switcher _deleteAppLayout:layout forReason:1];
+                            cardRemoved = YES;
+                        } @catch (NSException *e) {}
+                    }
+                    if (cardRemoved) closedCardsCount++;
+                }
+            }
+        });
+
+        // FrontBoard 杀除后台残留进程
+        @try {
+            Class fbpmCls = objc_getClass("FBProcessManager");
+            id fbpm = (fbpmCls && [fbpmCls respondsToSelector:@selector(sharedInstance)]) ? [fbpmCls sharedInstance] : nil;
+            if (fbpm && [fbpm respondsToSelector:@selector(allApplicationProcesses)]) {
+                id procsObj = [fbpm allApplicationProcesses];
+                for (id proc in (id<NSFastEnumeration>)procsObj) {
+                    NSString *bid = [proc respondsToSelector:@selector(bundleIdentifier)] ? [proc bundleIdentifier] : nil;
+                    if (!bid || [excludedBIDs containsObject:bid]) continue;
+
+                    BOOL killed = NO;
+                    if ([proc respondsToSelector:@selector(killForReason:andReport:withDescription:)]) {
+                        @try {
+                            [proc killForReason:1 andReport:NO withDescription:@"Siri Clean"];
+                            killed = YES;
+                        } @catch (NSException *e) {}
+                    }
+                    int pid = [proc respondsToSelector:@selector(pid)] ? [proc pid] : 0;
+                    if (pid > 0) {
+                        kill(pid, SIGKILL);
+                        killed = YES;
+                    }
+                    if (killed) killedProcsCount++;
+                }
+            }
+        } @catch (NSException *e) {}
+
         typedef void (*ag_malloc_relief_fn)(void *, size_t);
         ag_malloc_relief_fn relief = (ag_malloc_relief_fn)dlsym(RTLD_DEFAULT, "malloc_zone_pressure_relief");
         if (relief) {
             relief(NULL, 0);
         }
 
-        // 回到主线程执行后台卡片清理、精确容量回算、触感与语音播报
+        // 回到主线程执行精确容量回算、触感与语音播报
         dispatch_async(dispatch_get_main_queue(), ^{
-            Class swCls = objc_getClass("SBMainSwitcherViewController");
-            id switcher = (swCls && [swCls respondsToSelector:@selector(sharedInstanceIfExists)]) ? [swCls sharedInstanceIfExists] : nil;
-            if (!switcher && swCls && [swCls respondsToSelector:@selector(sharedInstance)]) {
-                switcher = [swCls sharedInstance];
-            }
-            NSUInteger killedApps = 0;
-            if (switcher && [switcher respondsToSelector:@selector(recentAppLayouts)]) {
-                NSArray *layouts = [[switcher recentAppLayouts] copy];
-                for (id layout in layouts) {
-                    if ([switcher respondsToSelector:@selector(_deleteAppLayout:forReason:)]) {
-                        @try {
-                            [switcher _deleteAppLayout:layout forReason:1];
-                            killedApps++;
-                        } @catch (NSException *e) {}
-                    }
-                }
-            }
+            NSUInteger totalCleaned = MAX(closedCardsCount, killedProcsCount);
 
             // 精确计算前后磁盘空间差异
             NSDictionary *fsAfter = [fm attributesOfFileSystemForPath:@"/var" error:nil];
@@ -8949,7 +9250,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 freedStr = [NSString stringWithFormat:@"%lu 个缓存项", (unsigned long)MAX(1, deletedItemsCount)];
             }
 
-            NSString *pillMsg = [NSString stringWithFormat:@"🧹 已安全释放 %@ 空间，内存已深度优化", freedStr];
+            NSString *pillMsg = [NSString stringWithFormat:@"🧹 已安全释放 %@ 空间，已优化 %lu 个后台", freedStr, (unsigned long)totalCleaned];
             [[AGGlobalActionPillWindow sharedPill] showActionPill:pillMsg];
             [self showActionBanner:pillMsg];
 
@@ -8962,13 +9263,13 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             // 更新当前对话面板 Transcript
             NSMutableString *curTrans = [self currentTabTranscript];
             if (curTrans.length > 0 && ![curTrans hasSuffix:@"\n"]) [curTrans appendString:@"\n\n"];
-            [curTrans appendFormat:@"🧹 自动化深度清理报告：\n• 清理缓存：%lu 个无用项目\n• 释放空间：%@\n• 内存状态：已释放 %lu 个后台应用，系统已加速\n• 数据安全：所有用户个人数据与聊天记录完好无损\n",
-             (unsigned long)deletedItemsCount, freedStr, (unsigned long)killedApps];
+            [curTrans appendFormat:@"🧹 自动化深度清理报告：\n• 清理缓存：%lu 个无用项目\n• 释放空间：%@\n• 关闭后台：%lu 个卡片，%lu 个后台进程\n• 智能保护：已自动保留当前前台应用与音乐播放\n• 数据安全：所有用户个人数据与聊天记录完好无损\n",
+             (unsigned long)deletedItemsCount, freedStr, (unsigned long)closedCardsCount, (unsigned long)killedProcsCount];
             [self updateResponseTextViewSmoothly:curTrans];
             [self throttledExpandAndScrollTextViewForce:YES];
 
             // 语音播报反馈
-            NSString *voiceMsg = [NSString stringWithFormat:@"手机深度清理完成，已安全释放 %@ 存储空间，后台应用已清理，系统已提速运行。", freedStr];
+            NSString *voiceMsg = [NSString stringWithFormat:@"手机深度清理完成，已安全释放 %@ 存储空间，后台应用已清理加速，系统运行更流畅。", freedStr];
             if (self.activeModeTab != AGConfigTabPureText) {
                 if (!self.pcmPlayerNode || !self.pcmPlayerNode.isPlaying) {
                     [self enqueueSpeechSentence:voiceMsg];
