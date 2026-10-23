@@ -11826,6 +11826,7 @@ UIKIT_EXTERN UIImage *_UICreateScreenUIImage(void);
 @property (nonatomic, strong) UIButton *compactCloseBtn;
 @property (nonatomic, strong) UIButton *audioSourceToggleBtn;
 @property (nonatomic, assign) BOOL isInternalRecordingMode;
+@property (nonatomic, assign) BOOL isAudioTranslatingActive;
 @property (nonatomic, assign) NSTimeInterval lastAppAudioTime;
 @property (nonatomic, assign) float savedSystemVolume;
 @property (nonatomic, assign) BOOL isReplayKitCapturing;
@@ -11957,11 +11958,13 @@ static NSString *agSanitizeOpenAIEndpoint(NSString *raw) {
 
 // 本地 0ms 瞬时高频口语词典垫底器（在等待云端 API 首字返回的 100ms 空窗期内提供 0 延迟视觉反馈）
 static NSString *agInstantLocalPreviewForSegment(NSString *segment, NSInteger langIdx) {
-    if (!segment || segment.length == 0 || langIdx != 0) return @"";
-    static NSDictionary<NSString *, NSString *> *sFastDict = nil;
+    if (!segment || segment.length == 0) return @"";
+    static NSDictionary<NSString *, NSString *> *sFastDictEn = nil;
+    static NSDictionary<NSString *, NSString *> *sFastDictJa = nil;
+    static NSDictionary<NSString *, NSString *> *sFastDictKo = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        sFastDict = @{
+        sFastDictEn = @{
             @"hello": @"你好", @"hi": @"嗨", @"welcome": @"欢迎", @"everyone": @"大家",
             @"today": @"今天", @"now": @"现在", @"here": @"这里", @"there": @"那里",
             @"this": @"这个", @"that": @"那个", @"what": @"什么", @"why": @"为什么",
@@ -11979,7 +11982,20 @@ static NSString *agInstantLocalPreviewForSegment(NSString *segment, NSInteger la
             @"right": @"对", @"really": @"真的", @"very": @"非常", @"much": @"很多",
             @"thank": @"感谢", @"thanks": @"谢谢", @"please": @"请", @"sorry": @"抱歉"
         };
+        sFastDictJa = @{
+            @"こんにちは": @"你好", @"ありがとう": @"谢谢", @"すみません": @"抱歉", @"はい": @"是的",
+            @"いいえ": @"不是", @"おはよう": @"早安", @"こんばんは": @"晚上好", @"すごい": @"厉害",
+            @"ほんとう": @"真的吗", @"だいじょうぶ": @"没关系", @"なに": @"什么", @"どうして": @"为什么"
+        };
+        sFastDictKo = @{
+            @"안녕하세요": @"你好", @"감사합니다": @"谢谢", @"죄송합니다": @"抱歉", @"네": @"是的",
+            @"아니요": @"不是", @"진짜": @"真的吗", @"괜찮아요": @"没关系", @"대박": @"太棒了",
+            @"무엇": @"什么", @"왜": @"为什么"
+        };
     });
+
+    NSDictionary<NSString *, NSString *> *curDict = (langIdx == 1) ? sFastDictJa : ((langIdx == 2) ? sFastDictKo : sFastDictEn);
+    if (!curDict) return @"";
 
     NSArray<NSString *> *words = [[segment lowercaseString] componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     NSMutableArray<NSString *> *hits = [NSMutableArray array];
@@ -11987,7 +12003,7 @@ static NSString *agInstantLocalPreviewForSegment(NSString *segment, NSInteger la
     for (NSInteger i = startIdx; i < (NSInteger)words.count; i++) {
         NSString *w = [words[i] stringByTrimmingCharactersInSet:[NSCharacterSet punctuationCharacterSet]];
         if (w.length == 0) continue;
-        NSString *zh = sFastDict[w];
+        NSString *zh = curDict[w];
         if (zh && ![hits.lastObject isEqualToString:zh]) {
             [hits addObject:zh];
         }
@@ -12118,9 +12134,9 @@ static void agEnqueueRealtimeTranslationText(NSString *rawSourceText, void(^comp
 
     NSTimeInterval now = CACurrentMediaTime();
     if (gActiveTransTask != nil) {
-        // 断路器：如果上一个请求已经卡住超过 8.0 秒仍未返回，且现在有了新话，立即掐断旧请求并发起最新请求！
-        if (now - gActiveTransStartTime >= 8.0) {
-            agLiveDiagLog(@"TRANS_BREAKER", @"Canceling stalled translation task (>8.0s) to flush latest speech");
+        // 断路器：如果上一个请求已经卡住超过 2.5 秒仍未返回，且现在有了新话，立即掐断旧请求并发起最新请求！
+        if (now - gActiveTransStartTime >= 2.5) {
+            agLiveDiagLog(@"TRANS_BREAKER", @"Canceling stalled translation task (>2.5s) to flush latest speech");
             [gActiveTransTask cancel];
             gActiveTransTask = nil;
         } else {
@@ -12163,7 +12179,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
         [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
         NSMutableDictionary *genCfg = [@{
             @"temperature": @0.1,
-            @"maxOutputTokens": @160
+            @"maxOutputTokens": @120
         } mutableCopy];
         if ([fullM containsString:@"2.5"] || [fullM containsString:@"3."]) {
             genCfg[@"thinkingConfig"] = @{ @"thinkingBudget": @0 };
@@ -12190,13 +12206,13 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
                 @{ @"role": @"user", @"content": textToTranslate }
             ],
             @"temperature": @0.1,
-            @"max_tokens": @160,
+            @"max_tokens": @120,
             @"stream": @YES
         };
         req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     }
 
-    req.timeoutInterval = 6.5;
+    req.timeoutInterval = 3.5;
     NSUInteger mySeq = ++gTransRequestSeq;
     gActiveTransStartTime = CACurrentMediaTime();
 
@@ -12269,6 +12285,8 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     self.windowLevel = UIWindowLevelAlert + 520;
     self.backgroundColor = [UIColor clearColor];
     self.hidden = YES;
+    self.isAudioTranslatingActive = NO;
+    self.isInternalRecordingMode = YES;
     self.sourceLangIndex = 0;
     self.committedHistoryText = [NSMutableString string];
     self.pipelineTasksMap = [NSMutableDictionary dictionary];
@@ -12317,6 +12335,15 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     self.translatedTextView.textContainerInset = UIEdgeInsetsMake(2, 8, 4, 8);
     self.translatedTextView.text = @"✨ 零延迟微切片流式同传已就绪...";
     [self.subtitleGlassBg.contentView addSubview:self.translatedTextView];
+
+    self.audioSourceToggleBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.audioSourceToggleBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.16];
+    self.audioSourceToggleBtn.layer.cornerRadius = 9.0;
+    [self.audioSourceToggleBtn setTitle:@"🔇内录" forState:UIControlStateNormal];
+    [self.audioSourceToggleBtn setTitleColor:[UIColor colorWithRed:0.40 green:0.96 blue:0.68 alpha:1.0] forState:UIControlStateNormal];
+    self.audioSourceToggleBtn.titleLabel.font = [UIFont boldSystemFontOfSize:10.0];
+    [self.audioSourceToggleBtn addTarget:self action:@selector(toggleAudioSourceMode) forControlEvents:UIControlEventTouchUpInside];
+    [self.subtitleGlassBg.contentView addSubview:self.audioSourceToggleBtn];
 
     self.compactLangBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     self.compactLangBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.16];
@@ -12369,6 +12396,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     [self.audioSourceToggleBtn setTitle:t forState:UIControlStateNormal];
     UIColor *col = self.isInternalRecordingMode ? [UIColor colorWithRed:0.40 green:0.96 blue:0.68 alpha:1.0] : [UIColor colorWithRed:1.0 green:0.80 blue:0.35 alpha:1.0];
     [self.audioSourceToggleBtn setTitleColor:col forState:UIControlStateNormal];
+    [self resetAllTranslationHistoryAndUI];
     [self startZeroInterferenceInternalAudioTranslation];
 }
 
@@ -12427,8 +12455,9 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 
     self.subtitleGlassBg.frame = self.cropBoxView.bounds;
     self.compactCloseBtn.frame = CGRectMake(w - 28, 6, 22, 19);
-    self.compactLangBtn.frame = CGRectMake(w - 78, 6, 46, 19);
-    self.liveOriginalPreviewLabel.frame = CGRectMake(12, 6, w - 96, 18);
+    self.compactLangBtn.frame = CGRectMake(w - 76, 6, 44, 19);
+    self.audioSourceToggleBtn.frame = CGRectMake(w - 124, 6, 44, 19);
+    self.liveOriginalPreviewLabel.frame = CGRectMake(12, 6, MAX(60.0, w - 140), 18);
     self.translatedTextView.frame = CGRectMake(4, 25, w - 28, MAX(32.0, h - 29));
     self.resizeCornerHandle.frame = CGRectMake(w - 24, h - 24, 24, 24);
     [self.cropBoxView bringSubviewToFront:self.resizeCornerHandle];
@@ -12525,6 +12554,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 
 - (void)showTranslatorFloatingBox {
     if (!agTransIsEnabled()) return;
+    self.isAudioTranslatingActive = YES;
     [self resetAllTranslationHistoryAndUI];
     [self applySavedFontSizeAndStyle];
     self.alpha = 0.0;
@@ -12539,23 +12569,26 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 }
 
 - (void)hideTranslatorFloatingBox {
+    // 1. 同步一票否决主原子锁与窗口可见性，彻底掐死所有异步委托与定时器的“僵尸复活”
+    self.isAudioTranslatingActive = NO;
+    self.hidden = YES;
+    self.alpha = 0.0;
+
+    // 2. 彻底拆卸所有收音引擎与识别任务
     [self stopZeroInterferenceInternalAudioTranslation];
     [self resetAllTranslationHistoryAndUI];
     if (self.transStreamSession) {
         [self.transStreamSession invalidateAndCancel];
         self.transStreamSession = nil;
     }
-    [UIView animateWithDuration:0.20 animations:^{
-        self.alpha = 0.0;
-    } completion:^(BOOL finished) {
-        self.hidden = YES;
-    }];
 }
 
 #pragma mark - 👂 无损音量 + 内存副本 3.5x 自适应数字增幅 (In-Memory Soft AGC)
 
 - (void)startZeroInterferenceInternalAudioTranslation {
+    if (!self.isAudioTranslatingActive || self.hidden) return;
     [self stopZeroInterferenceInternalAudioTranslation];
+    self.isAudioTranslatingActive = YES;
 
     self.committedTranscriptLength = 0;
     self.latestPartialSegment = @"";
@@ -12595,7 +12628,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
             recorder.microphoneEnabled = YES;
             self.isReplayKitCapturing = YES;
             [recorder startCaptureWithHandler:^(CMSampleBufferRef  _Nonnull sampleBuffer, RPSampleBufferType bufferType, NSError * _Nullable error) {
-                if (error || !weakSelf.speechRequest) return;
+                if (error || !weakSelf.speechRequest || !weakSelf.isAudioTranslatingActive || weakSelf.hidden) return;
                 // 仅处理系统应用内录音频 (RPSampleBufferTypeAudioApp) 和麦克风音频 (RPSampleBufferTypeAudioMic)
                 if (bufferType == RPSampleBufferTypeAudioApp || bufferType == RPSampleBufferTypeAudioMic) {
                     weakSelf.lastAppAudioTime = [[NSDate date] timeIntervalSince1970];
@@ -12629,11 +12662,13 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
                     [weakSelf.speechRequest appendAudioSampleBuffer:sampleBuffer];
                 }
             } completionHandler:^(NSError * _Nullable error) {
-                if (error) {
+                if (error && weakSelf.isAudioTranslatingActive && !weakSelf.hidden) {
                     weakSelf.isReplayKitCapturing = NO;
                     dispatch_async(dispatch_get_main_queue(), ^{
                         // 当应用受 DRM 保护或音频会话独占被拒时，无缝自动降级为双路麦克风收音
-                        [weakSelf startFallbackAudioEngineCapture];
+                        if (weakSelf.isAudioTranslatingActive && !weakSelf.hidden) {
+                            [weakSelf startFallbackAudioEngineCapture];
+                        }
                     });
                 }
             }];
@@ -12644,7 +12679,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
         // 智能静音兜底：仅在悬浮窗可见且确实无音频时执行，且在窗口隐藏时立即休眠
         [self.silentFallbackTimer invalidate];
         self.silentFallbackTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer * _Nonnull timer) {
-            if (weakSelf.hidden || isDeviceCurrentlyLocked()) return;
+            if (!weakSelf || !weakSelf.isAudioTranslatingActive || weakSelf.hidden || isDeviceCurrentlyLocked()) return;
             NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
             if (now - weakSelf.lastAppAudioTime >= 1.5) {
                 UIImage *screenImg = _UICreateScreenUIImage();
@@ -12658,7 +12693,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
                 VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCGImage:cropImg options:@{}];
                 CGImageRelease(cropImg);
                 VNRecognizeTextRequest *req = [[VNRecognizeTextRequest alloc] initWithCompletionHandler:^(VNRequest * _Nonnull request, NSError * _Nullable error) {
-                    if (error || weakSelf.hidden) return;
+                    if (error || !weakSelf.isAudioTranslatingActive || weakSelf.hidden) return;
                     NSMutableString *ocrText = [NSMutableString string];
                     for (VNRecognizedTextObservation *obs in request.results) {
                         VNRecognizedText *top = [[obs topCandidates:1] firstObject];
@@ -12690,10 +12725,10 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 }
 
 - (void)handleTranslationAudioInterruption:(NSNotification *)note {
-    if (self.hidden || self.isInternalRecordingMode) return;
+    if (!self.isAudioTranslatingActive || self.hidden || self.isInternalRecordingMode) return;
     // 无论收到中断开始(type=1)还是中断结束(type=0)，延迟 0.35s 以 MixWithOthers 混音模式静默拉起听译引擎，不打断前台软件播放
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (!self.hidden && !self.isInternalRecordingMode) {
+        if (self.isAudioTranslatingActive && !self.hidden && !self.isInternalRecordingMode) {
             if (!self.voiceFallbackEngine || !self.voiceFallbackEngine.isRunning) {
                 [self startFallbackAudioEngineCapture];
             }
@@ -12705,10 +12740,11 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 }
 
 - (void)startFallbackAudioEngineCapture {
+    if (!self.isAudioTranslatingActive || self.hidden) return;
     __weak typeof(self) weakSelf = self;
     dispatch_async(agAudioSerialQueue(), ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf || strongSelf.hidden) return;
+        if (!strongSelf || !strongSelf.isAudioTranslatingActive || strongSelf.hidden) return;
 
         @try {
             if (strongSelf.voiceFallbackEngine) {
@@ -12745,7 +12781,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 
             [inputNode removeTapOnBus:0];
             [inputNode installTapOnBus:0 bufferSize:1024 format:fmt block:^(AVAudioPCMBuffer * _Nonnull buffer, AVAudioTime * _Nonnull when) {
-                if (isDeviceCurrentlyLocked() || !weakSelf.speechRequest) return;
+                if (isDeviceCurrentlyLocked() || !weakSelf.speechRequest || !weakSelf.isAudioTranslatingActive || weakSelf.hidden) return;
                 weakSelf.lastAppAudioTime = [[NSDate date] timeIntervalSince1970];
                 AVAudioFrameCount frames = buffer.frameLength;
                 if (frames == 0 || buffer.floatChannelData == NULL) {
@@ -12793,7 +12829,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self.audioKeepAliveTimer invalidate];
         self.audioKeepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
-            if (!weakSelf || weakSelf.hidden || isDeviceCurrentlyLocked()) return;
+            if (!weakSelf || !weakSelf.isAudioTranslatingActive || weakSelf.hidden || isDeviceCurrentlyLocked()) return;
             NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
             if (!weakSelf.isInternalRecordingMode) {
                 if (!weakSelf.voiceFallbackEngine || !weakSelf.voiceFallbackEngine.isRunning || (now - weakSelf.lastAppAudioTime > 2.2)) {
@@ -12806,6 +12842,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 }
 
 - (void)setupAndStartSpeechRecognitionTask {
+    if (!self.isAudioTranslatingActive || self.hidden) return;
     if (self.speechRequest) {
         [self.speechRequest endAudio];
         self.speechRequest = nil;
@@ -12881,26 +12918,25 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 
         if (error || (result && result.isFinal)) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (!weakSelf.hidden) {
-                    if (weakSelf.lastTranslatedChunkText.length > 0) {
-                        [weakSelf appendCommittedTranslationSegment:weakSelf.lastTranslatedChunkText];
-                        weakSelf.lastTranslatedChunkText = @"";
-                    }
-                    weakSelf.committedTranscriptLength = 0;
-                    if (!weakSelf.isInternalRecordingMode && (!weakSelf.voiceFallbackEngine || !weakSelf.voiceFallbackEngine.isRunning)) {
-                        [weakSelf startFallbackAudioEngineCapture];
-                    }
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        if (!weakSelf.hidden) [weakSelf setupAndStartSpeechRecognitionTask];
-                    });
+                if (!weakSelf.isAudioTranslatingActive || weakSelf.hidden) return;
+                if (weakSelf.lastTranslatedChunkText.length > 0) {
+                    [weakSelf appendCommittedTranslationSegment:weakSelf.lastTranslatedChunkText];
+                    weakSelf.lastTranslatedChunkText = @"";
                 }
+                weakSelf.committedTranscriptLength = 0;
+                if (!weakSelf.isInternalRecordingMode && (!weakSelf.voiceFallbackEngine || !weakSelf.voiceFallbackEngine.isRunning)) {
+                    [weakSelf startFallbackAudioEngineCapture];
+                }
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    if (weakSelf.isAudioTranslatingActive && !weakSelf.hidden) [weakSelf setupAndStartSpeechRecognitionTask];
+                });
             });
         }
     }];
 }
 
 - (void)triggerMicroDebouncedStreamingTranslation {
-    if (self.hidden || isDeviceCurrentlyLocked()) return;
+    if (!self.isAudioTranslatingActive || self.hidden || isDeviceCurrentlyLocked()) return;
     NSString *seg = self.latestPartialSegment;
     if (!seg || seg.length < 2 || [seg isEqualToString:self.lastRecognizedText]) return;
 
@@ -12920,7 +12956,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 }
 
 - (void)flushPendingSpeechSegmentTick {
-    if (self.hidden || isDeviceCurrentlyLocked()) return;
+    if (!self.isAudioTranslatingActive || self.hidden || isDeviceCurrentlyLocked()) return;
     NSString *seg = self.latestPartialSegment;
     if (!seg || seg.length < 2 || [seg isEqualToString:self.lastRecognizedText]) return;
 
@@ -12930,6 +12966,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 }
 
 - (void)stopZeroInterferenceInternalAudioTranslation {
+    self.isAudioTranslatingActive = NO;
     [self.audioKeepAliveTimer invalidate];
     self.audioKeepAliveTimer = nil;
     [self.microDebounceTimer invalidate];
@@ -12971,7 +13008,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
         self.speechRecognizer = nil;
     }
 
-    // 核心修复：无论是否使用 eng，音频会话都必须 100% 彻底注销并恢复 Ambient 状态，绝不占用后台！
+    // 核心修复：音频会话两阶段注销（先切 Ambient 释放硬件麦克风黄点，再 deactive，支持忙碌重试）
     dispatch_async(agAudioSerialQueue(), ^{
         if (eng) {
             @try {
@@ -12980,6 +13017,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
                     [eng.inputNode setVoiceProcessingEnabled:NO error:nil];
                 }
                 [eng stop];
+                [eng reset];
             } @catch (NSException *e) {}
         }
         @try {
@@ -12987,7 +13025,13 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
             if (!mgr.overlayWindow || mgr.overlayWindow.hidden) {
                 AVAudioSession *session = [AVAudioSession sharedInstance];
                 [session setCategory:AVAudioSessionCategoryAmbient withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
-                [session setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:nil];
+                NSError *deactErr = nil;
+                [session setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:&deactErr];
+                if (deactErr) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), agAudioSerialQueue(), ^{
+                        [session setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:nil];
+                    });
+                }
             }
         } @catch (NSException *e) {}
     });
