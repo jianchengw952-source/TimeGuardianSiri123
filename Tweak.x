@@ -30,6 +30,8 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <sys/stat.h>
+#import <mach/mach.h>
+#import <mach/mach_host.h>
 #import <mach/mach_time.h>
 #import <Vision/Vision.h>
 #import <AudioToolbox/AudioToolbox.h>
@@ -1901,6 +1903,23 @@ static BOOL agIsWebSearchEnabled(void) {
 static NSURLSession *agCreateSessionWithProxy(NSString *proxyStr, id<NSURLSessionDelegate> delegate, NSOperationQueue *queue);
 
 // 全模型通用：iOS 客户端并发实时网页检索 (赋能无自带联网的第三方 API / DeepSeek / 任意中转模型)
+static void agGetDeviceMemoryInfo(double *outUsedRAMGB, double *outTotalRAMGB) {
+    mach_port_t host_port = mach_host_self();
+    mach_msg_type_number_t host_size = sizeof(vm_statistics64_data_t) / sizeof(integer_t);
+    vm_size_t pagesize;
+    host_page_size(host_port, &pagesize);
+    vm_statistics64_data_t vm_stat;
+    if (host_statistics64(host_port, HOST_VM_INFO64, (host_info64_t)&vm_stat, &host_size) == KERN_SUCCESS) {
+        int64_t mem_used = ((int64_t)vm_stat.active_count + (int64_t)vm_stat.inactive_count + (int64_t)vm_stat.wire_count) * (int64_t)pagesize;
+        int64_t mem_total = [NSProcessInfo processInfo].physicalMemory;
+        if (outUsedRAMGB) *outUsedRAMGB = (double)mem_used / (1024.0 * 1024.0 * 1024.0);
+        if (outTotalRAMGB) *outTotalRAMGB = (double)mem_total / (1024.0 * 1024.0 * 1024.0);
+    } else {
+        if (outUsedRAMGB) *outUsedRAMGB = 0;
+        if (outTotalRAMGB) *outTotalRAMGB = (double)[NSProcessInfo processInfo].physicalMemory / (1024.0 * 1024.0 * 1024.0);
+    }
+}
+
 static void agFetchRealtimeWebSearchContextForQuery(NSString *query, NSString *proxy, void(^completion)(NSString *searchSummary)) {
     NSString *cleanQ = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     BOOL webEnabled = agIsWebSearchEnabled();
@@ -1915,71 +1934,62 @@ static void agFetchRealtimeWebSearchContextForQuery(NSString *query, NSString *p
         return;
     }
 
-    // 使用 bing.com 新闻与实时资讯最稳定 RSS
-    NSString *rssURLStr = [NSString stringWithFormat:@"https://www.bing.com/news/search?q=%@&format=rss&setlang=zh-cn", encodedQ];
-    NSURL *url = [NSURL URLWithString:rssURLStr];
+    // 方案 1：全网通用网页搜索升级（支持天气、即时事实、新闻、百科、汇率等）
+    NSString *webURLStr = [NSString stringWithFormat:@"https://cn.bing.com/search?q=%@&setlang=zh-cn", encodedQ];
+    NSURL *url = [NSURL URLWithString:webURLStr];
     if (!url) {
         if (completion) completion(nil);
         return;
     }
 
     NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
-    agLiveDiagLog(@"WEB_SEARCH_DIAG", @"Starting web search for query='%@', proxy='%@'", cleanQ, proxy ?: @"none");
+    agLiveDiagLog(@"WEB_SEARCH_DIAG", @"Starting universal web search for query='%@', proxy='%@'", cleanQ, proxy ?: @"none");
 
     NSURLSession *session = agCreateSessionWithProxy(proxy, nil, nil);
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.HTTPMethod = @"GET";
-    req.timeoutInterval = 3.2;
-    [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15" forHTTPHeaderField:@"User-Agent"];
+    req.timeoutInterval = 3.5;
+    [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1" forHTTPHeaderField:@"User-Agent"];
+    [req setValue:@"zh-CN,zh;q=0.9,en;q=0.8" forHTTPHeaderField:@"Accept-Language"];
 
     [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         NSInteger costMs = (NSInteger)(([NSDate timeIntervalSinceReferenceDate] - t0) * 1000.0);
         NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)resp;
         NSInteger statusCode = [httpResp isKindOfClass:[NSHTTPURLResponse class]] ? httpResp.statusCode : 0;
 
-        if (err || !data || data.length < 50) {
+        if (err || !data || data.length < 100) {
             agLiveDiagLog(@"WEB_SEARCH_DIAG", @"Failed (%ldms, HTTP %ld): %@", (long)costMs, (long)statusCode, err.localizedDescription ?: @"empty data");
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (completion) completion(nil);
             });
             return;
         }
-        NSString *xml = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        if (!xml) {
-            agLiveDiagLog(@"WEB_SEARCH_DIAG", @"Failed (%ldms): UTF8 decode nil", (long)costMs);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil);
-            });
-            return;
+        NSString *html = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (!html) {
+            html = [[NSString alloc] initWithData:data encoding:NSASCIIStringEncoding];
         }
 
         NSMutableArray<NSString *> *snippets = [NSMutableArray array];
-        NSRegularExpression *itemRe = [NSRegularExpression regularExpressionWithPattern:@"<item>(.*?)</item>" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
-        NSRegularExpression *titleRe = [NSRegularExpression regularExpressionWithPattern:@"<title><!\\[CDATA\\[(.*?)\\]\\]></title>|<title>(.*?)</title>" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
-        NSRegularExpression *descRe = [NSRegularExpression regularExpressionWithPattern:@"<description><!\\[CDATA\\[(.*?)\\]\\]></description>|<description>(.*?)</description>" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
+        if (html.length > 0) {
+            NSRegularExpression *pRe = [NSRegularExpression regularExpressionWithPattern:@"<p[^>]*>(.*?)</p>" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
+            NSRegularExpression *tagStripRe = [NSRegularExpression regularExpressionWithPattern:@"<[^>]+>" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
+            NSArray<NSTextCheckingResult *> *pMatches = [pRe matchesInString:html options:0 range:NSMakeRange(0, html.length)];
 
-        NSArray<NSTextCheckingResult *> *items = [itemRe matchesInString:xml options:0 range:NSMakeRange(0, xml.length)];
-        for (NSTextCheckingResult *m in items) {
-            if (snippets.count >= 5) break;
-            NSString *itemBlock = [xml substringWithRange:[m rangeAtIndex:1]];
-            NSTextCheckingResult *tm = [titleRe firstMatchInString:itemBlock options:0 range:NSMakeRange(0, itemBlock.length)];
-            NSTextCheckingResult *dm = [descRe firstMatchInString:itemBlock options:0 range:NSMakeRange(0, itemBlock.length)];
-            NSString *tStr = @"";
-            NSString *dStr = @"";
-            if (tm) {
-                NSRange r1 = [tm rangeAtIndex:1];
-                NSRange r2 = [tm rangeAtIndex:2];
-                tStr = (r1.location != NSNotFound) ? [itemBlock substringWithRange:r1] : ((r2.location != NSNotFound) ? [itemBlock substringWithRange:r2] : @"");
-            }
-            if (dm) {
-                NSRange r1 = [dm rangeAtIndex:1];
-                NSRange r2 = [dm rangeAtIndex:2];
-                dStr = (r1.location != NSNotFound) ? [itemBlock substringWithRange:r1] : ((r2.location != NSNotFound) ? [itemBlock substringWithRange:r2] : @"");
-            }
-            tStr = [[tStr stringByReplacingOccurrencesOfString:@"&quot;" withString:@"\""] stringByReplacingOccurrencesOfString:@"&amp;" withString:@"&"];
-            dStr = [[dStr stringByReplacingOccurrencesOfString:@"&quot;" withString:@"\""] stringByReplacingOccurrencesOfString:@"&amp;" withString:@"&"];
-            if (tStr.length > 0) {
-                [snippets addObject:[NSString stringWithFormat:@"- %@：%@", tStr, (dStr.length > 120 ? [dStr substringToIndex:120] : dStr)]];
+            for (NSTextCheckingResult *m in pMatches) {
+                if (snippets.count >= 4) break;
+                if (m.numberOfRanges > 1) {
+                    NSString *rawP = [html substringWithRange:[m rangeAtIndex:1]];
+                    NSString *cleanText = [tagStripRe stringByReplacingMatchesInString:rawP options:0 range:NSMakeRange(0, rawP.length) withTemplate:@""];
+                    cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&quot;" withString:@"""];
+                    cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&amp;" withString:@"&"];
+                    cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&nbsp;" withString:@" "];
+                    cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&#39;" withString:@"'"];
+                    cleanText = [cleanText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                    if (cleanText.length >= 15 && ![cleanText containsString:@"JavaScript"] && ![cleanText containsString:@"Cookie"] && ![cleanText containsString:@"浙公网安备"]) {
+                        NSString *trimmedSnippet = (cleanText.length > 150) ? [cleanText substringToIndex:150] : cleanText;
+                        [snippets addObject:[NSString stringWithFormat:@"- %@", trimmedSnippet]];
+                    }
+                }
             }
         }
 
@@ -1990,7 +2000,6 @@ static void agFetchRealtimeWebSearchContextForQuery(NSString *query, NSString *p
         });
     }] resume];
 }
-
 
 static NSString *agSanitizeEndpoint(NSString *raw, AGConfigTab tab) {
     NSString *ep = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -6186,7 +6195,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
         fmt.dateFormat = @"yyyy-MM-dd HH:mm:ss";
         NSString *nowStr = [fmt stringFromDate:[NSDate date]];
-        sysInstruction = [sysInstruction stringByAppendingFormat:@"\n【实时联网已开启】当前系统准确时间：%@。遇到实时新闻、今日天气、股价汇率、最新动态等问题时，请直接调用 google_search 工具检索最新信息作答。", nowStr];
+        sysInstruction = [sysInstruction stringByAppendingFormat:@"\n【实时联网已开启】当前系统准确时间：%@。遇到实时新闻、今日天气、股价汇率、最新动态等问题时，请直接调用 google_search 工具检索最新信息作答。重要要求：当 google_search 返回搜索结果后，你必须立即使用自然的中文口语将查询到的核心答案（如天气预报温度、新闻要点、事实数据）完整、流畅地朗读给用户，绝不允许只回复“稍等”后陷入静默；即使未检索到，也要如实向用户告知。", nowStr];
     }
 
     NSString *permMemory = agBuildUniversalMemoryPromptBlockForQuery(@"");
@@ -6443,7 +6452,11 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                                     @{
                                         @"id": callId ?: @"",
                                         @"name": @"google_search",
-                                        @"response": @{ @"output": resText }
+                                        @"response": @{
+                                            @"result": resText,
+                                            @"output": resText,
+                                            @"status": @"success"
+                                        }
                                     }
                                 ]
                             }
@@ -6560,6 +6573,12 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             for (NSDictionary *part in parts) {
                 if (![part isKindOfClass:[NSDictionary class]]) continue;
                 if ([part[@"thought"] boolValue]) continue;
+                // 【方案 4：双轨解析】从模型原生 parts 中提前提取 [ACTION:...] 协议，杜绝转录语音口语漏掉 Action 导致无法自检的问题！
+                NSString *rawPartText = part[@"text"];
+                if ([rawPartText isKindOfClass:[NSString class]] && [rawPartText containsString:@"[ACTION:"]) {
+                    BOOL actionDirectExecuted = NO;
+                    [self parseAndExecuteActions:rawPartText executed:&actionDirectExecuted];
+                }
                 if (part[@"text"] && self.disableTranscriptionInSetup) {
                     if (self.isLastTranscriptLineUser) {
                         [[self currentTabTranscript] appendString:@"\n"];
@@ -7500,15 +7519,33 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         timerRe = [NSRegularExpression regularExpressionWithPattern:@"(?:定个|设个|设置|开启|来个)?(\\d{1,3})(?:分钟|分|秒)(?:的)?(?:倒计时|计时器)" options:0 error:nil];
         alarmRe = [NSRegularExpression regularExpressionWithPattern:@"(?:定个|设个|设置|定一个)?(?:明天|明早|早上|上午|下午|晚上)?(\\d{1,2})(?:点|时|:|：)(?:(\\d{1,2})分?)?(?:的)?闹钟" options:0 error:nil];
         tapTextRe = [NSRegularExpression regularExpressionWithPattern:@"(?:点击|点一下)(?:屏幕上的|按钮)?[“\"'「]?([^”\"'」，。！？,.!?\\s]+)[”\"'」]?" options:0 error:nil];
-        searchRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:打开|启动|在|去|用|上)?(淘宝|京东|拼多多|美团|抖音|b站|哔哩哔哩|小红书|知乎|微博|百度)(?:里|上|app)?(?:帮我)?(?:搜一下|搜索一下|查找一下|找一下|搜索|搜|找|买|看)(?:一下)?(.+)$" options:0 error:nil];
+        searchRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:在|去|用|打开)(淘宝|京东|拼多多|美团|抖音|b站|哔哩哔哩|小红书|知乎|微博|百度)(?:里|上|app)?(?:帮我)?(?:搜一下|搜索一下|查找一下|找一下|搜索|搜|找|买|看)(?:一下)?(.+)$" options:0 error:nil];
         naviRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:打开|用|使用)?(?:高德地图|百度地图|苹果地图|高德|百度|地图)?(?:帮我)?(?:导航|驾车|骑行|步行)?(?:到|去|前往|去往)(.+?)(?:怎么走|怎么去|吧|呢)?$" options:0 error:nil];
         musicRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:在网易云|在qq音乐|听|播放)(?:搜|播|听)?([^，。！？,.!?\\s]+)" options:0 error:nil];
-        openRegex = [NSRegularExpression regularExpressionWithPattern:@"^(?:打开|启动|开启)([^，。！？,.!?\\s”\"']+)$" options:0 error:nil];
+        openRegex = [NSRegularExpression regularExpressionWithPattern:@"^(?:打开|启动|开启|进入|进一下|进到|进|跳到|切到|切换到|调出|运行|唤起|我想看|帮我开)([^，。！？,.!?\\s”\"\']+)$" options:0 error:nil];
         callRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:给|拨打)([^，。！？,.!?\\s]+?)(?:打电话|呼叫|的电话)" options:0 error:nil];
         smsRegex = [NSRegularExpression regularExpressionWithPattern:@"给(.+?)发(?:短信|信息)(?:说|内容是)?(.+)$" options:0 error:nil];
     });
 
     NSString *cmd = [[cmdText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+
+    // 【方案 5：第一优先级 纯信息与新闻查询一票否决门（彻底杜绝查美团最新消息误开美团）】
+    static NSArray<NSString *> *sQueryNegativeKeywords = nil;
+    static dispatch_once_t sQueryOnce;
+    dispatch_once(&sQueryOnce, ^{
+        sQueryNegativeKeywords = @[
+            @"最新消息", @"新闻", @"动态", @"发生了什么", @"最新进展", @"公告", @"热搜", @"八卦", @"翻车",
+            @"股价", @"股票", @"市值", @"财报", @"营收", @"创始人", @"老板", @"发展史", @"简介",
+            @"怎么样", @"如何", @"为什么", @"什么时候", @"怎么回事", @"如何评价", @"攻略", @"是什么",
+            @"好不好", @"值得买吗", @"哪个好", @"多少钱", @"价格", @"怎么看", @"原理"
+        ];
+    });
+    for (NSString *negKw in sQueryNegativeKeywords) {
+        if ([cmd containsString:negKw]) {
+            // 只要命中纯知识/新闻/查询关键词，直接退出本地拦截，100% 交由大模型与搜索引擎联网解答
+            return NO;
+        }
+    }
 
     NSString *cleanCmd = [cmd stringByReplacingOccurrencesOfString:@"帮我" withString:@""];
     cleanCmd = [cleanCmd stringByReplacingOccurrencesOfString:@"请你" withString:@""];
@@ -7718,8 +7755,11 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         }
     }
 
-    // 11. 📊 设备电量与存储内存自检
-    if ([cmd containsString:@"多少电"] || [cmd containsString:@"剩余电量"] || [cmd containsString:@"存储空间"] || [cmd containsString:@"手机状态"]) {
+    // 11. 📊 设备电量与存储内存自检（全槽位本地精准拦截：内存、运存、存储、电量等）
+    if ([cmd containsString:@"内存"] || [cmd containsString:@"运存"] || [cmd containsString:@"存储"] ||
+        [cmd containsString:@"空间"] || [cmd containsString:@"容量"] || [cmd containsString:@"多少电"] ||
+        [cmd containsString:@"剩余电量"] || [cmd containsString:@"手机状态"] || [cmd containsString:@"手机体检"] ||
+        [cmd containsString:@"机身存储"] || [cmd containsString:@"还剩多少g"]) {
         [self executeActionDictionary:@{@"type": @"device_status"}];
         return YES;
     }
@@ -8057,12 +8097,24 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         }
     }
 
-    // 17. 📱 语音秒开任意应用（带防抢跑保护：若包含“给/向/发/说/告诉”，绝不当成单纯打开应用！）
+    // 17. 📱 语音秒开任意应用（多动词扩容 + 孤立应用名极简秒开 + 问消息防误开保护）
     if (![cleanCmd containsString:@"给"] && ![cleanCmd containsString:@"发"] && ![cleanCmd containsString:@"向"] && ![cleanCmd containsString:@"告诉"]) {
         NSTextCheckingResult *openMatch = [openRegex firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
+        NSString *targetApp = nil;
         if (openMatch) {
-            NSString *appName = [cleanCmd substringWithRange:[openMatch rangeAtIndex:1]];
-            [self executeActionDictionary:@{@"type": @"open_app", @"app": appName}];
+            targetApp = [cleanCmd substringWithRange:[openMatch rangeAtIndex:1]];
+        } else {
+            // 孤立应用名极简秒开（例如直接说“美团”、“微信”、“抖音”、“网易云”、“b站”）
+            if (self.builtinAppMap[cleanCmd] != nil ||
+                [cleanCmd isEqualToString:@"b站"] || [cleanCmd isEqualToString:@"高德"] ||
+                [cleanCmd isEqualToString:@"网易云"] || [cleanCmd isEqualToString:@"小红书"] ||
+                [cleanCmd isEqualToString:@"相机"] || [cleanCmd isEqualToString:@"相册"] ||
+                [cleanCmd isEqualToString:@"设置"] || [cleanCmd isEqualToString:@"美团"]) {
+                targetApp = cleanCmd;
+            }
+        }
+        if (targetApp.length > 0) {
+            [self executeActionDictionary:@{@"type": @"open_app", @"app": targetApp}];
             return YES;
         }
     }
@@ -8219,6 +8271,16 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
 - (void)openApplicationByName:(NSString *)appName {
     NSString *cleanName = [[appName stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    // 应用别名与简称标准化映射
+    if ([cleanName isEqualToString:@"b站"] || [cleanName isEqualToString:@"bilibili"]) cleanName = @"哔哩哔哩";
+    if ([cleanName isEqualToString:@"高德"]) cleanName = @"高德地图";
+    if ([cleanName isEqualToString:@"网易云"] || [cleanName isEqualToString:@"云音乐"]) cleanName = @"网易云音乐";
+    if ([cleanName isEqualToString:@"红薯"]) cleanName = @"小红书";
+    if ([cleanName isEqualToString:@"苹果商店"] || [cleanName isEqualToString:@"应用商店"]) cleanName = @"app store";
+    if ([cleanName isEqualToString:@"系统设置"]) cleanName = @"设置";
+    if ([cleanName isEqualToString:@"照片"] || [cleanName isEqualToString:@"图库"]) cleanName = @"相册";
+    if ([cleanName isEqualToString:@"拍照"] || [cleanName isEqualToString:@"照相"]) cleanName = @"相机";
+
     NSString *targetBundleID = self.builtinAppMap[cleanName];
 
     if (!targetBundleID && self.cachedInstalledApps.count > 0) {
@@ -8767,15 +8829,28 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         dev.batteryMonitoringEnabled = YES;
         int batPct = (int)roundf(dev.batteryLevel * 100.0f);
         if (batPct < 0) batPct = 100;
-        NSString *chargeStr = (dev.batteryState == UIDeviceBatteryStateCharging || dev.batteryState == UIDeviceBatteryStateFull) ? @"充电中" : @"未充电";
+        NSString *chargeStr = (dev.batteryState == UIDeviceBatteryStateCharging || dev.batteryState == UIDeviceBatteryStateFull) ? @"已充电" : @"未充电";
+
+        double usedRAM = 0.0, totalRAM = 0.0;
+        agGetDeviceMemoryInfo(&usedRAM, &totalRAM);
 
         NSDictionary *fs = [[NSFileManager defaultManager] attributesOfFileSystemForPath:NSHomeDirectory() error:nil];
-        double freeGB = [fs[NSFileSystemFreeSize] doubleValue] / (1024.0 * 1024.0 * 1024.0);
-        int brightPct = (int)roundf([UIScreen mainScreen].brightness * 100.0f);
+        double freeROM = [fs[NSFileSystemFreeSize] doubleValue] / (1024.0 * 1024.0 * 1024.0);
+        double totalROM = [fs[NSFileSystemSize] doubleValue] / (1024.0 * 1024.0 * 1024.0);
+        int ramPct = (totalRAM > 0) ? (int)roundf((usedRAM / totalRAM) * 100.0f) : 0;
 
-        NSString *report = [NSString stringWithFormat:@"📊 电量 %d%% (%@) · 亮度 %d%% · 剩余空间 %.1f GB", batPct, chargeStr, brightPct, freeGB];
-        [[AGGlobalActionPillWindow sharedPill] showActionPill:report];
-        [self showActionBanner:report];
+        NSString *pillReport = [NSString stringWithFormat:@"📊 运存 %.1fG/%.1fG (%d%%) ｜ 存储 %.1fG/%.0fG ｜ 电量 %d%% (%@)",
+                                usedRAM, totalRAM, ramPct, freeROM, totalROM, batPct, chargeStr];
+        [[AGGlobalActionPillWindow sharedPill] showActionPill:pillReport];
+        [self showActionBanner:pillReport];
+
+        // 同步直接在当前对话面板输出详细报告，彻底解决说“这就为您检查”后无数据显示的问题
+        NSMutableString *curTrans = [self currentTabTranscript];
+        if (curTrans.length > 0 && ![curTrans hasSuffix:@"\n"]) [curTrans appendString:@"\n\n"];
+        [curTrans appendFormat:@"📱 手机状态自检报告：\n• 运存内存：已用 %.1f GB / 总共 %.1f GB（占用 %d%%）\n• 存储空间：剩余 %.1f GB / 总共 %.0f GB\n• 当前电量：%d%%（%@）\n",
+         usedRAM, totalRAM, ramPct, freeROM, totalROM, batPct, chargeStr];
+        [self updateResponseTextViewSmoothly:curTrans];
+        [self throttledExpandAndScrollTextViewForce:YES];
     });
 }
 
