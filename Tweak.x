@@ -1081,11 +1081,9 @@ static BOOL agIsCurrentProcessTargetedForLocSpoof(void) {
 
 static void agSpringBoardLocAppHookLogCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     static int sTokHitApp = 0;
-    static NSMutableDictionary<NSNumber *, NSNumber *> *sLastAppToastTime = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         notify_register_check("com.custom.ag.loc.apphit", &sTokHitApp);
-        sLastAppToastTime = [NSMutableDictionary dictionary];
     });
 
     uint64_t hitHash64 = 0;
@@ -1119,17 +1117,8 @@ static void agSpringBoardLocAppHookLogCallback(CFNotificationCenterRef center, v
         lon = [p[@"AG_LocSpoof_Lon"] doubleValue];
     }
 
+    // 仅在后台静默写入 /tmp/ag_live_diagnostic.log 供排查问题，打开软件时绝不弹出顶部胶囊打扰用户
     agLiveDiagLog(@"LOC_APP_HOOK", @"Spoof active in app '%@' (%@) -> '%@' WGS84=(%.6f, %.6f)", matchedAppName, matchedBundleID, place, lat, lon);
-
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    NSTimeInterval lastToast = [sLastAppToastTime[@(hitHash)] doubleValue];
-    if (now - lastToast > 20.0) {
-        sLastAppToastTime[@(hitHash)] = @(now);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSString *pillMsg = [NSString stringWithFormat:@"🟢 虚拟定位已接管「%@」📍 %@", matchedAppName, place];
-            [[AGGlobalActionPillWindow sharedPill] showActionPill:pillMsg];
-        });
-    }
 }
 
 // ==================== 核心引擎：AGLocationSpoofManager (仅 SpringBoard 唯一主控，彻底根除双进程互相覆盖) ====================
@@ -1495,8 +1484,8 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
     }
 
     NSString *pillMsg = self.isRouteMoving
-        ? [NSString stringWithFormat:@"%@ 正在前往：%@ (距离 %.0f米)", (moveMode == 1 ? @"🚶" : @"🚗"), self.currentPlaceName, self.remainingDistanceMeters]
-        : [NSString stringWithFormat:@"📍 定位已生效：%@", self.currentPlaceName];
+        ? [NSString stringWithFormat:@"🟢 虚拟定位已接管 (%@前往：%@ · 距%.0f米)", (moveMode == 1 ? @"🚶步行" : @"🚗驾车"), self.currentPlaceName, self.remainingDistanceMeters]
+        : [NSString stringWithFormat:@"🟢 虚拟定位已接管：📍 %@", self.currentPlaceName];
     [[AGGlobalActionPillWindow sharedPill] showActionPill:pillMsg];
 }
 
