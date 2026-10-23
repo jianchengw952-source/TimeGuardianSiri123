@@ -111,6 +111,11 @@ static NSString *agCameraStateName(AGCameraState st) {
 
 typedef int (*TCCAccessSetForBundleIdFunc)(CFStringRef service, CFStringRef bundleId, Boolean allowed);
 static void ensureSpringBoardTCCGranted(void) {
+    // 铁律：严禁在 com.apple.Preferences（系统设置）或第三方 App 进程中执行 SpringBoard TCC 授权改写，否则 tccd 会立即 SIGKILL 重启 SpringBoard！
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if (![bundleID isEqualToString:@"com.apple.springboard"]) {
+        return;
+    }
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         void *tccHandle = dlopen("/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_LAZY);
@@ -121,14 +126,13 @@ static void ensureSpringBoardTCCGranted(void) {
                 setFunc(CFSTR("kTCCServiceMicrophone"), CFSTR("com.apple.springboard"), true);
                 setFunc(CFSTR("kTCCServiceSpeechRecognition"), CFSTR("com.apple.springboard"), true);
                 setFunc(CFSTR("kTCCServiceScreenCapture"), CFSTR("com.apple.springboard"), true);
-        setFunc(CFSTR("kTCCServiceLocation"), CFSTR("com.apple.springboard"), true);
-        setFunc(CFSTR("kTCCServiceMotion"), CFSTR("com.apple.springboard"), true);
             }
         }
 
         const char *dbPath = "/var/mobile/Library/TCC/TCC.db";
         sqlite3 *db = NULL;
         if (sqlite3_open(dbPath, &db) == SQLITE_OK) {
+            sqlite3_busy_timeout(db, 1500);
             const char *sql1 = "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceCamera', 'com.apple.springboard', 0, 2, 1, 1);";
             const char *sql2 = "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceMicrophone', 'com.apple.springboard', 0, 2, 1, 1);";
             const char *sqlScr = "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceScreenCapture', 'com.apple.springboard', 0, 2, 1, 1);";
@@ -1079,11 +1083,135 @@ static BOOL agIsCurrentProcessTargetedForLocSpoof(void) {
     return (scopeMode == 1) ? isInList : !isInList;
 }
 
+static const void * const kAGHardwareCleanLocationKey = &kAGHardwareCleanLocationKey;
+
+// 根据虚拟坐标智能匹配真实区域海拔基准（消除全国统一 18.5m 海拔的检测破绽）
+static double agEstimatedBaseAltitudeForCoord(double lat, double lon) {
+    NSDictionary *p = agReadOnlyPrefs();
+    if (p[@"AG_LocSpoof_BaseAltitude"] != nil) {
+        double customAlt = [p[@"AG_LocSpoof_BaseAltitude"] doubleValue];
+        if (customAlt > -200.0 && customAlt < 9000.0 && fabs(customAlt - 18.5) > 0.01) {
+            return customAlt;
+        }
+    }
+    if (lat >= 18.0 && lat <= 20.5 && lon >= 108.5 && lon <= 111.5) return 14.2;   // 海南（海口/三亚/临高）
+    if (lat >= 22.0 && lat <= 23.8 && lon >= 112.5 && lon <= 114.6) return 17.6;   // 珠三角（广州/深圳/香港）
+    if (lat >= 30.0 && lat <= 32.2 && lon >= 119.8 && lon <= 122.2) return 6.8;    // 长三角（上海/杭州/苏州）
+    if (lat >= 39.4 && lat <= 40.5 && lon >= 115.8 && lon <= 117.2) return 43.5;   // 北京
+    if (lat >= 30.2 && lat <= 31.0 && lon >= 103.6 && lon <= 104.5) return 502.0;  // 成都
+    if (lat >= 29.1 && lat <= 30.1 && lon >= 106.0 && lon <= 107.0) return 246.0;  // 重庆
+    if (lat >= 24.6 && lat <= 25.4 && lon >= 102.4 && lon <= 103.1) return 1891.0; // 昆明
+    if (lat >= 26.2 && lat <= 26.9 && lon >= 106.3 && lon <= 107.0) return 1074.0; // 贵阳
+    if (lat >= 34.0 && lat <= 34.6 && lon >= 108.6 && lon <= 109.3) return 405.0;  // 西安
+    if (lat >= 29.4 && lat <= 30.0 && lon >= 90.8  && lon <= 91.5)  return 3652.0; // 拉萨
+    // 其余地区根据经纬度生成平滑连续的确定性地形高程 (12m ~ 85m)
+    double pseudoTerrain = 22.0 + 18.0 * sin(lat * 0.17) + 14.0 * cos(lon * 0.13);
+    return MAX(5.0, pseudoTerrain);
+}
+
+// Ornstein-Uhlenbeck (OU) 均值回归平滑状态（模拟真实硬件 GNSS 卡尔曼滤波器的连续微漂移，绝不发生突兀折线跳变）
+static double sOUDriftLatM = 0.0;
+static double sOUDriftLonM = 0.0;
+static double sOUDriftAltM = 0.0;
+static double sOUSmoothHAcc = 4.6;
+static double sOUSmoothVAcc = 3.4;
+
+static double agGaussianRandom(void) {
+    double u1 = ((double)arc4random_uniform(9998) + 1.0) / 10000.0;
+    double u2 = ((double)arc4random_uniform(9998) + 1.0) / 10000.0;
+    return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+}
+
+static void agStepKalmanSmoothDrift(BOOL enableJitter, double *ioLat, double *ioLon, double *outAlt, double *outHAcc, double *outVAcc) {
+    double baseAlt = agEstimatedBaseAltitudeForCoord(*ioLat, *ioLon);
+    if (!enableJitter) {
+        if (outAlt)  *outAlt  = baseAlt;
+        if (outHAcc) *outHAcc = 4.6;
+        if (outVAcc) *outVAcc = 3.3;
+        return;
+    }
+    // OU 均值回归系数 theta=0.22，平滑演进水平位置（±0.85米内连续呼吸游走）
+    sOUDriftLatM = sOUDriftLatM * 0.78 + agGaussianRandom() * 0.24;
+    sOUDriftLonM = sOUDriftLonM * 0.78 + agGaussianRandom() * 0.24;
+    sOUDriftAltM = sOUDriftAltM * 0.84 + agGaussianRandom() * 0.16;
+    sOUDriftLatM = MAX(-1.15, MIN(1.15, sOUDriftLatM));
+    sOUDriftLonM = MAX(-1.15, MIN(1.15, sOUDriftLonM));
+    sOUDriftAltM = MAX(-1.20, MIN(1.20, sOUDriftAltM));
+
+    sOUSmoothHAcc = sOUSmoothHAcc * 0.82 + 4.65 * 0.18 + agGaussianRandom() * 0.18;
+    sOUSmoothVAcc = sOUSmoothVAcc * 0.84 + 3.40 * 0.16 + agGaussianRandom() * 0.14;
+    sOUSmoothHAcc = MAX(3.4, MIN(7.8, sOUSmoothHAcc));
+    sOUSmoothVAcc = MAX(2.5, MIN(6.2, sOUSmoothVAcc));
+
+    double degPerMeter = 1.0 / 111320.0;
+    *ioLat += sOUDriftLatM * degPerMeter;
+    *ioLon += sOUDriftLonM * degPerMeter / MAX(0.2, cos((*ioLat) * M_PI / 180.0));
+    if (outAlt)  *outAlt  = baseAlt + sOUDriftAltM;
+    if (outHAcc) *outHAcc = sOUSmoothHAcc;
+    if (outVAcc) *outVAcc = sOUSmoothVAcc;
+}
+
+// 构造 iOS 15 ~ iOS 17 全字段硬件级 CLLocation（补齐 speedAccuracy / courseAccuracy / sourceInformation / 硬件标记）
+static CLLocation *agCreateHardwareGradeLocation(CLLocationCoordinate2D coord, double alt, double hAcc, double vAcc, double course, double speed) {
+    double spdAcc = (speed > 0.1) ? (0.26 + ((double)arc4random_uniform(14)) * 0.01) : (0.18 + ((double)arc4random_uniform(8)) * 0.01);
+    double crsAcc = (course >= 0.0) ? (14.5 + ((double)arc4random_uniform(80)) * 0.1) : 22.0;
+    double validCourse = (course >= 0.0) ? course : 0.0;
+    double validSpeed  = (speed >= 0.0) ? speed : 0.0;
+    NSDate *now = [NSDate date];
+
+    CLLocation *loc = nil;
+    if (@available(iOS 15.0, *)) {
+        CLLocationSourceInformation *cleanSource = [[CLLocationSourceInformation alloc] initWithSoftwareSimulationState:NO andExternalAccessoryState:NO];
+        if ([CLLocation instancesRespondToSelector:@selector(initWithCoordinate:altitude:horizontalAccuracy:verticalAccuracy:course:courseAccuracy:speed:speedAccuracy:timestamp:sourceInfo:)]) {
+            loc = [[CLLocation alloc] initWithCoordinate:coord
+                                                altitude:alt
+                                      horizontalAccuracy:hAcc
+                                        verticalAccuracy:vAcc
+                                                  course:validCourse
+                                          courseAccuracy:crsAcc
+                                                   speed:validSpeed
+                                           speedAccuracy:spdAcc
+                                               timestamp:now
+                                              sourceInfo:cleanSource];
+        }
+    }
+    if (!loc) {
+        if (@available(iOS 13.4, *)) {
+            if ([CLLocation instancesRespondToSelector:@selector(initWithCoordinate:altitude:horizontalAccuracy:verticalAccuracy:course:courseAccuracy:speed:speedAccuracy:timestamp:)]) {
+                loc = [[CLLocation alloc] initWithCoordinate:coord
+                                                    altitude:alt
+                                          horizontalAccuracy:hAcc
+                                            verticalAccuracy:vAcc
+                                                      course:validCourse
+                                              courseAccuracy:crsAcc
+                                                       speed:validSpeed
+                                               speedAccuracy:spdAcc
+                                                   timestamp:now];
+            }
+        }
+    }
+    if (!loc) {
+        loc = [[CLLocation alloc] initWithCoordinate:coord
+                                            altitude:alt
+                                  horizontalAccuracy:hAcc
+                                    verticalAccuracy:vAcc
+                                              course:validCourse
+                                               speed:validSpeed
+                                           timestamp:now];
+    }
+    if (loc) {
+        objc_setAssociatedObject(loc, kAGHardwareCleanLocationKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return loc;
+}
+
 static void agSpringBoardLocAppHookLogCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     static int sTokHitApp = 0;
+    static NSMutableDictionary<NSNumber *, NSDictionary *> *sHashAppCache = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         notify_register_check("com.custom.ag.loc.apphit", &sTokHitApp);
+        sHashAppCache = [NSMutableDictionary dictionary];
     });
 
     uint64_t hitHash64 = 0;
@@ -1091,34 +1219,45 @@ static void agSpringBoardLocAppHookLogCallback(CFNotificationCenterRef center, v
     uint32_t hitHash = (uint32_t)(hitHash64 & 0xFFFFFFFFULL);
     if (hitHash == 0) return;
 
-    NSString *matchedAppName = @"目标软件";
-    NSString *matchedBundleID = [NSString stringWithFormat:@"hash:%u", hitHash];
-    @try {
-        Class wsCls = objc_getClass("LSApplicationWorkspace");
-        LSApplicationWorkspace *ws = (wsCls && [wsCls respondsToSelector:@selector(defaultWorkspace)]) ? [wsCls defaultWorkspace] : nil;
-        NSArray<LSApplicationProxy *> *proxies = [ws respondsToSelector:@selector(allInstalledApplications)] ? [ws allInstalledApplications] : @[];
-        for (LSApplicationProxy *proxy in proxies) {
-            NSString *bid = proxy.applicationIdentifier;
-            if (bid && agHashBundleID(bid) == hitHash) {
-                matchedBundleID = bid;
-                matchedAppName = [proxy localizedName] ?: bid;
-                break;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        NSString *matchedAppName = @"目标软件";
+        NSString *matchedBundleID = [NSString stringWithFormat:@"hash:%u", hitHash];
+        @synchronized (sHashAppCache) {
+            NSDictionary *cachedInfo = sHashAppCache[@(hitHash)];
+            if (cachedInfo) {
+                matchedAppName = cachedInfo[@"name"];
+                matchedBundleID = cachedInfo[@"bid"];
+            } else {
+                @try {
+                    Class wsCls = objc_getClass("LSApplicationWorkspace");
+                    LSApplicationWorkspace *ws = (wsCls && [wsCls respondsToSelector:@selector(defaultWorkspace)]) ? [wsCls defaultWorkspace] : nil;
+                    NSArray<LSApplicationProxy *> *proxies = [ws respondsToSelector:@selector(allInstalledApplications)] ? [ws allInstalledApplications] : @[];
+                    for (LSApplicationProxy *proxy in proxies) {
+                        NSString *bid = proxy.applicationIdentifier;
+                        if (bid) {
+                            uint32_t h = agHashBundleID(bid);
+                            NSString *n = [proxy localizedName] ?: bid;
+                            sHashAppCache[@(h)] = @{@"name": n, @"bid": bid};
+                            if (h == hitHash) {
+                                matchedBundleID = bid;
+                                matchedAppName = n;
+                            }
+                        }
+                    }
+                } @catch (NSException *e) {}
             }
         }
-    } @catch (NSException *e) {}
 
-    reloadGeminiPrefsCache();
-    NSDictionary *p = agReadOnlyPrefs();
-    NSString *place = p[@"AG_LocSpoof_Name"] ?: @"指定位置";
-    double lat = 0.0, lon = 0.0;
-    agReadSpoofStateFromKernel(NULL, NULL, NULL, NULL, &lat, &lon, NULL, NULL, NULL);
-    if (fabs(lat) < 0.001 && fabs(lon) < 0.001) {
-        lat = [p[@"AG_LocSpoof_Lat"] doubleValue];
-        lon = [p[@"AG_LocSpoof_Lon"] doubleValue];
-    }
-
-    // 仅在后台静默写入 /tmp/ag_live_diagnostic.log 供排查问题，打开软件时绝不弹出顶部胶囊打扰用户
-    agLiveDiagLog(@"LOC_APP_HOOK", @"Spoof active in app '%@' (%@) -> '%@' WGS84=(%.6f, %.6f)", matchedAppName, matchedBundleID, place, lat, lon);
+        NSDictionary *p = agReadOnlyPrefs();
+        NSString *place = p[@"AG_LocSpoof_Name"] ?: @"指定位置";
+        double lat = 0.0, lon = 0.0;
+        agReadSpoofStateFromKernel(NULL, NULL, NULL, NULL, &lat, &lon, NULL, NULL, NULL);
+        if (fabs(lat) < 0.001 && fabs(lon) < 0.001) {
+            lat = [p[@"AG_LocSpoof_Lat"] doubleValue];
+            lon = [p[@"AG_LocSpoof_Lon"] doubleValue];
+        }
+        agLiveDiagLog(@"LOC_APP_HOOK", @"Spoof active in app '%@' (%@) -> '%@' WGS84=(%.6f, %.6f)", matchedAppName, matchedBundleID, place, lat, lon);
+    });
 }
 
 // ==================== 核心引擎：AGLocationSpoofManager (仅 SpringBoard 唯一主控，彻底根除双进程互相覆盖) ====================
@@ -1183,7 +1322,6 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
                                             (__bridge CFStringRef)kAGLocAppHookLogNotification,
                                             NULL,
                                             CFNotificationSuspensionBehaviorDeliverImmediately);
-            // 关键：监听来自《设置》面板的坐标或模式变更，立即同步 SpringBoard 内存中的 baseWGS84Coord！
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                             (__bridge const void *)(self),
                                             agSpringBoardMasterSyncCallback,
@@ -1224,7 +1362,6 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
     return self;
 }
 
-// 当《设置》修改了坐标、移动方式或开关时，SpringBoard 立即同步内存坐标，彻底杜绝新旧坐标打架覆盖！
 - (void)syncMasterStateFromPrefsAndRestartTimer {
     reloadGeminiPrefsCache();
     NSDictionary *p = agReadOnlyPrefs();
@@ -1376,25 +1513,21 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
         return cached;
     }
 
-    if (kShield && kSpeed < 0.1 && !self.jitterTimer) {
-        double degPerMeter = 1.0 / 111320.0;
-        double randAngle = ((double)arc4random_uniform(3600) / 1800.0) * M_PI;
-        double randDist = ((double)arc4random_uniform(1000) / 1000.0) * 1.1;
-        lat += sin(randAngle) * randDist * degPerMeter;
-        lon += cos(randAngle) * randDist * degPerMeter / MAX(0.2, cos(lat * M_PI / 180.0));
+    double alt = 18.5, hAcc = 4.6, vAcc = 3.4;
+    BOOL needLocalDrift = (kShield && kSpeed < 0.1 && !self.jitterTimer);
+    double localLat = lat, localLon = lon;
+    agStepKalmanSmoothDrift(needLocalDrift, &localLat, &localLon, &alt, &hAcc, &vAcc);
+    if (!needLocalDrift) {
+        localLat = lat;
+        localLon = lon;
     }
 
-    double hAcc = 4.5 + (((double)arc4random_uniform(20) - 10.0) / 10.0);
-    double vAcc = 3.2 + ((double)arc4random_uniform(15) / 10.0);
-    double alt  = 18.5 + (((double)arc4random_uniform(12) - 6.0) / 10.0);
-
-    CLLocation *loc = [[CLLocation alloc] initWithCoordinate:CLLocationCoordinate2DMake(lat, lon)
-                                                    altitude:alt
-                                          horizontalAccuracy:hAcc
-                                            verticalAccuracy:vAcc
-                                                      course:kCourse
-                                                       speed:kSpeed
-                                                   timestamp:[NSDate date]];
+    CLLocation *loc = agCreateHardwareGradeLocation(CLLocationCoordinate2DMake(localLat, localLon),
+                                                    alt,
+                                                    hAcc,
+                                                    vAcc,
+                                                    kCourse,
+                                                    kSpeed);
     self.cachedTickLocation = loc;
     return loc;
 }
@@ -1412,7 +1545,6 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
     NSInteger moveMode = roPrefs[@"AG_LocSpoof_MoveMode"] ? [roPrefs[@"AG_LocSpoof_MoveMode"] integerValue] : 0;
     self.currentPlaceName = placeName.length > 0 ? placeName : [NSString stringWithFormat:@"%.5f, %.5f", wgs.latitude, wgs.longitude];
 
-    // 先从内核读取当前最新坐标作为移动起点
     double curKernelLat = 0.0, curKernelLon = 0.0;
     BOOL kActive = NO;
     if (agReadSpoofStateFromKernel(&kActive, NULL, NULL, NULL, &curKernelLat, &curKernelLon, NULL, NULL, NULL) && kActive && (fabs(curKernelLat) > 0.01 || fabs(curKernelLon) > 0.01)) {
@@ -1473,7 +1605,6 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
     }
     saveGeminiPrefs(p);
 
-    // 通知 SpringBoard 唯一主控定时器立即加载新坐标！
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          (__bridge CFStringRef)kAGLocMasterSyncNotification,
                                          NULL, NULL, YES);
@@ -1526,7 +1657,6 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
     [self.jitterTimer invalidate];
     self.jitterTimer = nil;
 
-    // 铁律：全系统只允许 SpringBoard 一个进程运行主控定时器，彻底根除《设置》与《SpringBoard》互相覆盖坐标！
     if (![[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"]) {
         return;
     }
@@ -1577,22 +1707,15 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
             double radAngle = atan2(dLon * cos(self.currentWGS84Coord.latitude * M_PI / 180.0), dLat);
             course = fmod((radAngle * 180.0 / M_PI) + 360.0, 360.0);
             self.currentCourse = course;
-            double delta = self.moveSpeedMetersPerSec * (((double)arc4random_uniform(20) - 10.0) / 100.0);
+            double delta = self.moveSpeedMetersPerSec * (((double)arc4random_uniform(16) - 8.0) / 100.0);
             speed = MAX(0.4, self.moveSpeedMetersPerSec + delta);
         }
     } else {
         BOOL shieldOn = (p[@"AG_AntiDet_ShieldEnabled"] == nil) ? YES : [p[@"AG_AntiDet_ShieldEnabled"] boolValue];
-        if (shieldOn) {
-            double degPerMeter = 1.0 / 111320.0;
-            double randAngle = ((double)arc4random_uniform(3600) / 1800.0) * M_PI;
-            double randDist = ((double)arc4random_uniform(1000) / 1000.0) * 1.1;
-            self.currentWGS84Coord = CLLocationCoordinate2DMake(
-                self.baseWGS84Coord.latitude + sin(randAngle) * randDist * degPerMeter,
-                self.baseWGS84Coord.longitude + cos(randAngle) * randDist * degPerMeter / MAX(0.2, cos(self.baseWGS84Coord.latitude * M_PI / 180.0))
-            );
-        } else {
-            self.currentWGS84Coord = self.baseWGS84Coord;
-        }
+        double driftLat = self.baseWGS84Coord.latitude;
+        double driftLon = self.baseWGS84Coord.longitude;
+        agStepKalmanSmoothDrift(shieldOn, &driftLat, &driftLon, NULL, NULL, NULL);
+        self.currentWGS84Coord = CLLocationCoordinate2DMake(driftLat, driftLon);
     }
 
     NSInteger scopeMode = p[@"AG_LocSpoof_ScopeMode"] ? [p[@"AG_LocSpoof_ScopeMode"] integerValue] : 0;
@@ -1603,7 +1726,6 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
     agPublishSpoofStateToKernel(YES, scopeMode, moveMode, shieldOn, wifiMode, self.isRouteMoving, self.currentWGS84Coord.latitude, self.currentWGS84Coord.longitude, course, speed, targetApps);
 
     self.cachedTickLocation = nil;
-    // 仅在移动中才每秒更新 CLSimulationManager，静止时由 locationRepeatBehavior=1 自动保持，绝不清空仿真队列！
     if (self.isRouteMoving) {
         [self pushSimulatedLocationToDaemonWithCourse:course speed:speed forceRestart:NO];
     }
@@ -1649,15 +1771,14 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
             return;
         }
 
-        CLLocation *simLoc = [[CLLocation alloc] initWithCoordinate:CLLocationCoordinate2DMake(wgsLat, wgsLon)
-                                                           altitude:18.5
-                                                 horizontalAccuracy:4.8
-                                                   verticalAccuracy:3.5
-                                                             course:course
-                                                              speed:speed
-                                                          timestamp:[NSDate date]];
+        double baseAlt = agEstimatedBaseAltitudeForCoord(wgsLat, wgsLon);
+        CLLocation *simLoc = agCreateHardwareGradeLocation(CLLocationCoordinate2DMake(wgsLat, wgsLon),
+                                                           baseAlt + sOUDriftAltM,
+                                                           sOUSmoothHAcc,
+                                                           sOUSmoothVAcc,
+                                                           course,
+                                                           speed);
         @try {
-            // 严格遵循 iOS 14 - iOS 17 locsim 标准时序：clear -> append -> startLocationSimulation -> flush
             self.simManager.locationDeliveryBehavior = 2;
             self.simManager.locationRepeatBehavior = 1;
             [self.simManager clearSimulatedLocations];
@@ -13692,11 +13813,19 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
 @property (nonatomic, assign) NSInteger expandedModuleTab; // 默认初始化为 -1 (-1 表示全部收起，0~3 对应四大独立功能模块)
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIView *accordionContainerView;
+@property (nonatomic, strong) id keyboardFrameObserver;
 - (void)reloadSettingsLayoutAnimated:(BOOL)animated;
 - (UIView *)buildIndependentModuleAccordionCardForTab:(AGConfigTab)tab originY:(CGFloat)y width:(CGFloat)cardW;
 @end
 
 @implementation AngelGuardianSettingsViewController
+
+- (void)dealloc {
+    if (self.keyboardFrameObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self.keyboardFrameObserver];
+        self.keyboardFrameObserver = nil;
+    }
+}
 
 - (void)openLocationSpoofCenterTapped {
     AGLocationSpoofSettingsViewController *locVC = [[AGLocationSpoofSettingsViewController alloc] init];
@@ -13709,7 +13838,10 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
 }
 
 - (UIWindow *)overlayWindow {
-    return [GeminiAssistantManager sharedManager].overlayWindow;
+    if ([[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"]) {
+        return [GeminiAssistantManager sharedManager].overlayWindow;
+    }
+    return self.view.window;
 }
 
 - (void)viewDidLoad {
@@ -13718,15 +13850,28 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
     self.view.backgroundColor = [UIColor colorWithRed:0.07 green:0.06 blue:0.13 alpha:1.0];
     self.expandedModuleTab = -1;
 
-    if ([self.overlayWindow respondsToSelector:@selector(_setSecure:)]) {
-        [self.overlayWindow _setSecure:NO]; // 允许系统在配置中心调起用户自己的第三方输入法
+    if ([[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"]) {
+        if ([self.overlayWindow respondsToSelector:@selector(_setSecure:)]) {
+            [self.overlayWindow _setSecure:NO];
+        }
     }
 
-    UIScrollView *settingsScrollView = self.scrollView;
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIKeyboardWillChangeFrameNotification
-                                                      object:nil
-                                                       queue:[NSOperationQueue mainQueue]
-                                                  usingBlock:^(NSNotification *note) {
+    UIBarButtonItem *closeItem = [[UIBarButtonItem alloc] initWithTitle:@"保存并关闭" style:UIBarButtonItemStyleDone target:self action:@selector(saveAndDismissTapped)];
+    closeItem.tintColor = [UIColor colorWithRed:0.35 green:0.92 blue:0.70 alpha:1.0];
+    self.navigationItem.rightBarButtonItem = closeItem;
+
+    self.scrollView = [[UIScrollView alloc] initWithFrame:self.view.bounds];
+    self.scrollView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.scrollView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    [self.view addSubview:self.scrollView];
+
+    __weak typeof(self) weakSelf = self;
+    self.keyboardFrameObserver = [[NSNotificationCenter defaultCenter] addObserverForName:UIKeyboardWillChangeFrameNotification
+                                                                                   object:nil
+                                                                                    queue:[NSOperationQueue mainQueue]
+                                                                               usingBlock:^(NSNotification *note) {
+        UIScrollView *settingsScrollView = weakSelf.scrollView;
+        if (!settingsScrollView) return;
         CGRect kbEnd = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
         CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
         CGFloat kbOverlap = MAX(0.0, screenH - kbEnd.origin.y);
@@ -13735,7 +13880,6 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
         settingsScrollView.contentInset = insets;
         settingsScrollView.scrollIndicatorInsets = insets;
 
-        // 查找当前正在编辑的输入框并自动平滑滚动到键盘上方
         for (UIView *sub in settingsScrollView.subviews) {
             if ([sub isFirstResponder]) {
                 CGRect targetRect = [sub convertRect:sub.bounds toView:settingsScrollView];
@@ -13761,15 +13905,6 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
             }
         }
     }];
-
-    UIBarButtonItem *closeItem = [[UIBarButtonItem alloc] initWithTitle:@"保存并关闭" style:UIBarButtonItemStyleDone target:self action:@selector(saveAndDismissTapped)];
-    closeItem.tintColor = [UIColor colorWithRed:0.35 green:0.92 blue:0.70 alpha:1.0];
-    self.navigationItem.rightBarButtonItem = closeItem;
-
-    self.scrollView = [[UIScrollView alloc] initWithFrame:self.view.bounds];
-    self.scrollView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.scrollView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
-    [self.view addSubview:self.scrollView];
 
     CGFloat w = self.view.bounds.size.width;
     CGFloat pad = 16.0;
@@ -14404,8 +14539,11 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
         gIsSavingFromSettingsUI = NO;
     });
     [self agRefreshThemeCardsSelectionState];
-    [[GeminiAssistantManager sharedManager] updateHeaderBadges];
+    if ([[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"]) {
+        [[GeminiAssistantManager sharedManager] updateHeaderBadges];
+    }
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.angelguardian.prefsChanged"), NULL, NULL, YES);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)kAGPrefsChangedNotification, NULL, NULL, YES);
 }
 
 - (void)onMarqueeSwitchChanged:(UISwitch *)sender {
@@ -14417,9 +14555,11 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
         gIsSavingFromSettingsUI = NO;
     });
     reloadGeminiPrefsCache();
-    GeminiAssistantManager *mgr = [GeminiAssistantManager sharedManager];
-    if (mgr.edgeGlowContainer) {
-        mgr.edgeGlowContainer.hidden = !sender.isOn;
+    if ([[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"]) {
+        GeminiAssistantManager *mgr = [GeminiAssistantManager sharedManager];
+        if (mgr.edgeGlowContainer) {
+            mgr.edgeGlowContainer.hidden = !sender.isOn;
+        }
     }
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.angelguardian.prefsChanged"), NULL, NULL, YES);
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)kAGPrefsChangedNotification, NULL, NULL, YES);
@@ -16821,12 +16961,28 @@ static int my_TCCAccessPreflight(CFStringRef service, CFDictionaryRef options) {
     return 0;
 }
 
-// ==================== iOS 14 - iOS 17 全兼容虚拟定位与防检测 Hook 矩阵 ====================
+// ==================== iOS 14 - iOS 17 全兼容六维虚拟定位与防检测 Hook 矩阵 ====================
 static NSTimeInterval gLastLocHookDiagLogTime = 0;
 static os_unfair_lock gHookedDelegateClassesLock = OS_UNFAIR_LOCK_INIT;
 static NSMutableSet<NSString *> *gHookedLocationDelegateClasses = nil;
-static NSHashTable<CLLocationManager *> *gActiveLocationManagers = nil;
+// 严格区分「正在持续定位 (startUpdatingLocation)」与「单次请求定位 (requestLocation)」的 Manager，绝不向已停止或未启动的实例乱推回调！
+static NSHashTable<CLLocationManager *> *gUpdatingLocationManagers = nil;
+static NSHashTable<CLLocationManager *> *gOneShotLocationManagers = nil;
 static NSTimer *gInAppContinuousLocationTimer = nil;
+static const void * const kAGLastLocDeliveryTimeKey = &kAGLastLocDeliveryTimeKey;
+
+static BOOL agIsSystemExemptProcess(void) {
+    static BOOL sExempt = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *bid = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
+        sExempt = ([bid isEqualToString:@"com.apple.springboard"] ||
+                   [bid isEqualToString:@"com.apple.Preferences"] ||
+                   [bid hasPrefix:@"com.apple.WebKit"] ||
+                   [bid hasPrefix:@"com.apple.locationd"]);
+    });
+    return sExempt;
+}
 
 static void agNotifySpringBoardAppHookHitIfNeeded(CLLocation *spoofLoc) {
     if (!spoofLoc) return;
@@ -16836,17 +16992,46 @@ static void agNotifySpringBoardAppHookHitIfNeeded(CLLocation *spoofLoc) {
     agReportAppLocationHookHitToSpringBoard();
 }
 
-static void agRegisterActiveLocationManager(CLLocationManager *mgr) {
-    if (!mgr) return;
+static void agSetManagerUpdatingState(CLLocationManager *mgr, BOOL isUpdating) {
+    if (!mgr || agIsSystemExemptProcess()) return;
     os_unfair_lock_lock(&gHookedDelegateClassesLock);
-    if (!gActiveLocationManagers) {
-        gActiveLocationManagers = [NSHashTable weakObjectsHashTable];
+    if (!gUpdatingLocationManagers) {
+        gUpdatingLocationManagers = [NSHashTable weakObjectsHashTable];
     }
-    [gActiveLocationManagers addObject:mgr];
+    if (isUpdating) {
+        [gUpdatingLocationManagers addObject:mgr];
+    } else {
+        [gUpdatingLocationManagers removeObject:mgr];
+        if (gOneShotLocationManagers) [gOneShotLocationManagers removeObject:mgr];
+    }
     os_unfair_lock_unlock(&gHookedDelegateClassesLock);
 }
 
+static void agMarkManagerOneShotPending(CLLocationManager *mgr, BOOL pending) {
+    if (!mgr || agIsSystemExemptProcess()) return;
+    os_unfair_lock_lock(&gHookedDelegateClassesLock);
+    if (!gOneShotLocationManagers) {
+        gOneShotLocationManagers = [NSHashTable weakObjectsHashTable];
+    }
+    if (pending) {
+        [gOneShotLocationManagers addObject:mgr];
+    } else {
+        [gOneShotLocationManagers removeObject:mgr];
+    }
+    os_unfair_lock_unlock(&gHookedDelegateClassesLock);
+}
+
+static BOOL agIsManagerAllowedToReceiveLocation(CLLocationManager *mgr) {
+    if (!mgr) return NO;
+    os_unfair_lock_lock(&gHookedDelegateClassesLock);
+    BOOL allowed = (gUpdatingLocationManagers && [gUpdatingLocationManagers containsObject:mgr]) ||
+                   (gOneShotLocationManagers && [gOneShotLocationManagers containsObject:mgr]);
+    os_unfair_lock_unlock(&gHookedDelegateClassesLock);
+    return allowed;
+}
+
 static void agEnsureInAppContinuousFeederRunning(void) {
+    if (agIsSystemExemptProcess()) return;
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             agEnsureInAppContinuousFeederRunning();
@@ -16854,21 +17039,29 @@ static void agEnsureInAppContinuousFeederRunning(void) {
         return;
     }
     if (gInAppContinuousLocationTimer) return;
-    gInAppContinuousLocationTimer = [NSTimer scheduledTimerWithTimeInterval:1.2 repeats:YES block:^(NSTimer * _Nonnull timer) {
+    gInAppContinuousLocationTimer = [NSTimer scheduledTimerWithTimeInterval:1.15 repeats:YES block:^(NSTimer * _Nonnull timer) {
         if (!agIsCurrentProcessTargetedForLocSpoof()) return;
         CLLocation *spoof = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
         if (!spoof) return;
 
         os_unfair_lock_lock(&gHookedDelegateClassesLock);
-        NSArray<CLLocationManager *> *mgrs = [gActiveLocationManagers allObjects];
+        NSArray<CLLocationManager *> *mgrs = [gUpdatingLocationManagers allObjects];
         os_unfair_lock_unlock(&gHookedDelegateClassesLock);
 
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
         for (CLLocationManager *mgr in mgrs) {
+            // 双擎去重：若该 Manager 刚通过 locationd 原生回调收到过坐标（<0.95s），跳过本次定时器推送，防止双推时间戳打架
+            NSNumber *lastDelivered = objc_getAssociatedObject(mgr, kAGLastLocDeliveryTimeKey);
+            if (lastDelivered && (now - [lastDelivered doubleValue] < 0.95)) {
+                continue;
+            }
             id<CLLocationManagerDelegate> del = mgr.delegate;
             if (del && [del respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
+                objc_setAssociatedObject(mgr, kAGLastLocDeliveryTimeKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 agNotifySpringBoardAppHookHitIfNeeded(spoof);
                 [del locationManager:mgr didUpdateLocations:@[spoof]];
             } else if (del && [del respondsToSelector:@selector(locationManager:didUpdateToLocation:fromLocation:)]) {
+                objc_setAssociatedObject(mgr, kAGLastLocDeliveryTimeKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 agNotifySpringBoardAppHookHitIfNeeded(spoof);
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -16880,7 +17073,6 @@ static void agEnsureInAppContinuousFeederRunning(void) {
     [[NSRunLoop mainRunLoop] addTimer:gInAppContinuousLocationTimer forMode:NSRunLoopCommonModes];
 }
 
-// 精确查找实际实现该 Selector 的类（避免子类共享父类 Method 时重复 Hook 导致死循环）
 static Class agClassImplementingSelector(Class cls, SEL sel) {
     Class cur = cls;
     while (cur) {
@@ -16903,7 +17095,7 @@ static Class agClassImplementingSelector(Class cls, SEL sel) {
 }
 
 static void agHookLocationDelegateClassIfNeeded(Class rawCls) {
-    if (!rawCls) return;
+    if (!rawCls || agIsSystemExemptProcess()) return;
 
     SEL selUpdateLocs = @selector(locationManager:didUpdateLocations:);
     Class targetCls = agClassImplementingSelector(rawCls, selUpdateLocs);
@@ -16922,6 +17114,14 @@ static void agHookLocationDelegateClassIfNeeded(Class rawCls) {
                 __block OrigUpdateLocsIMP origIMP = NULL;
                 IMP newIMP = imp_implementationWithBlock(^(id slf, CLLocationManager *mgr, NSArray<CLLocation *> *locations) {
                     if (agIsCurrentProcessTargetedForLocSpoof()) {
+                        // 若该 Manager 既未处于 startUpdatingLocation 也未处于 requestLocation，静默拦截不回调
+                        if (mgr && !agIsManagerAllowedToReceiveLocation(mgr)) {
+                            return;
+                        }
+                        if (mgr) {
+                            agMarkManagerOneShotPending(mgr, NO);
+                            objc_setAssociatedObject(mgr, kAGLastLocDeliveryTimeKey, @([[NSDate date] timeIntervalSince1970]), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                        }
                         CLLocation *spoof = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
                         if (spoof) {
                             agNotifySpringBoardAppHookHitIfNeeded(spoof);
@@ -16953,6 +17153,13 @@ static void agHookLocationDelegateClassIfNeeded(Class rawCls) {
                 __block OrigLegacyIMP origLegacy = NULL;
                 IMP newLegacyIMP = imp_implementationWithBlock(^(id slf, CLLocationManager *mgr, CLLocation *newLoc, CLLocation *oldLoc) {
                     if (agIsCurrentProcessTargetedForLocSpoof()) {
+                        if (mgr && !agIsManagerAllowedToReceiveLocation(mgr)) {
+                            return;
+                        }
+                        if (mgr) {
+                            agMarkManagerOneShotPending(mgr, NO);
+                            objc_setAssociatedObject(mgr, kAGLastLocDeliveryTimeKey, @([[NSDate date] timeIntervalSince1970]), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                        }
                         CLLocation *spoof = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
                         if (spoof) {
                             agNotifySpringBoardAppHookHitIfNeeded(spoof);
@@ -16970,33 +17177,11 @@ static void agHookLocationDelegateClassIfNeeded(Class rawCls) {
 
 %hook CLLocationManager
 
-- (instancetype)init {
-    CLLocationManager *mgr = %orig;
-    if (mgr) {
-        agRegisterActiveLocationManager(mgr);
-        agEnsureInAppContinuousFeederRunning();
-    }
-    return mgr;
-}
-
 - (void)setDelegate:(id<CLLocationManagerDelegate>)delegate {
-    agRegisterActiveLocationManager(self);
-    if (delegate) {
+    if (delegate && !agIsSystemExemptProcess()) {
         agHookLocationDelegateClassIfNeeded([delegate class]);
     }
     %orig(delegate);
-    if (delegate && agIsCurrentProcessTargetedForLocSpoof()) {
-        agEnsureInAppContinuousFeederRunning();
-        CLLocation *spoof = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
-        if (spoof && [delegate respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (agIsCurrentProcessTargetedForLocSpoof() && self.delegate) {
-                    agNotifySpringBoardAppHookHitIfNeeded(spoof);
-                    [self.delegate locationManager:self didUpdateLocations:@[spoof]];
-                }
-            });
-        }
-    }
 }
 
 - (CLLocation *)location {
@@ -17012,52 +17197,113 @@ static void agHookLocationDelegateClassIfNeeded(Class rawCls) {
 
 - (void)startUpdatingLocation {
     %orig;
-    agRegisterActiveLocationManager(self);
+    if (agIsSystemExemptProcess()) return;
+    agSetManagerUpdatingState(self, YES);
     agEnsureInAppContinuousFeederRunning();
 
     if (agIsCurrentProcessTargetedForLocSpoof()) {
         if (self.delegate) {
             agHookLocationDelegateClassIfNeeded([self.delegate class]);
         }
-        CLLocation *spoof = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
-        if (spoof) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                id<CLLocationManagerDelegate> del = self.delegate;
-                if (agIsCurrentProcessTargetedForLocSpoof() && del && [del respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
-                    CLLocation *latestSpoof = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation] ?: spoof;
-                    agNotifySpringBoardAppHookHitIfNeeded(latestSpoof);
-                    [del locationManager:self didUpdateLocations:@[latestSpoof]];
-                }
-            });
-        }
+        // 模拟真实硬件 GPS 首次锁星响应延迟 (160ms)，绝不在调用栈内同步重入
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.16 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!agIsCurrentProcessTargetedForLocSpoof() || !agIsManagerAllowedToReceiveLocation(self)) return;
+            id<CLLocationManagerDelegate> del = self.delegate;
+            CLLocation *latestSpoof = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
+            if (latestSpoof && del && [del respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
+                objc_setAssociatedObject(self, kAGLastLocDeliveryTimeKey, @([[NSDate date] timeIntervalSince1970]), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                agNotifySpringBoardAppHookHitIfNeeded(latestSpoof);
+                [del locationManager:self didUpdateLocations:@[latestSpoof]];
+            }
+        });
     }
 }
 
+- (void)stopUpdatingLocation {
+    agSetManagerUpdatingState(self, NO);
+    %orig;
+}
+
 - (void)requestLocation {
-    agRegisterActiveLocationManager(self);
+    if (agIsSystemExemptProcess()) {
+        %orig;
+        return;
+    }
     if (agIsCurrentProcessTargetedForLocSpoof()) {
         if (self.delegate) {
             agHookLocationDelegateClassIfNeeded([self.delegate class]);
         }
-        CLLocation *spoof = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
-        if (spoof) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                id<CLLocationManagerDelegate> del = self.delegate;
-                if (agIsCurrentProcessTargetedForLocSpoof() && del && [del respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
-                    CLLocation *latestSpoof = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation] ?: spoof;
-                    agNotifySpringBoardAppHookHitIfNeeded(latestSpoof);
-                    [del locationManager:self didUpdateLocations:@[latestSpoof]];
-                }
-            });
-            return;
-        }
+        agMarkManagerOneShotPending(self, YES);
+        // 模拟真实单次定位硬件搜星耗时 (220ms)，仅触发 1 次回调后立即清除 pending 标记
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!agIsCurrentProcessTargetedForLocSpoof() || !agIsManagerAllowedToReceiveLocation(self)) return;
+            agMarkManagerOneShotPending(self, NO);
+            id<CLLocationManagerDelegate> del = self.delegate;
+            CLLocation *latestSpoof = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
+            if (latestSpoof && del && [del respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
+                objc_setAssociatedObject(self, kAGLastLocDeliveryTimeKey, @([[NSDate date] timeIntervalSince1970]), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                agNotifySpringBoardAppHookHitIfNeeded(latestSpoof);
+                [del locationManager:self didUpdateLocations:@[latestSpoof]];
+            }
+        });
+        return;
     }
     %orig;
 }
 
 %end
 
-// 接管 MapKit 用户位置蓝点，确保使用 MKMapView 的软件也同步显示虚拟坐标
+// 底层清洗 CLLocation 所有硬件级传感器属性（彻底抹除 CLSimulationManager 或软件构造痕迹）
+%hook CLLocation
+
+- (CLLocationSourceInformation *)sourceInformation {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        if (@available(iOS 15.0, *)) {
+            static CLLocationSourceInformation *sCleanSourceInfo = nil;
+            static dispatch_once_t onceToken;
+            dispatch_once(&onceToken, ^{
+                sCleanSourceInfo = [[CLLocationSourceInformation alloc] initWithSoftwareSimulationState:NO andExternalAccessoryState:NO];
+            });
+            if (sCleanSourceInfo) return sCleanSourceInfo;
+        }
+    }
+    return %orig;
+}
+
+- (CLLocationSpeedAccuracy)speedAccuracy {
+    CLLocationSpeedAccuracy orig = %orig;
+    if (agIsCurrentProcessTargetedForLocSpoof() && orig < 0.0) {
+        return 0.24;
+    }
+    return orig;
+}
+
+- (CLLocationDirectionAccuracy)courseAccuracy {
+    CLLocationDirectionAccuracy orig = %orig;
+    if (agIsCurrentProcessTargetedForLocSpoof() && orig < 0.0) {
+        return 16.5;
+    }
+    return orig;
+}
+
+- (CLLocationDistance)ellipsoidalAltitude {
+    CLLocationDistance orig = %orig;
+    if (agIsCurrentProcessTargetedForLocSpoof() && fabs(orig) < 0.001) {
+        return self.altitude - 13.6; // 中国区 WGS84 大地水准面高程差自然近似
+    }
+    return orig;
+}
+
+- (int)type {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        return 1; // 1 = 真实硬件 GPS 卫星定位，抹除模拟器的 type 异常值
+    }
+    return %orig;
+}
+
+%end
+
+// 接管 MapKit 用户位置蓝点
 %hook MKUserLocation
 
 - (CLLocation *)location {
@@ -17097,7 +17343,113 @@ static void agHookLocationDelegateClassIfNeeded(Class rawCls) {
 
 %end
 
-// Wi-Fi 打卡防穿帮 Hook (兼容 iOS 14 - iOS 17)
+// CoreMotion 步态与车载运动状态联动（实现 AG_AntiDet_MotionSync，防止移动巡航时运动传感器静止穿帮）
+%hook CMMotionActivity
+
+- (BOOL)walking {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        BOOL active = NO, shield = YES;
+        double spd = 0.0;
+        if (agReadSpoofStateFromKernel(&active, NULL, &shield, NULL, NULL, NULL, NULL, &spd, NULL) && active && shield) {
+            if (spd >= 0.3 && spd <= 4.5) return YES;
+        }
+    }
+    return %orig;
+}
+
+- (BOOL)automotive {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        BOOL active = NO, shield = YES;
+        double spd = 0.0;
+        if (agReadSpoofStateFromKernel(&active, NULL, &shield, NULL, NULL, NULL, NULL, &spd, NULL) && active && shield) {
+            if (spd > 4.5) return YES;
+        }
+    }
+    return %orig;
+}
+
+- (BOOL)stationary {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        BOOL active = NO, shield = YES;
+        double spd = 0.0;
+        if (agReadSpoofStateFromKernel(&active, NULL, &shield, NULL, NULL, NULL, NULL, &spd, NULL) && active && shield) {
+            if (spd >= 0.3) return NO;
+        }
+    }
+    return %orig;
+}
+
+%end
+
+// 根据虚拟坐标生成确定性企业级路由器 MAC 地址（当用户未手填 BSSID 时，同一地点 MAC 恒定且具真实商用特征）
+static NSString *agDeterministicBSSIDForCurrentLocation(void) {
+    double lat = 20.0, lon = 110.0;
+    agReadSpoofStateFromKernel(NULL, NULL, NULL, NULL, &lat, &lon, NULL, NULL, NULL);
+    uint32_t latInt = (uint32_t)fabs(round(lat * 10000.0));
+    uint32_t lonInt = (uint32_t)fabs(round(lon * 10000.0));
+    uint32_t seed = (latInt * 2654435761u) ^ (lonInt * 2246822519u);
+    return [NSString stringWithFormat:@"a4:50:46:%02x:%02x:%02x",
+            (unsigned int)((seed >> 16) & 0xFF),
+            (unsigned int)((seed >> 8) & 0xFF),
+            (unsigned int)(seed & 0xFE)];
+}
+
+// 双栈 Wi-Fi 打卡防穿帮 Hook 1：NEHotspotNetwork (iOS 14 - iOS 17 钉钉/企业微信/飞书首选新接口)
+%hook NEHotspotNetwork
+
++ (void)fetchCurrentWithCompletionHandler:(void (^)(NEHotspotNetwork * _Nullable currentNetwork))completionHandler {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        NSInteger wifiMode = 1;
+        agReadSpoofStateFromKernel(NULL, NULL, NULL, &wifiMode, NULL, NULL, NULL, NULL, NULL);
+        if (wifiMode == 1) {
+            if (completionHandler) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completionHandler(nil);
+                });
+            }
+            return;
+        } else if (wifiMode == 2) {
+            %orig(^(NEHotspotNetwork *net) {
+                if (completionHandler) {
+                    NEHotspotNetwork *fakeNet = net ?: [[objc_getClass("NEHotspotNetwork") alloc] init];
+                    completionHandler(fakeNet);
+                }
+            });
+            return;
+        }
+    }
+    %orig(completionHandler);
+}
+
+- (NSString *)SSID {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        NSInteger wifiMode = 1;
+        agReadSpoofStateFromKernel(NULL, NULL, NULL, &wifiMode, NULL, NULL, NULL, NULL, NULL);
+        if (wifiMode == 2) {
+            NSDictionary *p = agReadOnlyPrefs();
+            NSString *ssid = p[@"AG_AntiDet_FakeSSID"];
+            return (ssid && ssid.length > 0) ? ssid : @"Office-WiFi-5G";
+        }
+    }
+    return %orig;
+}
+
+- (NSString *)BSSID {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        NSInteger wifiMode = 1;
+        agReadSpoofStateFromKernel(NULL, NULL, NULL, &wifiMode, NULL, NULL, NULL, NULL, NULL);
+        if (wifiMode == 2) {
+            NSDictionary *p = agReadOnlyPrefs();
+            NSString *bssid = p[@"AG_AntiDet_FakeBSSID"];
+            return (bssid && bssid.length > 0) ? [bssid lowercaseString] : agDeterministicBSSIDForCurrentLocation();
+        }
+    }
+    return %orig;
+}
+
+%end
+
+// 双栈 Wi-Fi 打卡防穿帮 Hook 2：CNCopyCurrentNetworkInfo (传统接口)
 static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName) = NULL;
 static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
     if (agIsCurrentProcessTargetedForLocSpoof()) {
@@ -17110,16 +17462,38 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
             NSString *ssid = p[@"AG_AntiDet_FakeSSID"];
             NSString *bssid = p[@"AG_AntiDet_FakeBSSID"];
             if (!ssid || ssid.length == 0) ssid = @"Office-WiFi-5G";
-            if (!bssid || bssid.length == 0) bssid = @"a4:50:46:88:99:ef";
+            if (!bssid || bssid.length == 0) bssid = agDeterministicBSSIDForCurrentLocation();
             NSDictionary *fakeDict = @{
                 @"SSID": ssid,
-                @"BSSID": bssid,
+                @"BSSID": [bssid lowercaseString],
                 @"SSIDDATA": [ssid dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data]
             };
             return (__bridge_retained CFDictionaryRef)fakeDict;
         }
     }
     return orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
+}
+
+// Runtime Hook 指针与 dladdr 镜像路径隐身保护（兑现 AG_AntiDet_HideHookPtr）
+static int (*orig_dladdr)(const void *addr, Dl_info *info) = NULL;
+static int hooked_dladdr(const void *addr, Dl_info *info) {
+    int ret = orig_dladdr ? orig_dladdr(addr, info) : 0;
+    if (ret != 0 && info && info->dli_fname && agIsCurrentProcessTargetedForLocSpoof()) {
+        const char *fname = info->dli_fname;
+        if (strstr(fname, "AngelGuardian") != NULL ||
+            strstr(fname, "Gemini") != NULL ||
+            strstr(fname, "Tweak") != NULL ||
+            strstr(fname, "/var/jb/") != NULL ||
+            strstr(fname, "ellekit") != NULL ||
+            strstr(fname, "Substrate") != NULL) {
+            info->dli_fname = "/System/Library/Frameworks/CoreLocation.framework/CoreLocation";
+            void *clBase = dlopen("/System/Library/Frameworks/CoreLocation.framework/CoreLocation", RTLD_NOLOAD | RTLD_LAZY);
+            if (clBase) {
+                info->dli_fbase = clBase;
+            }
+        }
+    }
+    return ret;
 }
 
 %ctor {
@@ -17129,7 +17503,7 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
         BOOL isPreferences = [bundleID isEqualToString:@"com.apple.Preferences"];
         BOOL isWeChat      = [bundleID isEqualToString:@"com.tencent.xin"];
 
-        // 1. 挂载 Wi-Fi 防检测 Hook（仅在非系统核心进程生效）
+        // 1. 挂载 Wi-Fi 与 dladdr 反检测 Hook（仅在非系统核心进程生效）
         if (!isSpringBoard && !isPreferences) {
             void *snHandle = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY);
             if (snHandle) {
@@ -17137,6 +17511,10 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
                 if (cnSym) {
                     MSHookFunction(cnSym, (void *)hooked_CNCopyCurrentNetworkInfo, (void **)&orig_CNCopyCurrentNetworkInfo);
                 }
+            }
+            void *dlSym = dlsym(RTLD_DEFAULT, "dladdr");
+            if (dlSym) {
+                MSHookFunction(dlSym, (void *)hooked_dladdr, (void **)&orig_dladdr);
             }
         }
 
@@ -17146,19 +17524,20 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
         }
 
         // 3. 如果是普通第三方 App（非 SpringBoard 且非系统设置），到此直接 return！
-        // Logos 的 %hook CLLocationManager / CLLocationSourceInformation 已自动挂载，绝不在第三方 App 启动 Siri 悬浮窗！
         if (!isSpringBoard && !isPreferences) {
             return;
         }
 
-        // 4. SpringBoard / Preferences 初始化
-        [AGLocationSpoofManager sharedSpoofer];
+        // 4. 仅在 SpringBoard 主进程初始化全局定位主控与 TCC Preflight Hook（彻底隔离系统设置进程，杜绝点进设置注销！）
+        if (isSpringBoard) {
+            [AGLocationSpoofManager sharedSpoofer];
 
-        void *tccHandle = dlopen("/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_NOW);
-        if (tccHandle) {
-            void *sym = dlsym(tccHandle, "TCCAccessPreflight");
-            if (sym) {
-                MSHookFunction(sym, (void *)my_TCCAccessPreflight, (void **)&orig_TCCAccessPreflight);
+            void *tccHandle = dlopen("/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_NOW);
+            if (tccHandle) {
+                void *sym = dlsym(tccHandle, "TCCAccessPreflight");
+                if (sym) {
+                    MSHookFunction(sym, (void *)my_TCCAccessPreflight, (void **)&orig_TCCAccessPreflight);
+                }
             }
         }
     }
