@@ -3607,6 +3607,8 @@ static void agSimulateScreenSwipe(CGPoint startPt, CGPoint endPt, NSTimeInterval
 @property (nonatomic, assign) NSTimeInterval engineStartTimestamp;
 @property (nonatomic, assign) NSUInteger micFramesSinceEngineStart;
 @property (nonatomic, copy) NSString *lastWebSearchedVoiceQuery;
+@property (nonatomic, assign) NSUInteger currentTurnSearchCount;
+@property (nonatomic, assign) BOOL isWaitingForToolResponse;
 - (void)primeFullDuplexAudioEngineWithSilentPulse:(NSString *)reasonTag;
 - (void)startNativeAppleNeuralVADIfNeeded;
 - (void)stopNativeAppleNeuralVAD;
@@ -6134,6 +6136,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         self.webSocketSession = nil;
     }
 
+    self.currentTurnSearchCount = 0;
+    self.isWaitingForToolResponse = NO;
     NSUInteger launchToken = ++self.sessionGenerationToken;
     self.webSocketSession = agCreateSessionWithProxy(proxy, self, [NSOperationQueue mainQueue]);
     self.liveWebSocketTask = [self.webSocketSession webSocketTaskWithRequest:wsReq];
@@ -6195,7 +6199,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
         fmt.dateFormat = @"yyyy-MM-dd HH:mm:ss";
         NSString *nowStr = [fmt stringFromDate:[NSDate date]];
-        sysInstruction = [sysInstruction stringByAppendingFormat:@"\n【实时联网已开启】当前系统准确时间：%@。遇到实时新闻、今日天气、股价汇率、最新动态等问题时，请直接调用 google_search 工具检索最新信息作答。重要要求：当 google_search 返回搜索结果后，你必须立即使用自然的中文口语将查询到的核心答案（如天气预报温度、新闻要点、事实数据）完整、流畅地朗读给用户，绝不允许只回复“稍等”后陷入静默；即使未检索到，也要如实向用户告知。", nowStr];
+        sysInstruction = [sysInstruction stringByAppendingFormat:@"\n【实时联网已开启】当前系统准确时间：%@。遇到实时新闻、今日天气、股价汇率、最新动态等问题时，请直接调用 google_search 工具检索最新信息作答。重要要求：当 google_search 返回搜索结果后，你必须立即使用自然的中文口语将查询到的核心答案（如天气预报温度、新闻要点、事实数据）完整、流畅地朗读给用户，绝不允许只回复“稍等”后陷入静默；即使未检索到，也要如实向用户告知。\n"
+            @"【操作与控制类指令严禁联网搜索】：凡是打开App（如淘宝、微信等）、控制手机硬件（低电量/省电模式、屏幕亮度、音量、手电筒、蓝牙、WiFi等）、以及锁屏/截屏等操作类指令，绝对禁止调用 google_search！你必须直接输出对应的 [ACTION:...] 指令或用口语告知，严禁发起联网搜索！", nowStr];
     }
 
     NSString *permMemory = agBuildUniversalMemoryPromptBlockForQuery(@"");
@@ -6437,6 +6442,75 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                         searchQuery = self.currentVoiceQueryBuffer ?: @"";
                     }
                     agLiveDiagLog(@"TOOL_CALL", @"AI requested search for: '%@', callId: %@", searchQuery, callId);
+
+                    // 【方案 1 客户端双向隔离门】：严禁对操作/硬件控制/打开App发起联网搜索
+                    NSString *sqLower = [searchQuery lowercaseString];
+                    BOOL isActionCommand = NO;
+                    if ([sqLower containsString:@"low power"] || [sqLower containsString:@"low_power"] || [sqLower containsString:@"省电"] || [sqLower containsString:@"低电量"] || [sqLower containsString:@"点亮模式"]) {
+                        [self executeActionDictionary:@{@"type": @"low_power_mode", @"on": @YES}];
+                        isActionCommand = YES;
+                    } else if ([sqLower containsString:@"brightness"] || [sqLower containsString:@"亮度"]) {
+                        [self tryExecuteDirectLocalCommand:searchQuery];
+                        isActionCommand = YES;
+                    } else if ([sqLower containsString:@"volume"] || [sqLower containsString:@"音量"] || [sqLower containsString:@"声音"]) {
+                        [self tryExecuteDirectLocalCommand:searchQuery];
+                        isActionCommand = YES;
+                    } else if ([sqLower containsString:@"flashlight"] || [sqLower containsString:@"手电筒"]) {
+                        [self tryExecuteDirectLocalCommand:searchQuery];
+                        isActionCommand = YES;
+                    } else if ([sqLower containsString:@"打开"] || [sqLower containsString:@"启动"] || [sqLower containsString:@"open "] || [sqLower containsString:@"launch "]) {
+                        [self tryExecuteDirectLocalCommand:searchQuery];
+                        isActionCommand = YES;
+                    } else if ([sqLower containsString:@"battery"] || [sqLower containsString:@"storage"] || [sqLower containsString:@"内存"] || [sqLower containsString:@"电量"]) {
+                        [self executeActionDictionary:@{@"type": @"device_status"}];
+                        isActionCommand = YES;
+                    }
+
+                    if (isActionCommand) {
+                        agLiveDiagLog(@"TOOL_INTERCEPT", @"Intercepted action search for '%@', executed locally without web query", searchQuery);
+                        NSString *resText = @"已在手机本地执行完毕。请直接用亲切简洁的中文口语告知用户操作已完成，严禁再次搜索！";
+                        [self sendJSONDictionaryOverWebSocket:@{
+                            @"toolResponse": @{
+                                @"functionResponses": @[
+                                    @{
+                                        @"id": callId ?: @"",
+                                        @"name": @"google_search",
+                                        @"response": @{
+                                            @"result": resText,
+                                            @"output": resText,
+                                            @"status": @"success"
+                                        }
+                                    }
+                                ]
+                            }
+                        }];
+                        return;
+                    }
+
+                    // 【方案 5 检索轮数上限守护】：单轮最多允许 2 次联网搜索，杜绝连续 4~5 次检索造成的严重延迟
+                    self.currentTurnSearchCount++;
+                    if (self.currentTurnSearchCount > 2) {
+                        agLiveDiagLog(@"TOOL_CALL_LIMIT", @"Reached max search count (%lu) for turn, returning stop signal", (unsigned long)self.currentTurnSearchCount);
+                        NSString *resText = @"联网检索已就绪。请立即根据已知事实与信息，用精炼自然的中文回答用户，严禁继续发起搜索！";
+                        [self sendJSONDictionaryOverWebSocket:@{
+                            @"toolResponse": @{
+                                @"functionResponses": @[
+                                    @{
+                                        @"id": callId ?: @"",
+                                        @"name": @"google_search",
+                                        @"response": @{
+                                            @"result": resText,
+                                            @"output": resText,
+                                            @"status": @"max_searches_reached"
+                                        }
+                                    }
+                                ]
+                            }
+                        }];
+                        return;
+                    }
+
+                    self.isWaitingForToolResponse = YES;
                     self.subStatusLabel.text = [NSString stringWithFormat:@"🌐 正在联网检索：「%@」...", searchQuery];
 
                     NSString *proxy = agProxyForTab(self.activeModeTab);
@@ -6481,6 +6555,61 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             }
             if (!searchQuery || searchQuery.length == 0) searchQuery = self.currentVoiceQueryBuffer ?: @"";
             agLiveDiagLog(@"TOOL_CALL_OPENAI", @"OpenAI requested search: '%@', callId: %@", searchQuery, callId);
+
+            NSString *sqLower = [searchQuery lowercaseString];
+            BOOL isActionCommand = NO;
+            if ([sqLower containsString:@"low power"] || [sqLower containsString:@"low_power"] || [sqLower containsString:@"省电"] || [sqLower containsString:@"低电量"] || [sqLower containsString:@"点亮模式"]) {
+                [self executeActionDictionary:@{@"type": @"low_power_mode", @"on": @YES}];
+                isActionCommand = YES;
+            } else if ([sqLower containsString:@"brightness"] || [sqLower containsString:@"亮度"]) {
+                [self tryExecuteDirectLocalCommand:searchQuery];
+                isActionCommand = YES;
+            } else if ([sqLower containsString:@"volume"] || [sqLower containsString:@"音量"] || [sqLower containsString:@"声音"]) {
+                [self tryExecuteDirectLocalCommand:searchQuery];
+                isActionCommand = YES;
+            } else if ([sqLower containsString:@"flashlight"] || [sqLower containsString:@"手电筒"]) {
+                [self tryExecuteDirectLocalCommand:searchQuery];
+                isActionCommand = YES;
+            } else if ([sqLower containsString:@"打开"] || [sqLower containsString:@"启动"] || [sqLower containsString:@"open "] || [sqLower containsString:@"launch "]) {
+                [self tryExecuteDirectLocalCommand:searchQuery];
+                isActionCommand = YES;
+            } else if ([sqLower containsString:@"battery"] || [sqLower containsString:@"storage"] || [sqLower containsString:@"内存"] || [sqLower containsString:@"电量"]) {
+                [self executeActionDictionary:@{@"type": @"device_status"}];
+                isActionCommand = YES;
+            }
+
+            if (isActionCommand) {
+                agLiveDiagLog(@"TOOL_INTERCEPT_OPENAI", @"Intercepted action search for '%@', executed locally", searchQuery);
+                NSString *resText = @"已在手机本地执行完毕。请直接用亲切简洁的中文口语告知用户操作已完成，严禁再次搜索！";
+                [self sendJSONDictionaryOverWebSocket:@{
+                    @"type": @"conversation.item.create",
+                    @"item": @{
+                        @"type": @"function_call_output",
+                        @"call_id": callId ?: @"",
+                        @"output": resText
+                    }
+                }];
+                [self sendJSONDictionaryOverWebSocket:@{ @"type": @"response.create" }];
+                return;
+            }
+
+            self.currentTurnSearchCount++;
+            if (self.currentTurnSearchCount > 2) {
+                agLiveDiagLog(@"TOOL_CALL_LIMIT_OPENAI", @"Reached max search count (%lu) for turn", (unsigned long)self.currentTurnSearchCount);
+                NSString *resText = @"联网检索已就绪。请立即根据已知事实与信息，用精炼自然的中文回答用户，严禁继续发起搜索！";
+                [self sendJSONDictionaryOverWebSocket:@{
+                    @"type": @"conversation.item.create",
+                    @"item": @{
+                        @"type": @"function_call_output",
+                        @"call_id": callId ?: @"",
+                        @"output": resText
+                    }
+                }];
+                [self sendJSONDictionaryOverWebSocket:@{ @"type": @"response.create" }];
+                return;
+            }
+
+            self.isWaitingForToolResponse = YES;
             self.subStatusLabel.text = [NSString stringWithFormat:@"🌐 正在联网检索：「%@」...", searchQuery];
             NSString *proxy = agProxyForTab(self.activeModeTab);
             __weak typeof(self) weakSelf = self;
@@ -6521,6 +6650,14 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         if ([inputTrans isKindOfClass:[NSDictionary class]] && [inputTrans[@"text"] isKindOfClass:[NSString class]]) {
             NSString *userDelta = inputTrans[@"text"];
             if (userDelta.length > 0) {
+                // 【方案 5 回声抑制门】：扬声器正在发声时，过滤极短西班牙语/拉美/印地语音节空耳杂音（如 "¿Qué", "de 4 a 2", "सर"）
+                if (self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
+                    NSString *cleanUD = [userDelta stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                    if ([cleanUD isEqualToString:@"¿Qué"] || [cleanUD isEqualToString:@"¿Qué?"] || [cleanUD containsString:@"de 4 a 2"] || [cleanUD containsString:@"सर"]) {
+                        agLiveDiagLog(@"ECHO_SUPPRESS", @"Suppressed speaker echo hallucination delta: '%@'", userDelta);
+                        return;
+                    }
+                }
                 if (self.aiPlaybackEndTime > 0 && self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
                     [self.pcmPlayerNode stop];
                     [self.pcmPlayerNode play];
@@ -6531,6 +6668,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                     if (curTrans.length > 0 && ![curTrans hasSuffix:@"\n"]) [curTrans appendString:@"\n\n"];
                     [curTrans appendString:@"🗣️ 您："];
                     self.isLastTranscriptLineUser = YES;
+                    self.currentTurnSearchCount = 0;
+                    self.isWaitingForToolResponse = NO;
                 }
                 [curTrans appendString:userDelta];
                 [self.currentVoiceQueryBuffer appendString:userDelta];
@@ -6615,8 +6754,20 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 NSString *cleanedTrans = [actionReg stringByReplacingMatchesInString:curTrans options:0 range:NSMakeRange(0, curTrans.length) withTemplate:@""];
                 [curTrans setString:cleanedTrans];
             }
+            // 【方案 2 过滤内部标签】
+            if ([curTrans containsString:@"<"]) {
+                NSString *sanitized = agSanitizeInternalModelTags(curTrans);
+                if (![sanitized isEqualToString:curTrans]) {
+                    [curTrans setString:sanitized];
+                }
+            }
+            // 【方案 4 气泡去重与平滑换行】：若仍在等待工具调用结果，不另起两行换行符，避免下一次追加产生多余的 ✨ Gemini: 抬头！
             if (curTrans.length > 0 && ![curTrans hasSuffix:@"\n"]) {
-                [curTrans appendString:@"\n\n"];
+                if (!self.isWaitingForToolResponse) {
+                    [curTrans appendString:@"\n\n"];
+                } else {
+                    [curTrans appendString:@" "];
+                }
                 [self updateResponseTextViewSmoothly:curTrans];
                 [self throttledExpandAndScrollTextViewForce:YES];
             }
@@ -7770,12 +7921,13 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         [self executeActionDictionary:@{@"type": @"orientation_lock", @"lock": @(lock)}];
         return YES;
     }
-    if (([cmd containsString:@"省电"] || [cmd containsString:@"低电量"]) && ([cmd containsString:@"关"] || [cmd containsString:@"退"])) {
-        [self executeActionDictionary:@{@"type": @"low_power_mode", @"on": @NO}];
-        return YES;
-    }
-    if (([cmd containsString:@"省电"] || [cmd containsString:@"低电量"]) && ([cmd containsString:@"开"] || [cmd containsString:@"启"] || [cmd isEqualToString:@"低电量模式"] || [cmd isEqualToString:@"省电模式"])) {
-        [self executeActionDictionary:@{@"type": @"low_power_mode", @"on": @YES}];
+    // 【方案 3 同音字与发音模糊匹配】：支持“省电”、“低电量”、“点亮模式”、“快速点亮”、“快递点亮”、“低电”
+    BOOL isLowPowerCmd = ([cmd containsString:@"省电"] || [cmd containsString:@"低电量"] ||
+                          [cmd containsString:@"点亮模式"] || [cmd containsString:@"快速点亮"] ||
+                          [cmd containsString:@"快递点亮"] || [cmd containsString:@"低电"]);
+    if (isLowPowerCmd) {
+        BOOL turnOff = ([cmd containsString:@"关"] || [cmd containsString:@"退"] || [cmd containsString:@"熄灭"]);
+        [self executeActionDictionary:@{@"type": @"low_power_mode", @"on": @(!turnOff)}];
         return YES;
     }
 
@@ -10510,7 +10662,20 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     }
 }
 
+static NSString *agSanitizeInternalModelTags(NSString *text) {
+    if (!text || text.length == 0) return @"";
+    static NSRegularExpression *sTagRe = nil;
+    static dispatch_once_t sOnce;
+    dispatch_once(&sOnce, ^{
+        sTagRe = [NSRegularExpression regularExpressionWithPattern:@"<\\/?(?:LMDX|grounding|citation|call_\\w+|search_result)[^>]*>" options:NSRegularExpressionCaseInsensitive error:nil];
+    });
+    return [sTagRe stringByReplacingMatchesInString:text options:0 range:NSMakeRange(0, text.length) withTemplate:@""];
+}
+
 - (void)appendIncomingTextDelta:(NSString *)delta {
+    delta = agSanitizeInternalModelTags(delta);
+    if (!delta || delta.length == 0) return;
+
     [self.accumulatedReplyText appendString:delta];
     [self.pendingSpeechChunk appendString:delta];
 
@@ -10532,6 +10697,12 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         NSRegularExpression *actionReg = [NSRegularExpression regularExpressionWithPattern:@"\\[ACTION:.*?\\]" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
         NSString *cleanedTrans = [actionReg stringByReplacingMatchesInString:curTrans options:0 range:NSMakeRange(0, curTrans.length) withTemplate:@""];
         [curTrans setString:cleanedTrans];
+    }
+    if ([curTrans containsString:@"<"]) {
+        NSString *cleanedTags = agSanitizeInternalModelTags(curTrans);
+        if (![cleanedTags isEqualToString:curTrans]) {
+            [curTrans setString:cleanedTags];
+        }
     }
     [self updateResponseTextViewSmoothly:curTrans];
     [self throttledExpandAndScrollTextViewForce:NO];
