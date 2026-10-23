@@ -1980,7 +1980,7 @@ static void agFetchRealtimeWebSearchContextForQuery(NSString *query, NSString *p
                 if (m.numberOfRanges > 1) {
                     NSString *rawP = [html substringWithRange:[m rangeAtIndex:1]];
                     NSString *cleanText = [tagStripRe stringByReplacingMatchesInString:rawP options:0 range:NSMakeRange(0, rawP.length) withTemplate:@""];
-                    cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&quot;" withString:@"""];
+                    cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&quot;" withString:@"\""];
                     cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&amp;" withString:@"&"];
                     cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&nbsp;" withString:@" "];
                     cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&#39;" withString:@"'"];
