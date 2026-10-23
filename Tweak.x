@@ -2505,12 +2505,16 @@ static void agProbeModelForTab(AGConfigTab tab, NSString *endpoint, NSString *ap
         req.HTTPMethod = @"POST";
         [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
 
+        NSMutableDictionary *genCfg = [@{
+            @"temperature": @0.1,
+            @"maxOutputTokens": @96
+        } mutableCopy];
+        if ([fullM containsString:@"2.5"] || [fullM containsString:@"3."] || [fullM containsString:@"thinking"]) {
+            genCfg[@"thinkingConfig"] = @{ @"thinkingBudget": @0 };
+        }
         NSDictionary *body = @{
             @"contents": @[ @{ @"role": @"user", @"parts": @[ @{ @"text": @"Hi" } ] } ],
-            @"generationConfig": @{
-                @"temperature": @0.1,
-                @"maxOutputTokens": @16
-            }
+            @"generationConfig": genCfg
         };
         req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     } else {
@@ -2524,7 +2528,7 @@ static void agProbeModelForTab(AGConfigTab tab, NSString *endpoint, NSString *ap
             @"model": exactM,
             @"messages": @[ @{ @"role": @"user", @"content": @"Hi" } ],
             @"temperature": @0.1,
-            @"max_tokens": @16
+            @"max_tokens": @96
         };
         req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     }
@@ -3570,6 +3574,8 @@ static void agSimulateScreenSwipe(CGPoint startPt, CGPoint endPt, NSTimeInterval
 @property (nonatomic, strong) dispatch_queue_t audioPlayQueue;
 @property (nonatomic, assign) NSUInteger sessionGenerationToken;
 @property (nonatomic, assign) NSUInteger currentTurnPlaybackID;
+@property (nonatomic, assign) NSUInteger lastResetPlayerTurnID;
+@property (nonatomic, copy) NSString *lastCommittedUserVoiceQuery;
 @property (nonatomic, assign) NSInteger pendingPlayBuffersCount;
 @property (nonatomic, assign) NSInteger inFlightWSMessageCount;
 @property (nonatomic, assign) NSUInteger txAudioPacketsCount;
@@ -3694,7 +3700,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         _builtinAppMap = @{
             // 移动支付与银行金融 (20+)
             @"微信": @"com.tencent.xin", @"wechat": @"com.tencent.xin",
-            @"支付宝": @"com.eg.android.AlipayGphone", @"alipay": @"com.eg.android.AlipayGphone",
+            @"支付宝": @"com.alipay.iphoneclient", @"alipay": @"com.alipay.iphoneclient",
             @"云闪付": @"com.unionpay.chsp", @"upwallet": @"com.unionpay.chsp",
             @"招商银行": @"com.cmbchina.mobilebank", @"招行": @"com.cmbchina.mobilebank",
             @"掌上生活": @"com.cmbchina.life",
@@ -3752,14 +3758,14 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             @"携程": @"ctrip.com", @"携程旅行": @"ctrip.com",
             @"去哪儿": @"com.qunar.iphone", @"去哪儿旅行": @"com.qunar.iphone",
             @"飞猪": @"com.taobao.trip", @"飞猪旅行": @"com.taobao.trip",
-            @"航旅纵横": @"com.umetrip.android",
+            @"航旅纵横": @"com.travelsky.umetrip",
             @"飞常准": @"com.feeyo.fz",
             @"metro大都会": @"com.shmetro.cdm", @"大都会": @"com.shmetro.cdm",
             @"亿通行": @"com.bjsubway.yitongxing",
             // 演艺演出与电影票务 (5+)
             @"大麦": @"cn.damai.iphone", @"大麦网": @"cn.damai.iphone",
             @"猫眼": @"com.sankuai.movie", @"猫眼电影": @"com.sankuai.movie",
-            @"淘票票": @"com.taobao.movie.android",
+            @"淘票票": @"com.taobao.movie.MoviePhoneClient",
             @"秀动": @"com.showstart.client",
             @"摩天轮票务": @"com.motianlun.app", @"摩天轮": @"com.motianlun.app",
             // 社交网络、社区与游戏 (18+)
@@ -3767,7 +3773,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             @"小红书": @"com.xingin.discover", @"xhs": @"com.xingin.discover",
             @"微博": @"com.sina.weibo", @"新浪微博": @"com.sina.weibo",
             @"知乎": @"com.zhihu.ios",
-            @"哔哩哔哩": @"tv.danmaku.bilianime", @"b站": @"tv.danmaku.bilianime",
+            @"哔哩哔哩": @"tv.danmaku.bili", @"b站": @"tv.danmaku.bili",
             @"抖音": @"com.ss.iphone.ugc.Aweme",
             @"快手": @"com.jiangjia.gif",
             @"贴吧": @"com.baidu.tieba", @"百度贴吧": @"com.baidu.tieba",
@@ -3798,7 +3804,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             @"微信读书": @"com.tencent.weread",
             @"百词斩": @"com.baicizhan.word",
             @"多邻国": @"com.duolingo.DuolingoMobile",
-            @"学习强国": @"cn.xuexi.android",
+            @"学习强国": @"cn.xuexi.iphone",
             @"得到": @"com.luojilab.player",
             @"起点读书": @"com.qidian.QDReader", @"起点": @"com.qidian.QDReader",
             @"晋江文学城": @"com.jjwxc.reader", @"晋江": @"com.jjwxc.reader",
@@ -3828,7 +3834,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             @"货拉拉": @"com.huolala.client",
             @"闪送": @"com.ishansong.client",
             // 三大运营商掌厅 (3+)
-            @"中国移动": @"com.greenpoint.android.mc10086.activity", @"10086": @"com.greenpoint.android.mc10086.activity",
+            @"中国移动": @"com.chinamobile.mcloud", @"10086": @"com.chinamobile.mcloud",
             @"中国联通": @"com.sinovatech.unicom.ui", @"10010": @"com.sinovatech.unicom.ui",
             @"中国电信": @"cn.com.chinatelecom.ChinaTelecom", @"10000": @"cn.com.chinatelecom.ChinaTelecom",
             // 交管政务与民生办事 (7+)
@@ -5885,6 +5891,21 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                     [self sendJSONDictionaryOverWebSocket:@{
                         @"realtimeInput": @{ @"video": @{ @"mimeType": @"image/jpeg", @"data": b64Img } }
                     }];
+                } else {
+                    // OpenAI Realtime 官方视频帧推送 (conversation.item.create -> input_image)
+                    [self sendJSONDictionaryOverWebSocket:@{
+                        @"type": @"conversation.item.create",
+                        @"item": @{
+                            @"type": @"message",
+                            @"role": @"user",
+                            @"content": @[
+                                @{
+                                    @"type": @"input_image",
+                                    @"image_url": [NSString stringWithFormat:@"data:image/jpeg;base64,%@", b64Img]
+                                }
+                            ]
+                        }
+                    }];
                 }
             }
         });
@@ -6214,17 +6235,40 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
         [self sendJSONDictionaryOverWebSocket:@{ @"setup": setupDict }];
     } else {
+        NSMutableDictionary *sessionDict = [@{
+            @"modalities": @[@"text", @"audio"],
+            @"instructions": sysInstruction,
+            @"voice": @"alloy",
+            @"input_audio_format": @"pcm16",
+            @"output_audio_format": @"pcm16",
+            @"turn_detection": @{ @"type": @"server_vad" }
+        } mutableCopy];
+
+        if (agIsWebSearchEnabled() && !self.disableToolsInSetup) {
+            sessionDict[@"tools"] = @[
+                @{
+                    @"type": @"function",
+                    @"name": @"google_search",
+                    @"description": @"实时搜索互联网获取最新资讯、新闻、今日天气、实时汇率、股价、赛事结果等最新事实信息",
+                    @"parameters": @{
+                        @"type": @"object",
+                        @"properties": @{
+                            @"query": @{
+                                @"type": @"string",
+                                @"description": @"要检索的关键词"
+                            }
+                        },
+                        @"required": @[ @"query" ]
+                    }
+                }
+            ];
+        }
+
         NSDictionary *sessionUpdate = @{
             @"type": @"session.update",
-            @"session": @{
-                @"modalities": @[@"text", @"audio"],
-                @"instructions": sysInstruction,
-                @"voice": @"alloy",
-                @"input_audio_format": @"pcm16",
-                @"output_audio_format": @"pcm16",
-                @"turn_detection": @{ @"type": @"server_vad" }
-            }
+            @"session": sessionDict
         };
+        agLiveDiagLog(@"WS_SETUP_OPENAI", @"Sending OpenAI session.update: tools=%d | search=%d", (sessionDict[@"tools"] != nil), agIsWebSearchEnabled());
         [self sendJSONDictionaryOverWebSocket:sessionUpdate];
     }
 }
@@ -6492,7 +6536,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(checkDeferredVoiceLocalCommand) object:nil];
             if (self.currentVoiceQueryBuffer.length > 0) {
                 NSString *fullVoiceCmd = [self.currentVoiceQueryBuffer copy];
-                // 【关键修复】在清空 currentVoiceQueryBuffer 前，先执行 checkDeferredVoiceLocalCommand（内含本地命令与客户端实时联网检索！）
+                // 【核心修复】将用户提问快照留存至 lastCommittedUserVoiceQuery，严防在 turnComplete 存盘前被提前清空！
+                self.lastCommittedUserVoiceQuery = fullVoiceCmd;
                 [self checkDeferredVoiceLocalCommand];
                 [self.currentVoiceQueryBuffer setString:@""];
                 if ([self tryExecuteDirectLocalCommand:fullVoiceCmd]) {
@@ -6531,7 +6576,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             }
         }
         if ([serverContent[@"turnComplete"] boolValue]) {
-            agRecordDialogueTurnToUniversalMemory(self.currentVoiceQueryBuffer ?: @"", self.accumulatedReplyText ?: @"");
+            NSString *committedQuery = (self.lastCommittedUserVoiceQuery.length > 0) ? self.lastCommittedUserVoiceQuery : (self.currentVoiceQueryBuffer ?: @"");
+            agRecordDialogueTurnToUniversalMemory(committedQuery, self.accumulatedReplyText ?: @"");
+            self.lastCommittedUserVoiceQuery = nil;
             [self.currentVoiceQueryBuffer setString:@""];
             [self flushPCM24kStagingBuffer];
             self.isLastTranscriptLineUser = NO;
@@ -6769,8 +6816,11 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         if (engineWasOff) {
             [self.liveAudioEngine startAndReturnError:nil];
         }
-        // 【核心修复】当引擎刚拉起，或这是本轮 AI 回复的第 1 个音频包（pendingPlayBuffersCount == 0）时，重置 player 时间轴确保首句 100% 出声
-        if (engineWasOff || self.pendingPlayBuffersCount == 0 || !self.pcmPlayerNode.isPlaying) {
+        // 【核心修复】时钟与时间轴重置仅在引擎重启或一轮全新 AI 回复的首包（TurnID 改变）时触发一次！
+        // 严禁在句中因网络微抖动 pendingPlayBuffersCount == 0 误触发 stop/play，彻底消除句中断词与咔嗒爆音！
+        BOOL isFirstPacketOfNewTurn = (self.lastResetPlayerTurnID != capturedTurnID);
+        if (engineWasOff || isFirstPacketOfNewTurn || !self.pcmPlayerNode.isPlaying) {
+            self.lastResetPlayerTurnID = capturedTurnID;
             [self.pcmPlayerNode stop];
             [self.pcmPlayerNode play];
         }
@@ -6941,6 +6991,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
                 self.micFramesSinceEngineStart = 0;
                 self.engineStartTimestamp = [[NSDate date] timeIntervalSince1970];
+                // 【核心挂载】启动苹果本地神经引擎离线语音 VAD 检测器
+                [self startNativeAppleNeuralVADIfNeeded];
                 // 若当前外放落入听筒，强制切到扬声器
                 AVAudioSessionPortDescription *curOut = session.currentRoute.outputs.firstObject;
                 if ([curOut.portType isEqualToString:AVAudioSessionPortBuiltInReceiver]) {
@@ -6978,6 +7030,13 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     AVAudioFrameCount inFrames = buffer.frameLength;
     double inSampleRate = buffer.format.sampleRate > 0 ? buffer.format.sampleRate : 48000.0;
     NSData *copiedFloats = [NSData dataWithBytes:buffer.floatChannelData[0] length:inFrames * sizeof(float)];
+
+    // 【核心接入】将实时硬件麦克风音频流喂入苹果离线神经识别引擎，实现毫秒级人声开口检测
+    if (self.nativeNeuralVADRequest) {
+        @try {
+            [self.nativeNeuralVADRequest appendAudioPCMBuffer:buffer];
+        } @catch (NSException *e) {}
+    }
 
     __weak typeof(self) weakSelf = self;
     dispatch_async(self.encodeQueue, ^{
@@ -7026,8 +7085,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             double srcIdx = (double)i * ratio;
             NSUInteger idx0 = (NSUInteger)srcIdx;
             NSUInteger idx1 = MIN(idx0 + 1, (NSUInteger)(inFrames - 1));
-            float sample = (float)((1.0 - (srcIdx - idx0)) * floatSamples[idx0] + (srcIdx - idx0) * floatSamples[idx1]) * 2.10f;
-            sample = MAX(-1.0f, MIN(1.0f, sample));
+            float rawSample = (float)((1.0 - (srcIdx - idx0)) * floatSamples[idx0] + (srcIdx - idx0) * floatSamples[idx1]);
+            // 【核心优化】保持 VoiceProcessingIO 硬件 AGC 归一化采样，采用微量平滑软饱和 (tanhf soft-knee) 杜绝硬削波失真与爆音
+            float sample = tanhf(rawSample * 1.15f);
             outPtr[i] = (int16_t)(sample * 32767.0f);
         }
 
@@ -12866,10 +12926,10 @@ static void agPerformGeneralTranslation(NSString *sourceText, void (^completion)
         return;
     }
 
-    NSString *prompt = [NSString stringWithFormat:@"你是一个专业的即时多语言翻译引擎。请将以下外语文本直接翻译为自然流畅的简体中文。\n"
+    NSString *prompt = [NSString stringWithFormat:@"你是一个专业的即时多语言翻译引擎。请将以下带有序号的外语文本直接翻译为自然流畅的简体中文。\n"
         @"【严格对齐规则】：\n"
-        @"1. 保持原有的逐行换行格式，原文每一行必须对应翻译为一行，严禁合并行或增减行数！\n"
-        @"2. 只输出中文翻译结果本身，绝不输出任何多余的解释、问候或标点前缀：\n%@", sourceText];
+        @"1. 每一行必须严格对应翻译，每行格式必须保持：[序号] 中文翻译内容，严禁遗漏、合并或拆分序号！\n"
+        @"2. 只输出中文翻译结果，绝不输出任何多余的解释、问候或额外标记：\n%@", sourceText];
 
     NSURLSession *session = agCreateSessionWithProxy(proxy, nil, nil);
     BOOL isGoogle = agIsGoogleNativeProtocol(endpoint, model);
@@ -13325,7 +13385,7 @@ static void initInSituGlobalTouchMonitor(void) {
                     @"text": cand.string,
                     @"rect": [NSValue valueWithCGRect:rect]
                 }];
-                [sourceLines addObject:cand.string];
+                [sourceLines addObject:[NSString stringWithFormat:@"[%lu] %@", (unsigned long)(detectedBlocks.count), cand.string]];
             }
 
             if (sourceLines.count == 0 || currentEpoch != weakSelf.inSituScanEpoch) {
@@ -13351,12 +13411,29 @@ static void initInSituGlobalTouchMonitor(void) {
                 }
 
                 NSArray<NSString *> *translatedLines = [translatedText componentsSeparatedByString:@"\n"];
+                NSMutableDictionary<NSNumber *, NSString *> *indexedMap = [NSMutableDictionary dictionary];
+                NSRegularExpression *idxRe = [NSRegularExpression regularExpressionWithPattern:@"^\\[(\\d+)\\]\\s*(.*)$" options:0 error:nil];
+                for (NSString *rawLine in translatedLines) {
+                    NSString *tLine = [rawLine stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                    if (tLine.length == 0) continue;
+                    NSTextCheckingResult *match = [idxRe firstMatchInString:tLine options:0 range:NSMakeRange(0, tLine.length)];
+                    if (match && match.numberOfRanges > 2) {
+                        NSInteger idx = [[tLine substringWithRange:[match rangeAtIndex:1]] integerValue];
+                        NSString *content = [tLine substringWithRange:[match rangeAtIndex:2]];
+                        indexedMap[@(idx)] = content;
+                    }
+                }
+
                 [weakSelf.patchContainerView.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
 
                 for (NSUInteger i = 0; i < detectedBlocks.count; i++) {
                     NSDictionary *item = detectedBlocks[i];
                     CGRect rect = [item[@"rect"] CGRectValue];
-                    NSString *zhLine = (i < translatedLines.count) ? [translatedLines[i] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] : @"";
+                    NSString *zhLine = indexedMap[@(i + 1)];
+                    if (!zhLine || zhLine.length == 0) {
+                        zhLine = (i < translatedLines.count) ? [translatedLines[i] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] : @"";
+                        zhLine = [idxRe stringByReplacingMatchesInString:zhLine options:0 range:NSMakeRange(0, zhLine.length) withTemplate:@"$2"];
+                    }
                     if (zhLine.length == 0) zhLine = item[@"text"];
 
                     CGRect patchRect = CGRectInset(rect, -2.0, -1.0);
