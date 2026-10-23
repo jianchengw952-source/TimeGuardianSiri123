@@ -42,6 +42,8 @@
 #import <CoreMotion/CoreMotion.h>
 #import <SystemConfiguration/CaptiveNetwork.h>
 #import <NetworkExtension/NetworkExtension.h>
+#import <mach-o/dyld.h>
+#import <errno.h>
 #pragma pack(push, 4)
 typedef struct {
     int suitability;                     // 0x00
@@ -565,6 +567,11 @@ static void _old_unused_saveGeminiPrefs(NSDictionary *dict) {
 }
 
 static void agReportAppLocationHookHitToSpringBoard(void) {
+    static NSTimeInterval sLastReportTime = 0;
+    NSTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - sLastReportTime < 10.0) return; // 10秒节流，杜绝高频IPC风暴暴露Hook
+    sLastReportTime = now;
+
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
     if (bundleID.length == 0 || [bundleID isEqualToString:@"com.apple.springboard"] || [bundleID isEqualToString:@"com.apple.Preferences"]) return;
 
@@ -17007,13 +17014,163 @@ static int my_TCCAccessPreflight(CFStringRef service, CFDictionaryRef options) {
     return 0;
 }
 
-// ==================== 1. 零侵入 CLLocation 底层 CLDaemonLocation 结构体定义 (4字节对齐, 兼容 iOS 15~17) ====================
+// ==================== 1. 零侵入 CLLocation 底层 CLDaemonLocation 结构体 (已前置于文件顶部定义) ====================
 
-
-// 废除对第三方 App 自身类的 Runtime IMP 篡改，保留空函数以兼容旧调用点
 static void agHookLocationDelegateClassIfNeeded(id delegate) {
     (void)delegate;
 }
+
+// ==================== 2. 顶级反插件检测护盾：精准 dladdr 指针归属伪装 + dyld 镜像隐身 + 越狱路径屏蔽 ====================
+static void *gSelfDylibBase = NULL;
+static void *gCoreLocationBase = NULL;
+static const char *gCoreLocationPath = "/System/Library/Frameworks/CoreLocation.framework/CoreLocation";
+
+static int (*orig_dladdr)(const void *addr, Dl_info *info) = NULL;
+static int hooked_dladdr(const void *addr, Dl_info *info) {
+    int ret = orig_dladdr ? orig_dladdr(addr, info) : 0;
+    if (ret != 0 && info && info->dli_fname) {
+        // 仅当被查询的函数指针位于本插件 dylib 自身内部（或属于越狱目录）时，才伪装为系统原生 CoreLocation！
+        // 绝不触碰钉钉自身、相机 AVFoundation 或第三方 SDK 的正常指针偏移计算！
+        if ((gSelfDylibBase != NULL && info->dli_fbase == gSelfDylibBase) ||
+            strstr(info->dli_fname, "/var/jb/") != NULL ||
+            strstr(info->dli_fname, "MobileSubstrate") != NULL ||
+            strstr(info->dli_fname, "TweakInject") != NULL ||
+            strstr(info->dli_fname, "ellekit") != NULL) {
+            info->dli_fname = gCoreLocationPath;
+            if (gCoreLocationBase != NULL) {
+                info->dli_fbase = gCoreLocationBase;
+            }
+            info->dli_sname = "CLClientGetLocation";
+            info->dli_saddr = (void *)addr;
+        }
+    }
+    return ret;
+}
+
+static const char *(*orig_dyld_get_image_name)(uint32_t image_index) = NULL;
+static const char *hooked_dyld_get_image_name(uint32_t image_index) {
+    const char *name = orig_dyld_get_image_name ? orig_dyld_get_image_name(image_index) : NULL;
+    if (name && agIsCurrentProcessTargetedForLocSpoof()) {
+        if (strstr(name, "/var/jb/") != NULL ||
+            strstr(name, "MobileSubstrate") != NULL ||
+            strstr(name, "TweakInject") != NULL ||
+            strstr(name, "substitute") != NULL ||
+            strstr(name, "ellekit") != NULL ||
+            strstr(name, "Substrate") != NULL) {
+            return gCoreLocationPath;
+        }
+    }
+    return name;
+}
+
+static BOOL agIsSuspiciousJailbreakPath(const char *path) {
+    if (!path) return NO;
+    return (strstr(path, "/var/jb") != NULL ||
+            strstr(path, "MobileSubstrate") != NULL ||
+            strstr(path, "TweakInject") != NULL ||
+            strstr(path, "ellekit") != NULL ||
+            strstr(path, "substitute") != NULL ||
+            strstr(path, "Cydia") != NULL ||
+            strstr(path, "Sileo") != NULL ||
+            strstr(path, "Zebra") != NULL ||
+            strstr(path, "/apt/") != NULL);
+}
+
+static int (*orig_access)(const char *path, int amode) = NULL;
+static int hooked_access(const char *path, int amode) {
+    if (agIsSuspiciousJailbreakPath(path) && agIsCurrentProcessTargetedForLocSpoof()) {
+        errno = ENOENT;
+        return -1;
+    }
+    return orig_access ? orig_access(path, amode) : -1;
+}
+
+static int (*orig_stat)(const char *path, struct stat *buf) = NULL;
+static int hooked_stat(const char *path, struct stat *buf) {
+    if (agIsSuspiciousJailbreakPath(path) && agIsCurrentProcessTargetedForLocSpoof()) {
+        errno = ENOENT;
+        return -1;
+    }
+    return orig_stat ? orig_stat(path, buf) : -1;
+}
+
+static int (*orig_lstat)(const char *path, struct stat *buf) = NULL;
+static int hooked_lstat(const char *path, struct stat *buf) {
+    if (agIsSuspiciousJailbreakPath(path) && agIsCurrentProcessTargetedForLocSpoof()) {
+        errno = ENOENT;
+        return -1;
+    }
+    return orig_lstat ? orig_lstat(path, buf) : -1;
+}
+
+// ==================== 3. 双通道一致性虚拟 Wi-Fi 护盾 ====================
+static NSDictionary *agBuildConsistentVirtualWiFiDict(void) {
+    BOOL kActive = NO, kShield = YES;
+    NSInteger wifiMode = 1;
+    double lat = 0.0, lon = 0.0;
+    if (!agReadSpoofStateFromKernel(&kActive, NULL, &kShield, &wifiMode, &lat, &lon, NULL, NULL, NULL)) {
+        NSDictionary *p = agReadOnlyPrefs();
+        wifiMode = p[@"AG_AntiDet_WiFiMode"] ? [p[@"AG_AntiDet_WiFiMode"] integerValue] : 1;
+        lat = [p[@"AG_LocSpoof_Lat"] doubleValue];
+        lon = [p[@"AG_LocSpoof_Lon"] doubleValue];
+    }
+    if (wifiMode == 0) return nil;
+
+    NSDictionary *p = agReadOnlyPrefs();
+    NSString *ssid = nil;
+    NSString *bssid = nil;
+
+    if (wifiMode == 2) {
+        ssid = [p[@"AG_AntiDet_FakeSSID"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        bssid = [[p[@"AG_AntiDet_FakeBSSID"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    }
+
+    int32_t gridLat = (int32_t)llround(lat * 200.0);
+    int32_t gridLon = (int32_t)llround(lon * 200.0);
+    uint32_t seed = (uint32_t)(gridLat * 73856093u) ^ (uint32_t)(gridLon * 19349663u) ^ 0x5A3C9E71u;
+
+    if (!ssid || ssid.length == 0) {
+        NSArray<NSString *> *enterpriseSSIDs = @[
+            @"ChinaNet-Office-5G",
+            @"HUAWEI-Enterprise-5G",
+            @"TP-LINK_Business_5G",
+            @"CMCC-GovNet-5G",
+            @"Ruijie-Work-5G",
+            @"Aruba-Corp-WiFi"
+        ];
+        ssid = enterpriseSSIDs[seed % enterpriseSSIDs.count];
+    }
+
+    if (!bssid || bssid.length < 11) {
+        NSArray<NSString *> *validOUIs = @[@"48:8e:ef", @"38:91:d5", @"58:69:6c", @"ec:6c:9f", @"00:24:6c"];
+        NSString *oui = validOUIs[(seed >> 4) % validOUIs.count];
+        uint8_t b3 = (uint8_t)((seed >> 8) & 0xFE);
+        uint8_t b4 = (uint8_t)((seed >> 16) & 0xFF);
+        uint8_t b5 = (uint8_t)(((seed >> 24) & 0xFD) | 0x02);
+        bssid = [NSString stringWithFormat:@"%@:%02x:%02x:%02x", oui, b3, b4, b5];
+    }
+
+    NSData *ssidData = [ssid dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+    return @{
+        @"SSID": ssid,
+        @"BSSID": bssid,
+        @"SSIDDATA": ssidData
+    };
+}
+
+static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName) = NULL;
+static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        NSDictionary *fakeWiFi = agBuildConsistentVirtualWiFiDict();
+        if (fakeWiFi) {
+            return (__bridge_retained CFDictionaryRef)[fakeWiFi copy];
+        }
+    }
+    return orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
+}
+
+// ==================== 4. 客户端隐身定位 Hook 组 ====================
+%group StealthLocationClientHooks
 
 %hook CLLocationSourceInformation
 
@@ -17034,23 +17191,6 @@ static void agHookLocationDelegateClassIfNeeded(id delegate) {
 - (AGCLDaemonLocation)clientLocation {
     AGCLDaemonLocation raw = %orig;
     if (agIsCurrentProcessTargetedForLocSpoof()) {
-        if ([objc_getAssociatedObject(self, kAGHardwareCleanLocationKey) boolValue]) {
-            CLLocationCoordinate2D c = [self coordinate];
-            raw.suitability = 1;
-            raw.coordinate.latitude = c.latitude;
-            raw.coordinate.longitude = c.longitude;
-            raw.rawCoordinate.latitude = c.latitude;
-            raw.rawCoordinate.longitude = c.longitude;
-            raw.timestamp = CFAbsoluteTimeGetCurrent();
-            raw.lifespan = 20.0;
-            raw.type = 1; // 1 = 硬件 GNSS/GPS
-            raw.confidence = 65;
-            raw.integrity = 50;
-            raw.referenceFrame = 1;
-            raw.rawReferenceFrame = 1;
-            raw.fromSimulationController = NO;
-            return raw;
-        }
         CLLocation *spoof = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
         if (spoof) {
             agReportAppLocationHookHitToSpringBoard();
@@ -17075,7 +17215,7 @@ static void agHookLocationDelegateClassIfNeeded(id delegate) {
             raw.timestamp = CFAbsoluteTimeGetCurrent();
             raw.confidence = 65;
             raw.lifespan = 20.0;
-            raw.type = 1; // 强制标记为硬件 GPS (1)，抹除 CLSimulationManager 痕迹
+            raw.type = 1; // 1 = 真实硬件 GPS，彻底抹除 CLSimulationManager 模拟源特征
             raw.integrity = 50;
             raw.referenceFrame = 1;
             raw.rawReferenceFrame = 1;
@@ -17152,9 +17292,7 @@ static void agHookLocationDelegateClassIfNeeded(id delegate) {
 }
 
 - (NSDate *)timestamp {
-    if (agIsCurrentProcessTargetedForLocSpoof()) {
-        return [NSDate date]; // 确保今日相机快门瞬间校验时间戳 100% 新鲜
-    }
+    if (agIsCurrentProcessTargetedForLocSpoof()) return [NSDate date];
     return %orig;
 }
 
@@ -17193,7 +17331,6 @@ static void agHookLocationDelegateClassIfNeeded(id delegate) {
 
 %end
 
-// ==================== 2. CLGeocoder 逆地理编码对齐 (解决今日水印相机在白名单模式下的水印地址一致性) ====================
 %hook CLGeocoder
 
 - (void)reverseGeocodeLocation:(CLLocation *)location completionHandler:(CLGeocodeCompletionHandler)completionHandler {
@@ -17220,7 +17357,6 @@ static void agHookLocationDelegateClassIfNeeded(id delegate) {
 
 %end
 
-// ==================== 3. CoreMotion 运动传感器状态协同 (消除移动巡航时“GPS在走、计步传感器静止”的破绽) ====================
 %hook CMMotionActivity
 
 - (BOOL)stationary {
@@ -17258,76 +17394,6 @@ static void agHookLocationDelegateClassIfNeeded(id delegate) {
 
 %end
 
-// ==================== 4. 虚拟 Wi-Fi 护盾 ====================
-// 根据当前虚拟坐标生成同一地点恒定、换地点自动切换的高仿真 Wi-Fi 字典
-static NSDictionary *agBuildConsistentVirtualWiFiDict(void) {
-    BOOL kActive = NO, kShield = YES;
-    NSInteger wifiMode = 1;
-    double lat = 0.0, lon = 0.0;
-    if (!agReadSpoofStateFromKernel(&kActive, NULL, &kShield, &wifiMode, &lat, &lon, NULL, NULL, NULL)) {
-        NSDictionary *p = agReadOnlyPrefs();
-        wifiMode = p[@"AG_AntiDet_WiFiMode"] ? [p[@"AG_AntiDet_WiFiMode"] integerValue] : 1;
-        lat = [p[@"AG_LocSpoof_Lat"] doubleValue];
-        lon = [p[@"AG_LocSpoof_Lon"] doubleValue];
-    }
-    if (wifiMode == 0) return nil;
-
-    NSDictionary *p = agReadOnlyPrefs();
-    NSString *ssid = nil;
-    NSString *bssid = nil;
-
-    if (wifiMode == 2) {
-        ssid = [p[@"AG_AntiDet_FakeSSID"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        bssid = [[p[@"AG_AntiDet_FakeBSSID"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
-    }
-
-    // 按约 500 米网格量化经纬度，确保同一打卡点多次打卡 BSSID 100% 恒定，跨地点时自动切换
-    int32_t gridLat = (int32_t)llround(lat * 200.0);
-    int32_t gridLon = (int32_t)llround(lon * 200.0);
-    uint32_t seed = (uint32_t)(gridLat * 73856093u) ^ (uint32_t)(gridLon * 19349663u) ^ 0x5A3C9E71u;
-
-    if (!ssid || ssid.length == 0) {
-        NSArray<NSString *> *enterpriseSSIDs = @[
-            @"ChinaNet-Office-5G",
-            @"HUAWEI-Enterprise-5G",
-            @"TP-LINK_Business_5G",
-            @"CMCC-GovNet-5G",
-            @"Ruijie-Work-5G",
-            @"Aruba-Corp-WiFi"
-        ];
-        ssid = enterpriseSSIDs[seed % enterpriseSSIDs.count];
-    }
-
-    if (!bssid || bssid.length < 11) {
-        // 合法商用路由器 OUI 前缀（华为 / 华三 / 锐捷 / TP-Link / 思科）
-        NSArray<NSString *> *validOUIs = @[@"48:8e:ef", @"38:91:d5", @"58:69:6c", @"ec:6c:9f", @"00:24:6c"];
-        NSString *oui = validOUIs[(seed >> 4) % validOUIs.count];
-        uint8_t b3 = (uint8_t)((seed >> 8) & 0xFE);
-        uint8_t b4 = (uint8_t)((seed >> 16) & 0xFF);
-        uint8_t b5 = (uint8_t)(((seed >> 24) & 0xFD) | 0x02);
-        bssid = [NSString stringWithFormat:@"%@:%02x:%02x:%02x", oui, b3, b4, b5];
-    }
-
-    NSData *ssidData = [ssid dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
-    return @{
-        @"SSID": ssid,
-        @"BSSID": bssid,
-        @"SSIDDATA": ssidData
-    };
-}
-
-static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName) = NULL;
-static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
-    if (agIsCurrentProcessTargetedForLocSpoof()) {
-        NSDictionary *fakeWiFi = agBuildConsistentVirtualWiFiDict();
-        if (fakeWiFi) {
-            return (__bridge_retained CFDictionaryRef)[fakeWiFi copy];
-        }
-    }
-    return orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
-}
-
-// 同步拦截 iOS 14+ NetworkExtension 的 NEHotspotNetwork，确保企业微信双通道 Wi-Fi 校验完全一致
 %hook NEHotspotNetwork
 
 - (NSString *)SSID {
@@ -17348,7 +17414,9 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 
 %end
 
-// ==================== 仅限 SpringBoard 生效的系统级权限与 Info.plist Hook ====================
+%end // end group StealthLocationClientHooks
+
+// ==================== 5. 仅限 SpringBoard 生效的系统级权限与 Info.plist Hook ====================
 %group SpringBoardOnlyHooks
 
 %hook NSBundle
@@ -17385,7 +17453,7 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 
 %end // end group SpringBoardOnlyHooks
 
-// ==================== 构造函数 %ctor：严格按进程隔离初始化 ====================
+// ==================== 6. 构造函数 %ctor：严格进程隔离 + 反插件检测护盾挂载 ====================
 %ctor {
     @autoreleasepool {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
@@ -17394,10 +17462,22 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 
         reloadGeminiPrefsCache();
 
-        // 1. 仅在 SpringBoard 桌面进程中启用相机/麦克风/NSBundle Hook，确保钉钉、今日相机、企业微信恢复 100% 原生相机与原生 Info.plist
+        // 记录本插件 dylib 的精确基址与系统 CoreLocation 真实基址（用于精准 dladdr 伪装，绝不误伤相机等模块）
+        Dl_info selfInfo;
+        if (dladdr((const void *)&agIsCurrentProcessTargetedForLocSpoof, &selfInfo) != 0) {
+            gSelfDylibBase = selfInfo.dli_fbase;
+        }
+        Dl_info clInfo;
+        void *clSym = dlsym(RTLD_DEFAULT, "CLLocationCoordinate2DMake");
+        if (clSym && dladdr(clSym, &clInfo) != 0) {
+            gCoreLocationBase = clInfo.dli_fbase;
+            if (clInfo.dli_fname) gCoreLocationPath = clInfo.dli_fname;
+        }
+
         if (isSpringBoard) {
             ensureSpringBoardTCCGranted();
             %init(SpringBoardOnlyHooks);
+            %init(_ungrouped);
 
             void *tccHandle = dlopen("/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_NOW);
             if (tccHandle) {
@@ -17411,23 +17491,34 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
                 [AGLocationSpoofManager sharedSpoofer];
                 [GeminiAssistantManager sharedManager];
             });
+            return;
         }
 
-        // 2. 初始化公共 Hook（包含零侵入 CLLocation 结构体改写、CLGeocoder 对齐、CMMotionActivity 协同、NEHotspotNetwork 护盾与桌面 Hook）
+        if (isPreferences) {
+            %init(_ungrouped);
+            return;
+        }
+
+        // 第三方 App 进程：启用隐身定位组 + 反插件检测护盾（精准 dladdr + dyld 隐藏 + 越狱路径屏蔽 + Wi-Fi 护盾）
+        %init(StealthLocationClientHooks);
         %init(_ungrouped);
 
-        // 3. 在第三方 App 进程中仅挂载一致性虚拟 Wi-Fi 护盾（绝不挂载 dladdr 与 Delegate IMP 篡改）
-        if (!isSpringBoard && !isPreferences) {
-            void *snHandle = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY);
-            if (snHandle) {
-                void *cnSym = dlsym(snHandle, "CNCopyCurrentNetworkInfo");
-                if (cnSym) {
-                    MSHookFunction(cnSym, (void *)hooked_CNCopyCurrentNetworkInfo, (void **)&orig_CNCopyCurrentNetworkInfo);
-                }
+        MSHookFunction((void *)dladdr, (void *)hooked_dladdr, (void **)&orig_dladdr);
+        MSHookFunction((void *)_dyld_get_image_name, (void *)hooked_dyld_get_image_name, (void **)&orig_dyld_get_image_name);
+        MSHookFunction((void *)access, (void *)hooked_access, (void **)&orig_access);
+        MSHookFunction((void *)stat, (void *)hooked_stat, (void **)&orig_stat);
+        MSHookFunction((void *)lstat, (void *)hooked_lstat, (void **)&orig_lstat);
+
+        void *snHandle = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY);
+        if (snHandle) {
+            void *cnSym = dlsym(snHandle, "CNCopyCurrentNetworkInfo");
+            if (cnSym) {
+                MSHookFunction(cnSym, (void *)hooked_CNCopyCurrentNetworkInfo, (void **)&orig_CNCopyCurrentNetworkInfo);
             }
-            if ([bundleID isEqualToString:@"com.tencent.xin"]) {
-                initWeChatAngelGuardianService();
-            }
+        }
+
+        if ([bundleID isEqualToString:@"com.tencent.xin"]) {
+            initWeChatAngelGuardianService();
         }
     }
 }
