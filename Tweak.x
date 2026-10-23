@@ -12582,14 +12582,12 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     id avsc = (avSysCls && [avSysCls respondsToSelector:@selector(sharedAVSystemController)]) ? [avSysCls sharedAVSystemController] : nil;
 
     if (self.isInternalRecordingMode) {
-        // 🔇 静音内录优先模式：保存当前音量并将外放设为极微弱 0.005f，确保 iOS 混音器不断流，且用户听不到声音
+        // 🔇 彻底废除流氓降音：绝不修改用户的系统音量滑块！保留真实音量体验！
+        // 同时在内存副本中对数字 PCM 进行 16x 自适应放大，因此即便用户静音/音量拉到0，翻译引擎依然能收到清晰的数字声音！
         if (avsc && [avsc respondsToSelector:@selector(getVolume:forCategory:)]) {
             float vol = 0.5f;
             [avsc getVolume:&vol forCategory:@"Audio/Video"];
             self.savedSystemVolume = vol;
-        }
-        if (avsc && [avsc respondsToSelector:@selector(setVolumeTo:forCategory:)]) {
-            [avsc setVolumeTo:0.005f forCategory:@"Audio/Video"];
         }
 
         RPScreenRecorder *recorder = [RPScreenRecorder sharedRecorder];
@@ -12615,10 +12613,10 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
                                 sumSquares += s * s;
                             }
                             double rms = sqrt(sumSquares / (double)count);
-                            // 若音量微弱，自动数字增益放大到 -18dB 规范电平 (~3800)
-                            if (rms > 2.0 && rms < 2600.0) {
+                            // 即使系统音量为 0 或静音，只要数字总线有大于 1.0 的数据，自动增益最高 16 倍放大到规范电平 (~3800)！
+                            if (rms > 1.0 && rms < 2600.0) {
                                 double targetRMS = 3800.0;
-                                double gain = MIN(8.0, targetRMS / rms);
+                                double gain = MIN(16.0, targetRMS / rms);
                                 for (size_t i = 0; i < count; i++) {
                                     double val = (double)samples[i] * gain;
                                     if (val > 32767.0) val = 32767.0;
@@ -12634,6 +12632,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
                 if (error) {
                     weakSelf.isReplayKitCapturing = NO;
                     dispatch_async(dispatch_get_main_queue(), ^{
+                        // 当应用受 DRM 保护或音频会话独占被拒时，无缝自动降级为双路麦克风收音
                         [weakSelf startFallbackAudioEngineCapture];
                     });
                 }
@@ -12642,9 +12641,9 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
             [self startFallbackAudioEngineCapture];
         }
 
-        // 视频播放器内静音兜底：若连续 1.5 秒无音频波形，自动触发每 1.2 秒一次的轻量静默截屏 OCR
+        // 智能静音兜底：仅在悬浮窗可见且确实无音频时执行，且在窗口隐藏时立即休眠
         [self.silentFallbackTimer invalidate];
-        self.silentFallbackTimer = [NSTimer scheduledTimerWithTimeInterval:1.2 repeats:YES block:^(NSTimer * _Nonnull timer) {
+        self.silentFallbackTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer * _Nonnull timer) {
             if (weakSelf.hidden || isDeviceCurrentlyLocked()) return;
             NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
             if (now - weakSelf.lastAppAudioTime >= 1.5) {
@@ -12659,7 +12658,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
                 VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCGImage:cropImg options:@{}];
                 CGImageRelease(cropImg);
                 VNRecognizeTextRequest *req = [[VNRecognizeTextRequest alloc] initWithCompletionHandler:^(VNRequest * _Nonnull request, NSError * _Nullable error) {
-                    if (error) return;
+                    if (error || weakSelf.hidden) return;
                     NSMutableString *ocrText = [NSMutableString string];
                     for (VNRecognizedTextObservation *obs in request.results) {
                         VNRecognizedText *top = [[obs topCandidates:1] firstObject];
@@ -12939,8 +12938,10 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     self.silentFallbackTimer = nil;
 
     if (self.isReplayKitCapturing) {
-        [[RPScreenRecorder sharedRecorder] stopCaptureWithHandler:nil];
         self.isReplayKitCapturing = NO;
+        [[RPScreenRecorder sharedRecorder] stopCaptureWithHandler:^(NSError * _Nullable error) {
+            // 确保后台 replayd 服务完全安全退出
+        }];
     }
 
     // 恢复之前的系统媒体音量
@@ -12966,8 +12967,13 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
         self.speechTask = nil;
     }
 
-    if (eng) {
-        dispatch_async(agAudioSerialQueue(), ^{
+    if (self.speechRecognizer) {
+        self.speechRecognizer = nil;
+    }
+
+    // 核心修复：无论是否使用 eng，音频会话都必须 100% 彻底注销并恢复 Ambient 状态，绝不占用后台！
+    dispatch_async(agAudioSerialQueue(), ^{
+        if (eng) {
             @try {
                 [eng.inputNode removeTapOnBus:0];
                 if ([eng.inputNode respondsToSelector:@selector(setVoiceProcessingEnabled:error:)]) {
@@ -12975,16 +12981,16 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
                 }
                 [eng stop];
             } @catch (NSException *e) {}
-            @try {
-                GeminiAssistantManager *mgr = [GeminiAssistantManager sharedManager];
-                if (!mgr.overlayWindow || mgr.overlayWindow.hidden) {
-                    AVAudioSession *session = [AVAudioSession sharedInstance];
-                    [session setCategory:AVAudioSessionCategoryAmbient withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
-                    [session setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:nil];
-                }
-            } @catch (NSException *e) {}
-        });
-    }
+        }
+        @try {
+            GeminiAssistantManager *mgr = [GeminiAssistantManager sharedManager];
+            if (!mgr.overlayWindow || mgr.overlayWindow.hidden) {
+                AVAudioSession *session = [AVAudioSession sharedInstance];
+                [session setCategory:AVAudioSessionCategoryAmbient withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+                [session setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:nil];
+            }
+        } @catch (NSException *e) {}
+    });
 }
 
 #pragma mark - ⚡ 双通道并发微切片 SSE 流式同传引擎 (全 API 通用)
