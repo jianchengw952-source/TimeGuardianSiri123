@@ -9021,17 +9021,16 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             [self updateResponseTextViewSmoothly:curTrans];
             [self throttledExpandAndScrollTextViewForce:YES];
 
-            // 语音反馈
-            if (self.activeModeTab != AGConfigTabPureText) {
-                if (!self.pcmPlayerNode || !self.pcmPlayerNode.isPlaying) {
-                    NSString *voiceMsg = @"";
-                    if (totalCleaned > 0) {
-                        voiceMsg = [NSString stringWithFormat:@"已为您成功关闭 %lu 个后台应用，内存已彻底释放。", (unsigned long)totalCleaned];
-                    } else {
-                        voiceMsg = @"手机后台已经非常干净了，没有多余的后台应用。";
-                    }
-                    [self enqueueSpeechSentence:voiceMsg];
+            // 语音反馈 (全双工 Live 实时通话中由云端 Gemini 发声，严禁本地 Siri 同时播报避免双重声音与回声循环；仅在非全双工/离线模式下由本地发声)
+            BOOL isLiveVoiceSessionActive = (self.isWebSocketConnected && self.liveWebSocketTask != nil);
+            if (!isLiveVoiceSessionActive && self.activeModeTab != AGConfigTabPureText) {
+                NSString *voiceMsg = @"";
+                if (totalCleaned > 0) {
+                    voiceMsg = [NSString stringWithFormat:@"已为您成功关闭 %lu 个后台应用，内存已彻底释放。", (unsigned long)totalCleaned];
+                } else {
+                    voiceMsg = @"手机后台已经非常干净了，没有多余的后台应用。";
                 }
+                [self enqueueSpeechSentence:voiceMsg];
             }
         });
     });
@@ -9295,12 +9294,11 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             [self updateResponseTextViewSmoothly:curTrans];
             [self throttledExpandAndScrollTextViewForce:YES];
 
-            // 语音播报反馈
-            NSString *voiceMsg = [NSString stringWithFormat:@"手机深度清理完成，已安全释放 %@ 存储空间，后台应用已清理加速，系统运行更流畅。", freedStr];
-            if (self.activeModeTab != AGConfigTabPureText) {
-                if (!self.pcmPlayerNode || !self.pcmPlayerNode.isPlaying) {
-                    [self enqueueSpeechSentence:voiceMsg];
-                }
+            // 语音播报反馈 (全双工 Live 实时通话中由云端 Gemini 发声，严禁本地 Siri 同时播报避免双重声音与回声循环；仅在非全双工/离线模式下由本地发声)
+            BOOL isLiveVoiceSessionActive = (self.isWebSocketConnected && self.liveWebSocketTask != nil);
+            if (!isLiveVoiceSessionActive && self.activeModeTab != AGConfigTabPureText) {
+                NSString *voiceMsg = [NSString stringWithFormat:@"手机深度清理完成，已安全释放 %@ 存储空间，后台应用已清理加速，系统运行更流畅。", freedStr];
+                [self enqueueSpeechSentence:voiceMsg];
             }
         });
     });
@@ -11228,6 +11226,10 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
 }
 
 - (void)enqueueSpeechSentence:(NSString *)sentence {
+    // 关键防御：全双工实时通话中所有语音全权由云端 PCM 播放器输出，严禁本地系统合成器并发播报
+    if (self.isWebSocketConnected && self.liveWebSocketTask != nil) {
+        return;
+    }
     NSString *clean = [sentence stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (clean.length == 0) return;
 
