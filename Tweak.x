@@ -35,6 +35,10 @@
 #import <mach/mach_time.h>
 #import <Vision/Vision.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <CoreLocation/CoreLocation.h>
+#import <CoreMotion/CoreMotion.h>
+#import <SystemConfiguration/CaptiveNetwork.h>
+#import <NetworkExtension/NetworkExtension.h>
 
 extern char **environ;
 
@@ -114,6 +118,8 @@ static void ensureSpringBoardTCCGranted(void) {
                 setFunc(CFSTR("kTCCServiceMicrophone"), CFSTR("com.apple.springboard"), true);
                 setFunc(CFSTR("kTCCServiceSpeechRecognition"), CFSTR("com.apple.springboard"), true);
                 setFunc(CFSTR("kTCCServiceScreenCapture"), CFSTR("com.apple.springboard"), true);
+        setFunc(CFSTR("kTCCServiceLocation"), CFSTR("com.apple.springboard"), true);
+        setFunc(CFSTR("kTCCServiceMotion"), CFSTR("com.apple.springboard"), true);
             }
         }
 
@@ -705,6 +711,1343 @@ static void agWakeScreenBacklightIfNeeded(void) {
 
 @interface UIWindow (Private)
 - (void)_setSecure:(BOOL)secure;
+@end
+
+// ==================== 虚拟定位与反检测中心：私有接口与核心引擎 ====================
+@interface UIImage (AGPrivateAppIcon)
++ (UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleIdentifier format:(int)format scale:(CGFloat)scale;
+@end
+
+@interface LSApplicationProxy (AGExtraInfo)
+@property (nonatomic, readonly) NSString *applicationType;
+@property (nonatomic, readonly) NSArray<NSString *> *appTags;
+@end
+
+@interface CLSimulationManager : NSObject
+@property (nonatomic, assign) uint8_t locationDeliveryBehavior;
+@property (nonatomic, assign) uint8_t locationRepeatBehavior;
+- (void)clearSimulatedLocations;
+- (void)appendSimulatedLocation:(CLLocation *)location;
+- (void)startLocationSimulation;
+- (void)stopLocationSimulation;
+- (void)flush;
+@end
+
+@interface CLLocationSourceInformation (AGStealthPrivate)
+@property (nonatomic, readonly) BOOL isSimulatedBySoftware;
+@property (nonatomic, readonly) BOOL isProducedByAccessory;
+@end
+
+// --- 地球坐标 (WGS-84) 与 火星坐标 (GCJ-02) / 百度坐标 (BD-09) 高精度逆向纠偏 ---
+static BOOL agIsOutOfChina(double lat, double lon) {
+    return (lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271);
+}
+
+static double agTransformLat(double x, double y) {
+    double ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * sqrt(fabs(x));
+    ret += (20.0 * sin(6.0 * x * M_PI) + 20.0 * sin(2.0 * x * M_PI)) * 2.0 / 3.0;
+    ret += (20.0 * sin(y * M_PI) + 40.0 * sin(y / 3.0 * M_PI)) * 2.0 / 3.0;
+    ret += (160.0 * sin(y / 12.0 * M_PI) + 320.0 * sin(y * M_PI / 30.0)) * 2.0 / 3.0;
+    return ret;
+}
+
+static double agTransformLon(double x, double y) {
+    double ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * sqrt(fabs(x));
+    ret += (20.0 * sin(6.0 * x * M_PI) + 20.0 * sin(2.0 * x * M_PI)) * 2.0 / 3.0;
+    ret += (20.0 * sin(x * M_PI) + 40.0 * sin(x / 3.0 * M_PI)) * 2.0 / 3.0;
+    ret += (150.0 * sin(x / 12.0 * M_PI) + 300.0 * sin(x / 30.0 * M_PI)) * 2.0 / 3.0;
+    return ret;
+}
+
+static CLLocationCoordinate2D agWGS84ToGCJ02(double wgsLat, double wgsLon) {
+    if (agIsOutOfChina(wgsLat, wgsLon)) return CLLocationCoordinate2DMake(wgsLat, wgsLon);
+    const double a = 6378245.0;
+    const double ee = 0.00669342162296594323;
+    double dLat = agTransformLat(wgsLon - 105.0, wgsLat - 35.0);
+    double dLon = agTransformLon(wgsLon - 105.0, wgsLat - 35.0);
+    double radLat = wgsLat / 180.0 * M_PI;
+    double magic = sin(radLat);
+    magic = 1 - ee * magic * magic;
+    double sqrtMagic = sqrt(magic);
+    dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * M_PI);
+    dLon = (dLon * 180.0) / (a / sqrtMagic * cos(radLat) * M_PI);
+    return CLLocationCoordinate2DMake(wgsLat + dLat, wgsLon + dLon);
+}
+
+static CLLocationCoordinate2D agGCJ02ToWGS84Exact(double gcjLat, double gcjLon) {
+    if (agIsOutOfChina(gcjLat, gcjLon)) return CLLocationCoordinate2DMake(gcjLat, gcjLon);
+    double wgsLat = gcjLat, wgsLon = gcjLon;
+    for (int i = 0; i < 6; i++) {
+        CLLocationCoordinate2D currGCJ = agWGS84ToGCJ02(wgsLat, wgsLon);
+        double dLat = currGCJ.latitude - gcjLat;
+        double dLon = currGCJ.longitude - gcjLon;
+        wgsLat -= dLat;
+        wgsLon -= dLon;
+        if (fabs(dLat) < 1e-8 && fabs(dLon) < 1e-8) break;
+    }
+    return CLLocationCoordinate2DMake(wgsLat, wgsLon);
+}
+
+static CLLocationCoordinate2D agBD09ToWGS84Exact(double bdLat, double bdLon) {
+    double x = bdLon - 0.0065, y = bdLat - 0.006;
+    double z = sqrt(x * x + y * y) - 0.00002 * sin(y * M_PI * 3000.0 / 180.0);
+    double theta = atan2(y, x) - 0.000003 * cos(x * M_PI * 3000.0 / 180.0);
+    double gcjLon = z * cos(theta);
+    double gcjLat = z * sin(theta);
+    return agGCJ02ToWGS84Exact(gcjLat, gcjLon);
+}
+
+// --- 判断当前进程是否命中虚拟定位与反检测作用域 ---
+static BOOL agIsCurrentProcessTargetedForLocSpoof(void) {
+    NSDictionary *p = agReadOnlyPrefs();
+    if (![p[@"AG_LocSpoof_Active"] boolValue]) return NO;
+
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if (!bundleID || [bundleID isEqualToString:@"com.apple.springboard"] || [bundleID isEqualToString:@"com.apple.Preferences"]) {
+        return YES;
+    }
+
+    NSInteger scopeMode = p[@"AG_LocSpoof_ScopeMode"] ? [p[@"AG_LocSpoof_ScopeMode"] integerValue] : 0;
+    if (scopeMode == 0) return YES; // 0: 全系统全局生效
+
+    NSArray *targetApps = [p[@"AG_LocSpoof_TargetApps"] isKindOfClass:[NSArray class]] ? p[@"AG_LocSpoof_TargetApps"] : @[];
+    BOOL isInList = [targetApps containsObject:bundleID];
+
+    if (scopeMode == 1) {
+        return isInList;  // 1: 仅白名单 App 生效
+    } else if (scopeMode == 2) {
+        return !isInList; // 2: 黑名单 App 排除
+    }
+    return YES;
+}
+
+// ==================== 核心引擎：AGLocationSpoofManager ====================
+@interface AGLocationSpoofManager : NSObject
+@property (nonatomic, strong) CLSimulationManager *simManager;
+@property (nonatomic, strong) CLGeocoder *geocoder;
+@property (nonatomic, strong) NSTimer *jitterTimer;
+@property (nonatomic, assign) BOOL isSpoofingActive;
+@property (nonatomic, assign) CLLocationCoordinate2D baseWGS84Coord;
+@property (nonatomic, assign) CLLocationCoordinate2D currentWGS84Coord;
+@property (nonatomic, assign) CLLocationCoordinate2D targetWalkWGS84Coord;
+@property (nonatomic, assign) BOOL isRouteMoving;
+@property (nonatomic, assign) double moveSpeedMetersPerSec;
+@property (nonatomic, assign) double currentCourse;
+@property (nonatomic, copy) NSString *currentPlaceName;
+
++ (instancetype)sharedSpoofer;
+- (NSDictionary<NSString *, NSArray<NSNumber *> *> *)builtinFamousLandmarksGCJ02;
+- (CLLocation *)constructRealisticSpoofedLocation;
+- (void)pinLocationWithCoordinate:(CLLocationCoordinate2D)coord coordSystem:(NSString *)sysType placeName:(NSString *)placeName;
+- (void)resolvePlaceAndPin:(NSString *)placeQuery completion:(void(^)(BOOL ok, NSString *summary))completion;
+- (void)startCruisingToPlace:(NSString *)destQuery speed:(double)speedMps completion:(void(^)(BOOL ok, NSString *summary))completion;
+- (void)stopAndResetToRealLocation;
+- (void)applyPreferencesAndRestartTimerIfNeeded;
+- (void)enableAttendanceStealthPreset;
+@end
+
+@implementation AGLocationSpoofManager
+
++ (instancetype)sharedSpoofer {
+    static AGLocationSpoofManager *sInstance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sInstance = [[self alloc] init];
+    });
+    return sInstance;
+}
+
+- (instancetype)init {
+    if (self = [super init]) {
+        Class simCls = objc_getClass("CLSimulationManager");
+        if (simCls) {
+            _simManager = [[simCls alloc] init];
+        }
+        _geocoder = [[CLGeocoder alloc] init];
+        _currentCourse = -1.0;
+
+        NSDictionary *p = agReadOnlyPrefs();
+        BOOL autoRestore = (p[@"AG_LocSpoof_AutoRestore"] == nil) ? YES : [p[@"AG_LocSpoof_AutoRestore"] boolValue];
+        if ([p[@"AG_LocSpoof_Active"] boolValue] && autoRestore) {
+            double savedLat = [p[@"AG_LocSpoof_Lat"] doubleValue];
+            double savedLon = [p[@"AG_LocSpoof_Lon"] doubleValue];
+            NSString *savedName = p[@"AG_LocSpoof_Name"] ?: @"已存位置";
+            if (fabs(savedLat) > 0.01 || fabs(savedLon) > 0.01) {
+                _baseWGS84Coord = CLLocationCoordinate2DMake(savedLat, savedLon);
+                _currentWGS84Coord = _baseWGS84Coord;
+                _currentPlaceName = savedName;
+                _isSpoofingActive = YES;
+                if ([[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"]) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        [self pinLocationWithCoordinate:CLLocationCoordinate2DMake(savedLat, savedLon) coordSystem:@"WGS84" placeName:savedName];
+                    });
+                }
+            }
+        }
+    }
+    return self;
+}
+
+- (NSDictionary<NSString *, NSArray<NSNumber *> *> *)builtinFamousLandmarksGCJ02 {
+    return @{
+        @"北京天安门": @[@39.908722, @116.397499],
+        @"北京故宫": @[@39.916345, @116.397155],
+        @"北京三里屯": @[@39.933752, @116.454285],
+        @"北京国贸": @[@39.908375, @116.461485],
+        @"上海外滩": @[@31.239666, @121.490582],
+        @"上海东方明珠": @[@31.239703, @121.499718],
+        @"上海陆家嘴": @[@31.238192, @121.501573],
+        @"上海虹桥机场": @[@31.197971, @121.336319],
+        @"广州塔": @[@23.106414, @113.324463],
+        @"广州小蛮腰": @[@23.106414, @113.324463],
+        @"广州天河城": @[@23.132833, @113.327021],
+        @"深圳科兴科学园": @[@22.548456, @113.943884],
+        @"深圳湾公园": @[@22.522223, @113.996391],
+        @"深圳华强北": @[@22.546952, @114.086772],
+        @"杭州西湖": @[@30.242701, @120.148732],
+        @"成都太古里": @[@30.654815, @104.083748],
+        @"成都春熙路": @[@30.656561, @104.081115],
+        @"重庆解放碑": @[@29.557429, @106.577078],
+        @"重庆洪崖洞": @[@29.562354, @106.578691],
+        @"武汉江汉路": @[@30.580662, @114.291285],
+        @"三亚凤凰机场": @[@18.303923, @109.412405],
+        @"拉萨布达拉宫": @[@29.655495, @91.118573],
+        @"香港维多利亚港": @[@22.293586, @114.169532],
+        @"台北101": @[@25.033964, @121.564468],
+        @"东京塔": @[@35.658581, @139.745433],
+        @"纽约时代广场": @[@40.758000, @-73.985500],
+        @"伦敦大本钟": @[@51.500729, @-0.124625],
+        @"巴黎埃菲尔铁塔": @[@48.858370, @2.294481]
+    };
+}
+
+- (CLLocation *)constructRealisticSpoofedLocation {
+    NSDictionary *p = agReadOnlyPrefs();
+    double lat = self.currentWGS84Coord.latitude;
+    double lon = self.currentWGS84Coord.longitude;
+    if (fabs(lat) < 0.001 && fabs(lon) < 0.001) {
+        lat = [p[@"AG_LocSpoof_Lat"] doubleValue];
+        lon = [p[@"AG_LocSpoof_Lon"] doubleValue];
+    }
+
+    BOOL jitterOn = (p[@"AG_LocSpoof_JitterEnabled"] == nil) ? YES : [p[@"AG_LocSpoof_JitterEnabled"] boolValue];
+    double jitterRadiusM = p[@"AG_LocSpoof_JitterRadius"] ? [p[@"AG_LocSpoof_JitterRadius"] doubleValue] : 1.2;
+    if (jitterOn && !self.isRouteMoving && jitterRadiusM > 0.05) {
+        double degPerMeter = 1.0 / 111320.0;
+        double randAngle = ((double)arc4random_uniform(3600) / 1800.0) * M_PI;
+        double randDist = ((double)arc4random_uniform(1000) / 1000.0) * jitterRadiusM;
+        lat += sin(randAngle) * randDist * degPerMeter;
+        lon += cos(randAngle) * randDist * degPerMeter / MAX(0.2, cos(lat * M_PI / 180.0));
+    }
+
+    double baseHAcc = p[@"AG_LocSpoof_HAccuracy"] ? [p[@"AG_LocSpoof_HAccuracy"] doubleValue] : 5.5;
+    double baseAlt  = p[@"AG_LocSpoof_BaseAltitude"] ? [p[@"AG_LocSpoof_BaseAltitude"] doubleValue] : 18.5;
+    double hAcc = MAX(2.5, baseHAcc + (((double)arc4random_uniform(24) - 12.0) / 10.0));
+    double vAcc = 3.0 + ((double)arc4random_uniform(25) / 10.0);
+    double alt  = baseAlt + (((double)arc4random_uniform(16) - 8.0) / 10.0);
+    double spd  = self.isRouteMoving ? MAX(0.2, self.moveSpeedMetersPerSec) : 0.0;
+
+    return [[CLLocation alloc] initWithCoordinate:CLLocationCoordinate2DMake(lat, lon)
+                                         altitude:alt
+                               horizontalAccuracy:hAcc
+                                 verticalAccuracy:vAcc
+                                           course:self.currentCourse
+                                            speed:spd
+                                        timestamp:[NSDate date]];
+}
+
+- (void)pinLocationWithCoordinate:(CLLocationCoordinate2D)coord coordSystem:(NSString *)sysType placeName:(NSString *)placeName {
+    CLLocationCoordinate2D wgs = coord;
+    NSString *upperSys = [sysType uppercaseString] ?: @"GCJ02";
+    if ([upperSys containsString:@"BD"] || [upperSys containsString:@"BAIDU"]) {
+        wgs = agBD09ToWGS84Exact(coord.latitude, coord.longitude);
+    } else if ([upperSys containsString:@"GCJ"] || [upperSys containsString:@"AMAP"] || [upperSys containsString:@"MARS"]) {
+        wgs = agGCJ02ToWGS84Exact(coord.latitude, coord.longitude);
+    }
+
+    self.baseWGS84Coord = wgs;
+    self.currentWGS84Coord = wgs;
+    self.isRouteMoving = NO;
+    self.currentCourse = -1.0;
+    self.isSpoofingActive = YES;
+    self.currentPlaceName = placeName.length > 0 ? placeName : [NSString stringWithFormat:@"%.5f, %.5f", wgs.latitude, wgs.longitude];
+
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_LocSpoof_Active"] = @YES;
+    p[@"AG_LocSpoof_Lat"] = @(wgs.latitude);
+    p[@"AG_LocSpoof_Lon"] = @(wgs.longitude);
+    p[@"AG_LocSpoof_InputLat"] = @(coord.latitude);
+    p[@"AG_LocSpoof_InputLon"] = @(coord.longitude);
+    p[@"AG_LocSpoof_Name"] = self.currentPlaceName;
+    saveGeminiPrefs(p);
+
+    [self applyPreferencesAndRestartTimerIfNeeded];
+    [self pushSimulatedLocationToDaemonWithCourse:-1.0 speed:0.0];
+
+    NSString *pillMsg = [NSString stringWithFormat:@"📍 定位已锁定：%@ (防检测护盾运行中)", self.currentPlaceName];
+    [[AGGlobalActionPillWindow sharedPill] showActionPill:pillMsg];
+}
+
+- (void)applyPreferencesAndRestartTimerIfNeeded {
+    [self.jitterTimer invalidate];
+    self.jitterTimer = nil;
+    NSDictionary *p = agReadOnlyPrefs();
+    if (![p[@"AG_LocSpoof_Active"] boolValue]) return;
+
+    NSTimeInterval tick = p[@"AG_LocSpoof_TickInterval"] ? [p[@"AG_LocSpoof_TickInterval"] doubleValue] : 1.4;
+    tick = MAX(0.5, MIN(5.0, tick));
+    self.jitterTimer = [NSTimer scheduledTimerWithTimeInterval:tick target:self selector:@selector(onSimulationTick) userInfo:nil repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:self.jitterTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)onSimulationTick {
+    NSDictionary *p = agReadOnlyPrefs();
+    if (![p[@"AG_LocSpoof_Active"] boolValue]) {
+        [self stopAndResetToRealLocation];
+        return;
+    }
+
+    double course = -1.0;
+    double speed = 0.0;
+    NSTimeInterval tick = p[@"AG_LocSpoof_TickInterval"] ? [p[@"AG_LocSpoof_TickInterval"] doubleValue] : 1.4;
+
+    if (self.isRouteMoving) {
+        double dLat = self.targetWalkWGS84Coord.latitude - self.currentWGS84Coord.latitude;
+        double dLon = self.targetWalkWGS84Coord.longitude - self.currentWGS84Coord.longitude;
+        double distMeters = hypot(dLat * 111320.0, dLon * 111320.0 * cos(self.currentWGS84Coord.latitude * M_PI / 180.0));
+        double stepMeters = MAX(0.5, self.moveSpeedMetersPerSec) * tick;
+
+        if (distMeters <= stepMeters) {
+            self.currentWGS84Coord = self.targetWalkWGS84Coord;
+            self.baseWGS84Coord = self.targetWalkWGS84Coord;
+            self.isRouteMoving = NO;
+            self.currentCourse = -1.0;
+            [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"🏁 已抵达目标终点：%@", self.currentPlaceName]];
+        } else {
+            double ratio = stepMeters / distMeters;
+            self.currentWGS84Coord = CLLocationCoordinate2DMake(self.currentWGS84Coord.latitude + dLat * ratio,
+                                                                self.currentWGS84Coord.longitude + dLon * ratio);
+            self.baseWGS84Coord = self.currentWGS84Coord;
+            double radAngle = atan2(dLon * cos(self.currentWGS84Coord.latitude * M_PI / 180.0), dLat);
+            course = fmod((radAngle * 180.0 / M_PI) + 360.0, 360.0);
+            self.currentCourse = course;
+            BOOL spdJitter = (p[@"AG_LocSpoof_SpeedJitter"] == nil) ? YES : [p[@"AG_LocSpoof_SpeedJitter"] boolValue];
+            double delta = spdJitter ? (self.moveSpeedMetersPerSec * (((double)arc4random_uniform(30) - 15.0) / 100.0)) : 0.0;
+            speed = MAX(0.3, self.moveSpeedMetersPerSec + delta);
+        }
+    } else {
+        BOOL jitterOn = (p[@"AG_LocSpoof_JitterEnabled"] == nil) ? YES : [p[@"AG_LocSpoof_JitterEnabled"] boolValue];
+        double jitterRadiusM = p[@"AG_LocSpoof_JitterRadius"] ? [p[@"AG_LocSpoof_JitterRadius"] doubleValue] : 1.2;
+        if (jitterOn && jitterRadiusM > 0.05) {
+            double degPerMeter = 1.0 / 111320.0;
+            double randAngle = ((double)arc4random_uniform(3600) / 1800.0) * M_PI;
+            double randDist = ((double)arc4random_uniform(1000) / 1000.0) * jitterRadiusM;
+            self.currentWGS84Coord = CLLocationCoordinate2DMake(
+                self.baseWGS84Coord.latitude + sin(randAngle) * randDist * degPerMeter,
+                self.baseWGS84Coord.longitude + cos(randAngle) * randDist * degPerMeter / MAX(0.2, cos(self.baseWGS84Coord.latitude * M_PI / 180.0))
+            );
+        } else {
+            self.currentWGS84Coord = self.baseWGS84Coord;
+        }
+    }
+
+    [self pushSimulatedLocationToDaemonWithCourse:course speed:speed];
+}
+
+- (void)pushSimulatedLocationToDaemonWithCourse:(double)course speed:(double)speed {
+    NSDictionary *p = agReadOnlyPrefs();
+    NSInteger engineMode = p[@"AG_LocSpoof_EngineMode"] ? [p[@"AG_LocSpoof_EngineMode"] integerValue] : 0;
+    NSInteger scopeMode  = p[@"AG_LocSpoof_ScopeMode"] ? [p[@"AG_LocSpoof_ScopeMode"] integerValue] : 0;
+
+    if (engineMode == 2 || scopeMode == 1) {
+        if (self.simManager) {
+            @try {
+                [self.simManager clearSimulatedLocations];
+                [self.simManager stopLocationSimulation];
+                [self.simManager flush];
+            } @catch (NSException *e) {}
+        }
+        return;
+    }
+
+    if (!self.simManager) {
+        Class simCls = objc_getClass("CLSimulationManager");
+        if (simCls) self.simManager = [[simCls alloc] init];
+    }
+    if (!self.simManager) return;
+
+    CLLocation *simLoc = [self constructRealisticSpoofedLocation];
+    @try {
+        self.simManager.locationDeliveryBehavior = 2;
+        self.simManager.locationRepeatBehavior = 1;
+        [self.simManager clearSimulatedLocations];
+        [self.simManager appendSimulatedLocation:simLoc];
+        [self.simManager startLocationSimulation];
+        [self.simManager flush];
+    } @catch (NSException *e) {
+        agLiveDiagLog(@"LOC_SPOOF_ERR", @"CLSimulationManager exception: %@", e.reason);
+    }
+}
+
+- (void)resolvePlaceAndPin:(NSString *)placeQuery completion:(void(^)(BOOL ok, NSString *summary))completion {
+    NSString *cleanPlace = [placeQuery stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (cleanPlace.length == 0) {
+        if (completion) completion(NO, @"地点名称为空");
+        return;
+    }
+
+    NSDictionary *landmarks = [self builtinFamousLandmarksGCJ02];
+    for (NSString *key in landmarks) {
+        if ([cleanPlace containsString:key] || [key containsString:cleanPlace]) {
+            NSArray<NSNumber *> *pair = landmarks[key];
+            CLLocationCoordinate2D gcj = CLLocationCoordinate2DMake([pair[0] doubleValue], [pair[1] doubleValue]);
+            [self pinLocationWithCoordinate:gcj coordSystem:@"GCJ02" placeName:key];
+            if (completion) completion(YES, [NSString stringWithFormat:@"已将定位修改至「%@」", key]);
+            return;
+        }
+    }
+
+    [self.geocoder cancelGeocode];
+    [self.geocoder geocodeAddressString:cleanPlace completionHandler:^(NSArray<CLPlacemark *> * _Nullable placemarks, NSError * _Nullable error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CLPlacemark *pm = placemarks.firstObject;
+            if (pm && pm.location) {
+                CLLocationCoordinate2D rawCoord = pm.location.coordinate;
+                NSString *displayName = pm.name ?: cleanPlace;
+                [self pinLocationWithCoordinate:rawCoord coordSystem:@"GCJ02" placeName:displayName];
+                if (completion) completion(YES, [NSString stringWithFormat:@"已将全机定位锁定至「%@」", displayName]);
+            } else {
+                [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"⚠️ 未能解析地点：%@", cleanPlace]];
+                if (completion) completion(NO, [NSString stringWithFormat:@"未能解析地点「%@」", cleanPlace]);
+            }
+        });
+    }];
+}
+
+- (void)startCruisingToPlace:(NSString *)destQuery speed:(double)speedMps completion:(void(^)(BOOL ok, NSString *summary))completion {
+    NSString *cleanDest = [destQuery stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (cleanDest.length == 0) return;
+
+    [self.geocoder cancelGeocode];
+    [self.geocoder geocodeAddressString:cleanDest completionHandler:^(NSArray<CLPlacemark *> * _Nullable placemarks, NSError * _Nullable error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CLPlacemark *pm = placemarks.firstObject;
+            if (pm && pm.location) {
+                CLLocationCoordinate2D destWGS = agGCJ02ToWGS84Exact(pm.location.coordinate.latitude, pm.location.coordinate.longitude);
+                if (!self.isSpoofingActive) {
+                    self.baseWGS84Coord = CLLocationCoordinate2DMake(destWGS.latitude - 0.0042, destWGS.longitude - 0.0042);
+                    self.currentWGS84Coord = self.baseWGS84Coord;
+                    self.isSpoofingActive = YES;
+                }
+                self.targetWalkWGS84Coord = destWGS;
+                self.moveSpeedMetersPerSec = (speedMps > 0.2) ? speedMps : 1.4;
+                self.isRouteMoving = YES;
+                self.currentPlaceName = pm.name ?: cleanDest;
+
+                NSMutableDictionary *p = loadGeminiPrefs();
+                p[@"AG_LocSpoof_Active"] = @YES;
+                p[@"AG_LocSpoof_Name"] = self.currentPlaceName;
+                saveGeminiPrefs(p);
+
+                [self applyPreferencesAndRestartTimerIfNeeded];
+                NSString *msg = [NSString stringWithFormat:@"🚶 正在模拟移动前往：%@ (%.1fm/s)", self.currentPlaceName, self.moveSpeedMetersPerSec];
+                [[AGGlobalActionPillWindow sharedPill] showActionPill:msg];
+                if (completion) completion(YES, msg);
+            } else {
+                if (completion) completion(NO, @"目的地解析失败");
+            }
+        });
+    }];
+}
+
+- (void)enableAttendanceStealthPreset {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_AntiDet_HideSimFlag"] = @YES;
+    p[@"AG_AntiDet_WiFiMode"] = @1;
+    p[@"AG_AntiDet_MotionSync"] = @YES;
+    p[@"AG_AntiDet_HideHookPtr"] = @YES;
+    p[@"AG_LocSpoof_JitterEnabled"] = @YES;
+    p[@"AG_LocSpoof_JitterRadius"] = @1.0;
+    saveGeminiPrefs(p);
+    [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🛡️ 已开启考勤防检测满配护盾 (隐藏BSSID+微漂移)"];
+}
+
+- (void)stopAndResetToRealLocation {
+    self.isSpoofingActive = NO;
+    self.isRouteMoving = NO;
+    self.currentCourse = -1.0;
+    [self.jitterTimer invalidate];
+    self.jitterTimer = nil;
+
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_LocSpoof_Active"] = @NO;
+    saveGeminiPrefs(p);
+
+    if (self.simManager) {
+        @try {
+            [self.simManager clearSimulatedLocations];
+            [self.simManager stopLocationSimulation];
+            [self.simManager flush];
+        } @catch (NSException *e) {}
+    }
+    [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🛰️ 已恢复真实物理 GPS 定位"];
+}
+
+@end
+
+// ==================== 📱 本机应用动态列表选择器 (AGAppScopePickerViewController) ====================
+@interface AGAppScopePickerViewController : UIViewController <UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate>
+@property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) UISearchBar *searchBar;
+@property (nonatomic, strong) NSMutableSet<NSString *> *selectedBundleIDs;
+@property (nonatomic, strong) NSArray<NSDictionary *> *allApps;
+@property (nonatomic, strong) NSArray<NSDictionary *> *selectedSectionApps;
+@property (nonatomic, strong) NSArray<NSDictionary *> *userSectionApps;
+@property (nonatomic, strong) NSArray<NSDictionary *> *systemSectionApps;
+@property (nonatomic, copy) NSString *searchKeyword;
+@property (nonatomic, copy) void (^onSelectionChanged)(NSUInteger count);
+@end
+
+@implementation AGAppScopePickerViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"📱 选择目标应用";
+    self.view.backgroundColor = [UIColor colorWithRed:0.06 green:0.07 blue:0.12 alpha:1.0];
+    if (@available(iOS 13.0, *)) {
+        self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    }
+
+    NSDictionary *p = agReadOnlyPrefs();
+    NSArray *saved = [p[@"AG_LocSpoof_TargetApps"] isKindOfClass:[NSArray class]] ? p[@"AG_LocSpoof_TargetApps"] : @[];
+    self.selectedBundleIDs = [NSMutableSet setWithArray:saved];
+
+    UIBarButtonItem *presetItem = [[UIBarButtonItem alloc] initWithTitle:@"⚡考勤全家桶" style:UIBarButtonItemStylePlain target:self action:@selector(selectAttendancePreset)];
+    UIBarButtonItem *clearItem  = [[UIBarButtonItem alloc] initWithTitle:@"清空" style:UIBarButtonItemStylePlain target:self action:@selector(clearAllSelection)];
+    self.navigationItem.rightBarButtonItems = @[clearItem, presetItem];
+
+    self.searchBar = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 52)];
+    self.searchBar.placeholder = @"搜索应用名称或 Bundle ID (如: 钉钉 / xin)...";
+    self.searchBar.searchBarStyle = UISearchBarStyleMinimal;
+    self.searchBar.delegate = self;
+
+    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
+    self.tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.tableView.backgroundColor = [UIColor clearColor];
+    self.tableView.delegate = self;
+    self.tableView.dataSource = self;
+    self.tableView.tableHeaderView = self.searchBar;
+    self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    [self.view addSubview:self.tableView];
+
+    [self loadInstalledApplications];
+}
+
+- (void)loadInstalledApplications {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        NSMutableArray<NSDictionary *> *loaded = [NSMutableArray array];
+        @try {
+            Class wsCls = objc_getClass("LSApplicationWorkspace");
+            LSApplicationWorkspace *ws = (wsCls && [wsCls respondsToSelector:@selector(defaultWorkspace)]) ? [wsCls defaultWorkspace] : nil;
+            NSArray<LSApplicationProxy *> *proxies = [ws respondsToSelector:@selector(allInstalledApplications)] ? [ws allInstalledApplications] : @[];
+
+            for (LSApplicationProxy *proxy in proxies) {
+                NSString *bundleID = proxy.applicationIdentifier;
+                if (!bundleID || bundleID.length == 0) continue;
+                if ([bundleID hasPrefix:@"com.apple.springboard"] || [bundleID hasPrefix:@"com.apple.WebKit"] || [bundleID containsString:@"watchkit"]) continue;
+                if ([proxy respondsToSelector:@selector(appTags)]) {
+                    NSArray *tags = [proxy appTags];
+                    if ([tags isKindOfClass:[NSArray class]] && [tags containsObject:@"hidden"]) continue;
+                }
+
+                NSString *name = [proxy localizedName];
+                if (!name || name.length == 0) name = bundleID;
+                NSString *appType = [proxy respondsToSelector:@selector(applicationType)] ? ([proxy applicationType] ?: @"User") : @"User";
+                BOOL isSystem = [appType isEqualToString:@"System"] || [bundleID hasPrefix:@"com.apple."];
+
+                [loaded addObject:@{
+                    @"bundleID": bundleID,
+                    @"name": name,
+                    @"isSystem": @(isSystem)
+                }];
+            }
+        } @catch (NSException *e) {}
+
+        [loaded sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            return [a[@"name"] localizedStandardCompare:b[@"name"]];
+        }];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.allApps = loaded;
+            [self rebuildFilteredSections];
+        });
+    });
+}
+
+- (void)rebuildFilteredSections {
+    NSMutableArray *secSelected = [NSMutableArray array];
+    NSMutableArray *secUser     = [NSMutableArray array];
+    NSMutableArray *secSystem   = [NSMutableArray array];
+    NSString *kw = [self.searchKeyword lowercaseString];
+
+    for (NSDictionary *app in self.allApps) {
+        NSString *bid  = app[@"bundleID"];
+        NSString *name = app[@"name"];
+        if (kw.length > 0) {
+            if (![[name lowercaseString] containsString:kw] && ![[bid lowercaseString] containsString:kw]) {
+                continue;
+            }
+        }
+        if ([self.selectedBundleIDs containsObject:bid]) {
+            [secSelected addObject:app];
+        } else if (![app[@"isSystem"] boolValue]) {
+            [secUser addObject:app];
+        } else {
+            [secSystem addObject:app];
+        }
+    }
+
+    self.selectedSectionApps = secSelected;
+    self.userSectionApps     = secUser;
+    self.systemSectionApps   = secSystem;
+    [self.tableView reloadData];
+}
+
+- (void)persistSelectedApps {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_LocSpoof_TargetApps"] = [self.selectedBundleIDs allObjects];
+    saveGeminiPrefs(p);
+    if (self.onSelectionChanged) {
+        self.onSelectionChanged(self.selectedBundleIDs.count);
+    }
+}
+
+- (void)selectAttendancePreset {
+    NSArray *presets = @[
+        @"com.laiwang.DingTalk",        // 钉钉
+        @"com.tencent.wework",          // 企业微信
+        @"com.electron.lark",           // 飞书
+        @"com.tencent.xin",             // 微信
+        @"com.tencent.mqq",             // QQ
+        @"com.xingin.discover",         // 小红书
+        @"com.ss.iphone.ugc.Aweme",     // 抖音
+        @"com.sina.weibo",              // 微博
+        @"com.meituan.imeituan"         // 美团
+    ];
+    for (NSString *bid in presets) {
+        [self.selectedBundleIDs addObject:bid];
+    }
+    [self persistSelectedApps];
+    [self rebuildFilteredSections];
+    [[AGGlobalActionPillWindow sharedPill] showActionPill:@"⚡ 已一键勾选考勤与社交全家桶应用"];
+}
+
+- (void)clearAllSelection {
+    [self.selectedBundleIDs removeAllObjects];
+    [self persistSelectedApps];
+    [self rebuildFilteredSections];
+}
+
+- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
+    self.searchKeyword = [searchText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    [self rebuildFilteredSections];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    return 3;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    if (section == 0) return [NSString stringWithFormat:@"📌 已勾选应用 (%lu)", (unsigned long)self.selectedSectionApps.count];
+    if (section == 1) return [NSString stringWithFormat:@"📲 用户安装的第三方应用 (%lu)", (unsigned long)self.userSectionApps.count];
+    return [NSString stringWithFormat:@"⚙️ 系统原生应用 (%lu)", (unsigned long)self.systemSectionApps.count];
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    if (section == 0) return self.selectedSectionApps.count;
+    if (section == 1) return self.userSectionApps.count;
+    return self.systemSectionApps.count;
+}
+
+- (NSDictionary *)appDictAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == 0) return self.selectedSectionApps[indexPath.row];
+    if (indexPath.section == 1) return self.userSectionApps[indexPath.row];
+    return self.systemSectionApps[indexPath.row];
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString * const kAppCellID = @"AGAppScopeCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kAppCellID];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kAppCellID];
+        cell.backgroundColor = [UIColor colorWithRed:0.11 green:0.13 blue:0.20 alpha:0.92];
+        cell.textLabel.textColor = [UIColor whiteColor];
+        cell.textLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+        cell.detailTextLabel.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
+        cell.detailTextLabel.font = [UIFont systemFontOfSize:11.5];
+    }
+
+    NSDictionary *app = [self appDictAtIndexPath:indexPath];
+    NSString *bid = app[@"bundleID"];
+    cell.textLabel.text = app[@"name"];
+    cell.detailTextLabel.text = bid;
+
+    UIImage *icon = nil;
+    if ([UIImage respondsToSelector:@selector(_applicationIconImageForBundleIdentifier:format:scale:)]) {
+        icon = [UIImage _applicationIconImageForBundleIdentifier:bid format:0 scale:[UIScreen mainScreen].scale];
+    }
+    cell.imageView.image = icon;
+    cell.imageView.layer.cornerRadius = 7.0;
+    cell.imageView.layer.masksToBounds = YES;
+
+    UISwitch *sw = [[UISwitch alloc] init];
+    sw.onTintColor = [UIColor colorWithRed:0.15 green:0.82 blue:0.98 alpha:1.0];
+    sw.on = [self.selectedBundleIDs containsObject:bid];
+    sw.accessibilityIdentifier = bid;
+    [sw addTarget:self action:@selector(appSwitchToggled:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = sw;
+
+    return cell;
+}
+
+- (void)appSwitchToggled:(UISwitch *)sender {
+    NSString *bid = sender.accessibilityIdentifier;
+    if (!bid) return;
+    if (sender.isOn) {
+        [self.selectedBundleIDs addObject:bid];
+    } else {
+        [self.selectedBundleIDs removeObject:bid];
+    }
+    [self persistSelectedApps];
+    [self rebuildFilteredSections];
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    NSDictionary *app = [self appDictAtIndexPath:indexPath];
+    NSString *bid = app[@"bundleID"];
+    if ([self.selectedBundleIDs containsObject:bid]) {
+        [self.selectedBundleIDs removeObject:bid];
+    } else {
+        [self.selectedBundleIDs addObject:bid];
+    }
+    [self persistSelectedApps];
+    [self rebuildFilteredSections];
+}
+
+@end
+
+// ==================== 📍 虚拟定位与反检测中心主控面板 (AGLocationSpoofSettingsViewController) ====================
+@interface AGLocationSpoofSettingsViewController : UIViewController <UITableViewDelegate, UITableViewDataSource, UITextFieldDelegate>
+@property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) UITextField *placeSearchField;
+@property (nonatomic, strong) UITextField *latInputField;
+@property (nonatomic, strong) UITextField *lonInputField;
+@property (nonatomic, strong) UITextField *ssidInputField;
+@property (nonatomic, strong) UITextField *bssidInputField;
+@property (nonatomic, strong) UITextField *cruiseDestField;
+@end
+
+@implementation AGLocationSpoofSettingsViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"📍 虚拟定位与反检测中心";
+    self.view.backgroundColor = [UIColor colorWithRed:0.05 green:0.06 blue:0.11 alpha:1.0];
+    if (@available(iOS 13.0, *)) {
+        self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    }
+
+    UIBarButtonItem *closeItem = [[UIBarButtonItem alloc] initWithTitle:@"完成" style:UIBarButtonItemStyleDone target:self action:@selector(dismissSelf)];
+    self.navigationItem.rightBarButtonItem = closeItem;
+
+    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
+    self.tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.tableView.backgroundColor = [UIColor clearColor];
+    self.tableView.delegate = self;
+    self.tableView.dataSource = self;
+    self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    [self.view addSubview:self.tableView];
+}
+
+- (void)dismissSelf {
+    [self.view endEditing:YES];
+    if (self.navigationController && self.navigationController.viewControllers.count > 1) {
+        [self.navigationController popViewControllerAnimated:YES];
+    } else {
+        [self dismissViewControllerAnimated:YES completion:nil];
+    }
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    return 6;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    switch (section) {
+        case 0: return @"🛰️ 1. 实时状态与底层驱动引擎";
+        case 1: return @"🗺️ 2. 坐标设定、自然语言检索与收藏夹";
+        case 2: return @"🛡️ 3. 多维深度反检测矩阵 (考勤/社交防风控)";
+        case 3: return @"🌊 4. 高斯物理微漂移与卫星信号拟真";
+        case 4: return @"🚶 5. 智能路径巡航与漫步模拟";
+        case 5: return @"🎯 6. 作用域隔离与本机应用黑白名单";
+    }
+    return @"";
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    switch (section) {
+        case 0: return 4;
+        case 1: return 6;
+        case 2: return 6;
+        case 3: return 4;
+        case 4: return 3;
+        case 5: return 2;
+    }
+    return 0;
+}
+
+- (UITableViewCell *)makeBaseCellWithStyle:(UITableViewCellStyle)style reuseID:(NSString *)reuseID {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:style reuseIdentifier:reuseID];
+    cell.backgroundColor = [UIColor colorWithRed:0.10 green:0.12 blue:0.19 alpha:0.95];
+    cell.textLabel.textColor = [UIColor whiteColor];
+    cell.textLabel.font = [UIFont systemFontOfSize:14.5 weight:UIFontWeightMedium];
+    cell.detailTextLabel.textColor = [UIColor colorWithRed:0.45 green:0.86 blue:1.0 alpha:0.95];
+    cell.detailTextLabel.font = [UIFont systemFontOfSize:12.0];
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary *p = agReadOnlyPrefs();
+    BOOL isActive = [p[@"AG_LocSpoof_Active"] boolValue];
+
+    // ==================== Section 0: 核心状态与驱动引擎 ====================
+    if (indexPath.section == 0) {
+        if (indexPath.row == 0) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleSubtitle reuseID:@"S0R0"];
+            NSString *place = p[@"AG_LocSpoof_Name"] ?: @"未设定";
+            double lat = [p[@"AG_LocSpoof_Lat"] doubleValue];
+            double lon = [p[@"AG_LocSpoof_Lon"] doubleValue];
+            cell.textLabel.text = isActive ? [NSString stringWithFormat:@"🟢 伪装生效中：%@", place] : @"⚪ 当前状态：真实物理 GPS 信号";
+            cell.textLabel.textColor = isActive ? [UIColor colorWithRed:0.25 green:0.98 blue:0.65 alpha:1.0] : [UIColor colorWithWhite:0.85 alpha:1.0];
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"WGS-84 底层坐标：%.6f, %.6f", lat, lon];
+            return cell;
+        }
+        if (indexPath.row == 1) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S0R1"];
+            cell.textLabel.text = @"启用全局虚拟定位接管";
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.onTintColor = [UIColor colorWithRed:0.18 green:0.88 blue:0.62 alpha:1.0];
+            sw.on = isActive;
+            [sw addTarget:self action:@selector(masterSpoofSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            return cell;
+        }
+        if (indexPath.row == 2) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S0R2"];
+            cell.textLabel.text = @"驱动引擎";
+            UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"双擎混合", @"仅守护进程", @"仅应用Hook"]];
+            seg.selectedSegmentIndex = p[@"AG_LocSpoof_EngineMode"] ? [p[@"AG_LocSpoof_EngineMode"] integerValue] : 0;
+            [seg addTarget:self action:@selector(engineModeSegChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = seg;
+            return cell;
+        }
+        if (indexPath.row == 3) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S0R3"];
+            cell.textLabel.text = @"重启/注销后自动恢复虚拟定位";
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = (p[@"AG_LocSpoof_AutoRestore"] == nil) ? YES : [p[@"AG_LocSpoof_AutoRestore"] boolValue];
+            [sw addTarget:self action:@selector(autoRestoreSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            return cell;
+        }
+    }
+
+    // ==================== Section 1: 坐标设定与收藏夹 ====================
+    if (indexPath.section == 1) {
+        if (indexPath.row == 0) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S1R0"];
+            self.placeSearchField = [[UITextField alloc] initWithFrame:CGRectMake(16, 6, cell.contentView.bounds.size.width - 106, 32)];
+            self.placeSearchField.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+            self.placeSearchField.placeholder = @"输入地名 (如: 深圳科兴科学园 / 外滩)";
+            self.placeSearchField.text = p[@"AG_LocSpoof_Name"] ?: @"";
+            self.placeSearchField.textColor = [UIColor whiteColor];
+            self.placeSearchField.font = [UIFont systemFontOfSize:14.0];
+            self.placeSearchField.returnKeyType = UIReturnKeySearch;
+            self.placeSearchField.delegate = self;
+            [cell.contentView addSubview:self.placeSearchField];
+
+            UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+            btn.frame = CGRectMake(0, 0, 74, 30);
+            btn.backgroundColor = [UIColor colorWithRed:0.15 green:0.68 blue:0.98 alpha:0.95];
+            [btn setTitle:@"🔍 锁定" forState:UIControlStateNormal];
+            [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+            btn.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
+            btn.layer.cornerRadius = 15.0;
+            [btn addTarget:self action:@selector(searchAndPinTapped) forControlEvents:UIControlEventTouchUpInside];
+            cell.accessoryView = btn;
+            return cell;
+        }
+        if (indexPath.row == 1) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S1R1"];
+            cell.textLabel.text = @"输入源坐标系";
+            UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"GCJ-02(高德)", @"BD-09(百度)", @"WGS-84(GPS)"]];
+            NSString *cs = p[@"AG_LocSpoof_CoordSys"] ?: @"GCJ02";
+            seg.selectedSegmentIndex = [cs isEqualToString:@"BD09"] ? 1 : ([cs isEqualToString:@"WGS84"] ? 2 : 0);
+            [seg addTarget:self action:@selector(coordSysSegChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = seg;
+            return cell;
+        }
+        if (indexPath.row == 2) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S1R2"];
+            cell.textLabel.text = @"手动纬度 (Lat)";
+            self.latInputField = [[UITextField alloc] initWithFrame:CGRectMake(0, 0, 170, 30)];
+            self.latInputField.textAlignment = NSTextAlignmentRight;
+            self.latInputField.textColor = [UIColor colorWithRed:0.45 green:0.92 blue:1.0 alpha:1.0];
+            self.latInputField.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
+            double inLat = p[@"AG_LocSpoof_InputLat"] ? [p[@"AG_LocSpoof_InputLat"] doubleValue] : 39.908722;
+            self.latInputField.text = [NSString stringWithFormat:@"%.6f", inLat];
+            cell.accessoryView = self.latInputField;
+            return cell;
+        }
+        if (indexPath.row == 3) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S1R3"];
+            cell.textLabel.text = @"手动经度 (Lon)";
+            self.lonInputField = [[UITextField alloc] initWithFrame:CGRectMake(0, 0, 170, 30)];
+            self.lonInputField.textAlignment = NSTextAlignmentRight;
+            self.lonInputField.textColor = [UIColor colorWithRed:0.45 green:0.92 blue:1.0 alpha:1.0];
+            self.lonInputField.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
+            double inLon = p[@"AG_LocSpoof_InputLon"] ? [p[@"AG_LocSpoof_InputLon"] doubleValue] : 116.397499;
+            self.lonInputField.text = [NSString stringWithFormat:@"%.6f", inLon];
+            cell.accessoryView = self.lonInputField;
+            return cell;
+        }
+        if (indexPath.row == 4) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleValue1 reuseID:@"S1R4"];
+            cell.textLabel.text = @"⭐ 常用坐标收藏夹与热门地标";
+            cell.detailTextLabel.text = @"点击瞬移 / 收藏当前";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return cell;
+        }
+        if (indexPath.row == 5) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S1R5"];
+            cell.textLabel.text = @"📌 立即应用手动经纬度  |  🛰️ 点此恢复真实GPS";
+            cell.textLabel.textAlignment = NSTextAlignmentCenter;
+            cell.textLabel.textColor = [UIColor colorWithRed:1.0 green:0.52 blue:0.48 alpha:1.0];
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return cell;
+        }
+    }
+
+    // ==================== Section 2: 多维深度反检测矩阵 ====================
+    if (indexPath.section == 2) {
+        if (indexPath.row == 0) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleSubtitle reuseID:@"S2R0"];
+            cell.textLabel.text = @"抹除 iOS 15+ 软件与配件仿真标记";
+            cell.detailTextLabel.text = @"Hook CLLocationSourceInformation 伪装原厂基带芯片";
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = (p[@"AG_AntiDet_HideSimFlag"] == nil) ? YES : [p[@"AG_AntiDet_HideSimFlag"] boolValue];
+            [sw addTarget:self action:@selector(hideSimFlagChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            return cell;
+        }
+        if (indexPath.row == 1) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S2R1"];
+            cell.textLabel.text = @"Wi-Fi 防穿帮";
+            UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"不接管", @"隐藏BSSID", @"伪装办公WiFi"]];
+            seg.selectedSegmentIndex = p[@"AG_AntiDet_WiFiMode"] ? [p[@"AG_AntiDet_WiFiMode"] integerValue] : 1;
+            [seg addTarget:self action:@selector(wifiModeSegChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = seg;
+            return cell;
+        }
+        if (indexPath.row == 2) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S2R2"];
+            cell.textLabel.text = @"伪装 Wi-Fi 名称 (SSID)";
+            self.ssidInputField = [[UITextField alloc] initWithFrame:CGRectMake(0, 0, 165, 30)];
+            self.ssidInputField.placeholder = @"如: Company-Office-5G";
+            self.ssidInputField.textAlignment = NSTextAlignmentRight;
+            self.ssidInputField.textColor = [UIColor whiteColor];
+            self.ssidInputField.text = p[@"AG_AntiDet_FakeSSID"] ?: @"";
+            [self.ssidInputField addTarget:self action:@selector(wifiTextFieldEdited) forControlEvents:UIControlEventEditingDidEnd];
+            cell.accessoryView = self.ssidInputField;
+            return cell;
+        }
+        if (indexPath.row == 3) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S2R3"];
+            cell.textLabel.text = @"伪装路由器 MAC (BSSID)";
+            self.bssidInputField = [[UITextField alloc] initWithFrame:CGRectMake(0, 0, 165, 30)];
+            self.bssidInputField.placeholder = @"a4:50:46:12:34:56";
+            self.bssidInputField.textAlignment = NSTextAlignmentRight;
+            self.bssidInputField.textColor = [UIColor whiteColor];
+            self.bssidInputField.text = p[@"AG_AntiDet_FakeBSSID"] ?: @"";
+            [self.bssidInputField addTarget:self action:@selector(wifiTextFieldEdited) forControlEvents:UIControlEventEditingDidEnd];
+            cell.accessoryView = self.bssidInputField;
+            return cell;
+        }
+        if (indexPath.row == 4) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleSubtitle reuseID:@"S2R4"];
+            cell.textLabel.text = @"步频与运动传感器协同伪装";
+            cell.detailTextLabel.text = @"巡航移动时同步生成 CoreMotion 步行状态与步数";
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = (p[@"AG_AntiDet_MotionSync"] == nil) ? YES : [p[@"AG_AntiDet_MotionSync"] boolValue];
+            [sw addTarget:self action:@selector(motionSyncChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            return cell;
+        }
+        if (indexPath.row == 5) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S2R5"];
+            cell.textLabel.text = @"🛡️ 一键开启「考勤打卡满配防风控预设」";
+            cell.textLabel.textAlignment = NSTextAlignmentCenter;
+            cell.textLabel.textColor = [UIColor colorWithRed:0.25 green:0.95 blue:0.72 alpha:1.0];
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return cell;
+        }
+    }
+
+    // ==================== Section 3: 物理微漂移与信号拟真 ====================
+    if (indexPath.section == 3) {
+        if (indexPath.row == 0) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleSubtitle reuseID:@"S3R0"];
+            cell.textLabel.text = @"启用高斯物理随机微漂移";
+            cell.detailTextLabel.text = @"围绕锚点模拟卫星多径呼吸抖动，杜绝死坐标被风控";
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = (p[@"AG_LocSpoof_JitterEnabled"] == nil) ? YES : [p[@"AG_LocSpoof_JitterEnabled"] boolValue];
+            [sw addTarget:self action:@selector(jitterEnableChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            return cell;
+        }
+        if (indexPath.row == 1) {
+            double rad = p[@"AG_LocSpoof_JitterRadius"] ? [p[@"AG_LocSpoof_JitterRadius"] doubleValue] : 1.2;
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleValue1 reuseID:@"S3R1"];
+            cell.textLabel.text = [NSString stringWithFormat:@"微漂移半径 (%.1fm)", rad];
+            UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(0, 0, 140, 28)];
+            sl.minimumValue = 0.2;
+            sl.maximumValue = 5.0;
+            sl.value = rad;
+            [sl addTarget:self action:@selector(jitterRadiusSliderChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sl;
+            return cell;
+        }
+        if (indexPath.row == 2) {
+            double tick = p[@"AG_LocSpoof_TickInterval"] ? [p[@"AG_LocSpoof_TickInterval"] doubleValue] : 1.4;
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleValue1 reuseID:@"S3R2"];
+            cell.textLabel.text = [NSString stringWithFormat:@"GPS 刷新周期 (%.1fs)", tick];
+            UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(0, 0, 140, 28)];
+            sl.minimumValue = 0.5;
+            sl.maximumValue = 3.0;
+            sl.value = tick;
+            [sl addTarget:self action:@selector(tickIntervalSliderChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sl;
+            return cell;
+        }
+        if (indexPath.row == 3) {
+            double hAcc = p[@"AG_LocSpoof_HAccuracy"] ? [p[@"AG_LocSpoof_HAccuracy"] doubleValue] : 5.5;
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleValue1 reuseID:@"S3R3"];
+            cell.textLabel.text = [NSString stringWithFormat:@"拟真水平精度 (±%.1fm)", hAcc];
+            UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(0, 0, 140, 28)];
+            sl.minimumValue = 3.0;
+            sl.maximumValue = 15.0;
+            sl.value = hAcc;
+            [sl addTarget:self action:@selector(hAccuracySliderChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sl;
+            return cell;
+        }
+    }
+
+    // ==================== Section 4: 智能路径巡航与漫步 ====================
+    if (indexPath.section == 4) {
+        if (indexPath.row == 0) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S4R0"];
+            cell.textLabel.text = @"巡航交通档位";
+            UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"步行1.4m/s", @"跑步3.2m/s", @"骑行5.5m/s", @"驾车12m/s"]];
+            seg.selectedSegmentIndex = p[@"AG_LocSpoof_SpeedProfile"] ? [p[@"AG_LocSpoof_SpeedProfile"] integerValue] : 0;
+            [seg addTarget:self action:@selector(speedProfileSegChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = seg;
+            return cell;
+        }
+        if (indexPath.row == 1) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S4R1"];
+            cell.textLabel.text = @"移动速度附加 ±15% 拟真加减速波动";
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = (p[@"AG_LocSpoof_SpeedJitter"] == nil) ? YES : [p[@"AG_LocSpoof_SpeedJitter"] boolValue];
+            [sw addTarget:self action:@selector(speedJitterChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            return cell;
+        }
+        if (indexPath.row == 2) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S4R2"];
+            self.cruiseDestField = [[UITextField alloc] initWithFrame:CGRectMake(16, 6, cell.contentView.bounds.size.width - 106, 32)];
+            self.cruiseDestField.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+            self.cruiseDestField.placeholder = @"输入巡航终点地名 (平滑移动过去)...";
+            self.cruiseDestField.textColor = [UIColor whiteColor];
+            self.cruiseDestField.font = [UIFont systemFontOfSize:14.0];
+            [cell.contentView addSubview:self.cruiseDestField];
+
+            UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+            btn.frame = CGRectMake(0, 0, 74, 30);
+            btn.backgroundColor = [UIColor colorWithRed:0.18 green:0.78 blue:0.55 alpha:0.95];
+            [btn setTitle:@"🚀 出发" forState:UIControlStateNormal];
+            [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+            btn.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
+            btn.layer.cornerRadius = 15.0;
+            [btn addTarget:self action:@selector(startCruiseTapped) forControlEvents:UIControlEventTouchUpInside];
+            cell.accessoryView = btn;
+            return cell;
+        }
+    }
+
+    // ==================== Section 5: 作用域隔离与本机应用列表 ====================
+    if (indexPath.section == 5) {
+        if (indexPath.row == 0) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S5R0"];
+            cell.textLabel.text = @"作用范围";
+            UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"全局生效", @"仅白名单App", @"黑名单排除"]];
+            seg.selectedSegmentIndex = p[@"AG_LocSpoof_ScopeMode"] ? [p[@"AG_LocSpoof_ScopeMode"] integerValue] : 0;
+            [seg addTarget:self action:@selector(scopeModeSegChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = seg;
+            return cell;
+        }
+        if (indexPath.row == 1) {
+            UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleValue1 reuseID:@"S5R1"];
+            NSArray *targetApps = [p[@"AG_LocSpoof_TargetApps"] isKindOfClass:[NSArray class]] ? p[@"AG_LocSpoof_TargetApps"] : @[];
+            cell.textLabel.text = @"📱 目标应用列表配置 (读取本机App)";
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"已选 %lu 款应用", (unsigned long)targetApps.count];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return cell;
+        }
+    }
+
+    return [[UITableViewCell alloc] init];
+}
+
+- (void)masterSpoofSwitchChanged:(UISwitch *)sender {
+    if (sender.isOn) {
+        NSDictionary *p = agReadOnlyPrefs();
+        double lat = self.latInputField ? [self.latInputField.text doubleValue] : [p[@"AG_LocSpoof_InputLat"] doubleValue];
+        double lon = self.lonInputField ? [self.lonInputField.text doubleValue] : [p[@"AG_LocSpoof_InputLon"] doubleValue];
+        if (fabs(lat) < 0.001 && fabs(lon) < 0.001) {
+            lat = 39.908722; lon = 116.397499;
+        }
+        NSString *sys = p[@"AG_LocSpoof_CoordSys"] ?: @"GCJ02";
+        NSString *name = (self.placeSearchField.text.length > 0) ? self.placeSearchField.text : (p[@"AG_LocSpoof_Name"] ?: @"指定坐标");
+        [[AGLocationSpoofManager sharedSpoofer] pinLocationWithCoordinate:CLLocationCoordinate2DMake(lat, lon) coordSystem:sys placeName:name];
+    } else {
+        [[AGLocationSpoofManager sharedSpoofer] stopAndResetToRealLocation];
+    }
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0] withRowAnimation:UITableViewRowAnimationNone];
+}
+
+- (void)engineModeSegChanged:(UISegmentedControl *)seg {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_LocSpoof_EngineMode"] = @(seg.selectedSegmentIndex);
+    saveGeminiPrefs(p);
+    [[AGLocationSpoofManager sharedSpoofer] pushSimulatedLocationToDaemonWithCourse:-1.0 speed:0.0];
+}
+
+- (void)autoRestoreSwitchChanged:(UISwitch *)sender {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_LocSpoof_AutoRestore"] = @(sender.isOn);
+    saveGeminiPrefs(p);
+}
+
+- (void)searchAndPinTapped {
+    [self.view endEditing:YES];
+    NSString *q = [self.placeSearchField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (q.length == 0) return;
+    [[AGLocationSpoofManager sharedSpoofer] resolvePlaceAndPin:q completion:^(BOOL ok, NSString *summary) {
+        [self.tableView reloadData];
+    }];
+}
+
+- (void)coordSysSegChanged:(UISegmentedControl *)seg {
+    NSArray *types = @[@"GCJ02", @"BD09", @"WGS84"];
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_LocSpoof_CoordSys"] = types[seg.selectedSegmentIndex];
+    saveGeminiPrefs(p);
+}
+
+- (void)hideSimFlagChanged:(UISwitch *)sender {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_AntiDet_HideSimFlag"] = @(sender.isOn);
+    saveGeminiPrefs(p);
+}
+
+- (void)wifiModeSegChanged:(UISegmentedControl *)seg {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_AntiDet_WiFiMode"] = @(seg.selectedSegmentIndex);
+    saveGeminiPrefs(p);
+}
+
+- (void)wifiTextFieldEdited {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    if (self.ssidInputField) p[@"AG_AntiDet_FakeSSID"] = self.ssidInputField.text ?: @"";
+    if (self.bssidInputField) p[@"AG_AntiDet_FakeBSSID"] = self.bssidInputField.text ?: @"";
+    saveGeminiPrefs(p);
+}
+
+- (void)motionSyncChanged:(UISwitch *)sender {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_AntiDet_MotionSync"] = @(sender.isOn);
+    saveGeminiPrefs(p);
+}
+
+- (void)jitterEnableChanged:(UISwitch *)sender {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_LocSpoof_JitterEnabled"] = @(sender.isOn);
+    saveGeminiPrefs(p);
+}
+
+- (void)jitterRadiusSliderChanged:(UISlider *)slider {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_LocSpoof_JitterRadius"] = @(slider.value);
+    saveGeminiPrefs(p);
+    UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:1 inSection:3]];
+    cell.textLabel.text = [NSString stringWithFormat:@"微漂移半径 (%.1fm)", slider.value];
+}
+
+- (void)tickIntervalSliderChanged:(UISlider *)slider {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_LocSpoof_TickInterval"] = @(slider.value);
+    saveGeminiPrefs(p);
+    UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:2 inSection:3]];
+    cell.textLabel.text = [NSString stringWithFormat:@"GPS 刷新周期 (%.1fs)", slider.value];
+    [[AGLocationSpoofManager sharedSpoofer] applyPreferencesAndRestartTimerIfNeeded];
+}
+
+- (void)hAccuracySliderChanged:(UISlider *)slider {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_LocSpoof_HAccuracy"] = @(slider.value);
+    saveGeminiPrefs(p);
+    UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:3 inSection:3]];
+    cell.textLabel.text = [NSString stringWithFormat:@"拟真水平精度 (±%.1fm)", slider.value];
+}
+
+- (void)speedProfileSegChanged:(UISegmentedControl *)seg {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_LocSpoof_SpeedProfile"] = @(seg.selectedSegmentIndex);
+    saveGeminiPrefs(p);
+}
+
+- (void)speedJitterChanged:(UISwitch *)sender {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_LocSpoof_SpeedJitter"] = @(sender.isOn);
+    saveGeminiPrefs(p);
+}
+
+- (void)startCruiseTapped {
+    [self.view endEditing:YES];
+    NSString *dest = [self.cruiseDestField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (dest.length == 0) return;
+    NSDictionary *p = agReadOnlyPrefs();
+    NSInteger profile = p[@"AG_LocSpoof_SpeedProfile"] ? [p[@"AG_LocSpoof_SpeedProfile"] integerValue] : 0;
+    double speeds[4] = {1.4, 3.2, 5.5, 12.0};
+    double spd = (profile >= 0 && profile <= 3) ? speeds[profile] : 1.4;
+    [[AGLocationSpoofManager sharedSpoofer] startCruisingToPlace:dest speed:spd completion:^(BOOL ok, NSString *summary) {
+        [self.tableView reloadData];
+    }];
+}
+
+- (void)scopeModeSegChanged:(UISegmentedControl *)seg {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_LocSpoof_ScopeMode"] = @(seg.selectedSegmentIndex);
+    saveGeminiPrefs(p);
+    [[AGLocationSpoofManager sharedSpoofer] pushSimulatedLocationToDaemonWithCourse:-1.0 speed:0.0];
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    [self.view endEditing:YES];
+
+    if (indexPath.section == 1 && indexPath.row == 4) {
+        [self showFavoritesActionSheet];
+    } else if (indexPath.section == 1 && indexPath.row == 5) {
+        UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"坐标操作" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+        [ac addAction:[UIAlertAction actionWithTitle:@"📌 立即锁定上方手动输入的经纬度" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+            NSDictionary *p = agReadOnlyPrefs();
+            double lat = [self.latInputField.text doubleValue];
+            double lon = [self.lonInputField.text doubleValue];
+            NSString *sys = p[@"AG_LocSpoof_CoordSys"] ?: @"GCJ02";
+            NSString *name = (self.placeSearchField.text.length > 0) ? self.placeSearchField.text : @"手动指定坐标";
+            [[AGLocationSpoofManager sharedSpoofer] pinLocationWithCoordinate:CLLocationCoordinate2DMake(lat, lon) coordSystem:sys placeName:name];
+            [self.tableView reloadData];
+        }]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"🛰️ 立即停止伪装并恢复真实物理 GPS" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+            [[AGLocationSpoofManager sharedSpoofer] stopAndResetToRealLocation];
+            [self.tableView reloadData];
+        }]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:ac animated:YES completion:nil];
+    } else if (indexPath.section == 2 && indexPath.row == 5) {
+        [[AGLocationSpoofManager sharedSpoofer] enableAttendanceStealthPreset];
+        [self.tableView reloadData];
+    } else if (indexPath.section == 5 && indexPath.row == 1) {
+        AGAppScopePickerViewController *picker = [[AGAppScopePickerViewController alloc] init];
+        picker.onSelectionChanged = ^(NSUInteger count) {
+            [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:1 inSection:5]] withRowAnimation:UITableViewRowAnimationNone];
+        };
+        if (self.navigationController) {
+            [self.navigationController pushViewController:picker animated:YES];
+        } else {
+            UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:picker];
+            [self presentViewController:nav animated:YES completion:nil];
+        }
+    }
+}
+
+- (void)showFavoritesActionSheet {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"⭐ 常用坐标收藏夹与地标" message:@"点击即可 0 延迟切换虚拟定位" preferredStyle:UIAlertControllerStyleActionSheet];
+    NSDictionary *p = agReadOnlyPrefs();
+    NSArray<NSDictionary *> *favs = [p[@"AG_LocSpoof_Favorites"] isKindOfClass:[NSArray class]] ? p[@"AG_LocSpoof_Favorites"] : @[];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"➕ 将当前锁定坐标加入收藏夹" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        NSMutableDictionary *mp = loadGeminiPrefs();
+        NSMutableArray *mFavs = [mp[@"AG_LocSpoof_Favorites"] isKindOfClass:[NSArray class]] ? [mp[@"AG_LocSpoof_Favorites"] mutableCopy] : [NSMutableArray array];
+        NSString *curName = mp[@"AG_LocSpoof_Name"] ?: @"收藏位置";
+        double curLat = [mp[@"AG_LocSpoof_Lat"] doubleValue];
+        double curLon = [mp[@"AG_LocSpoof_Lon"] doubleValue];
+        if (fabs(curLat) > 0.001 || fabs(curLon) > 0.001) {
+            [mFavs insertObject:@{@"name": curName, @"lat": @(curLat), @"lon": @(curLon), @"sys": @"WGS84"} atIndex:0];
+            mp[@"AG_LocSpoof_Favorites"] = mFavs;
+            saveGeminiPrefs(mp);
+            [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"⭐ 已收藏：%@", curName]];
+        }
+    }]];
+
+    for (NSDictionary *item in favs) {
+        NSString *title = [NSString stringWithFormat:@"📌 [已收藏] %@", item[@"name"] ?: @"坐标"];
+        [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+            double lat = [item[@"lat"] doubleValue];
+            double lon = [item[@"lon"] doubleValue];
+            [[AGLocationSpoofManager sharedSpoofer] pinLocationWithCoordinate:CLLocationCoordinate2DMake(lat, lon) coordSystem:(item[@"sys"] ?: @"WGS84") placeName:item[@"name"]];
+            [self.tableView reloadData];
+        }]];
+    }
+
+    NSDictionary *landmarks = [[AGLocationSpoofManager sharedSpoofer] builtinFamousLandmarksGCJ02];
+    for (NSString *lmName in landmarks) {
+        NSArray<NSNumber *> *pair = landmarks[lmName];
+        [sheet addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"🏙️ %@", lmName] style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+            CLLocationCoordinate2D gcj = CLLocationCoordinate2DMake([pair[0] doubleValue], [pair[1] doubleValue]);
+            [[AGLocationSpoofManager sharedSpoofer] pinLocationWithCoordinate:gcj coordSystem:@"GCJ02" placeName:lmName];
+            [self.tableView reloadData];
+        }]];
+    }
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    [textField resignFirstResponder];
+    if (textField == self.placeSearchField) {
+        [self searchAndPinTapped];
+    }
+    return YES;
+}
+
 @end
 
 static BOOL isDeviceCurrentlyLocked(void) {
@@ -6217,7 +7560,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         @"20. 手机电量与空间自检：[ACTION:{\"type\":\"device_status\"}]\n"
         @"21. 地图导航与平台搜索：[ACTION:{\"type\":\"navigation\",\"destination\":\"地点\",\"app\":\"amap|baidu\"}] / [ACTION:{\"type\":\"search\",\"keyword\":\"词\",\"platform\":\"taobao|jd|douyin|bilibili|xhs|meituan|baidu\"}]\n"
         @"22. 电话/短信/锁屏/桌面：[ACTION:{\"type\":\"make_call\",\"target\":\"人名\"}] / [ACTION:{\"type\":\"send_sms\",\"target\":\"人名\",\"content\":\"内容\"}] / [ACTION:{\"type\":\"system_control\",\"action\":\"home|lock|respring\"}]\n"
-        @"23. 清理手机垃圾/释放内存：[ACTION:{\"type\":\"system_deep_clean\"}]",
+        @"23. 清理手机垃圾/释放内存：[ACTION:{\"type\":\"system_deep_clean\"}]\n"
+        @"24. 虚拟定位与反检测控制：[ACTION:{\"type\":\"location_control\",\"action\":\"pin|walk|drive|reset|stealth_on|open_panel\",\"place\":\"地点名称\",\"lat\":0,\"lng\":0,\"coord_type\":\"GCJ02\",\"speed\":1.4}]",
         brand, rawModel];
 
     if (self.isVideoChatActive || self.activeModeTab == AGConfigTabVideoAI) {
@@ -6496,6 +7840,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                     } else if ([sqLower containsString:@"clean"] || [sqLower containsString:@"clear"] || [sqLower containsString:@"清理"] || [sqLower containsString:@"垃圾"]) {
                         [self executeActionDictionary:@{@"type": @"system_deep_clean"}];
                         isActionCommand = YES;
+                    } else if ([sqLower containsString:@"定位"] || [sqLower containsString:@"虚拟位置"] || [sqLower containsString:@"location"] || [sqLower containsString:@"gps"]) {
+                        [self tryExecuteDirectLocalCommand:searchQuery];
+                        isActionCommand = YES;
                     }
 
                     if (isActionCommand) {
@@ -6610,6 +7957,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 isActionCommand = YES;
             } else if ([sqLower containsString:@"clean"] || [sqLower containsString:@"clear"] || [sqLower containsString:@"清理"] || [sqLower containsString:@"垃圾"]) {
                 [self executeActionDictionary:@{@"type": @"system_deep_clean"}];
+                isActionCommand = YES;
+            } else if ([sqLower containsString:@"定位"] || [sqLower containsString:@"虚拟位置"] || [sqLower containsString:@"location"] || [sqLower containsString:@"gps"]) {
+                [self tryExecuteDirectLocalCommand:searchQuery];
                 isActionCommand = YES;
             }
 
@@ -7738,6 +9088,47 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     cleanCmd = [cleanCmd stringByReplacingOccurrencesOfString:@"请" withString:@""];
     cleanCmd = [cleanCmd stringByReplacingOccurrencesOfString:@"把" withString:@""];
 
+    // --- 虚拟定位与反检测中心自然语言毫秒直通车 ---
+    if ([cleanCmd containsString:@"恢复真实定位"] || [cleanCmd containsString:@"关闭虚拟定位"] ||
+        [cleanCmd containsString:@"还原定位"] || [cleanCmd containsString:@"取消虚拟定位"] ||
+        [cleanCmd containsString:@"恢复定位"]) {
+        [[AGLocationSpoofManager sharedSpoofer] stopAndResetToRealLocation];
+        [self showActionBanner:@"🛰️ 已恢复真实硬件 GPS 定位"];
+        return YES;
+    }
+
+    if ([cleanCmd containsString:@"打开虚拟定位设置"] || [cleanCmd containsString:@"定位设置中心"] || [cleanCmd containsString:@"反检测中心"]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AGLocationSpoofSettingsViewController *vc = [[AGLocationSpoofSettingsViewController alloc] init];
+            UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+            [self.overlayWindow.rootViewController presentViewController:nav animated:YES completion:nil];
+        });
+        return YES;
+    }
+
+    if ([cleanCmd containsString:@"考勤防检测"] || [cleanCmd containsString:@"打卡防检测"]) {
+        [[AGLocationSpoofManager sharedSpoofer] enableAttendanceStealthPreset];
+    }
+
+    NSRegularExpression *locPinRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:把)?(?:我的)?(?:虚拟)?(?:定位|位置)(?:修改|改|定|设|设置|瞬移|切换到|改到|定在|设在|去|到)([^\n，。！？,!?、]+)" options:0 error:nil];
+    NSTextCheckingResult *locMatch = [locPinRegex firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
+    if (locMatch && locMatch.numberOfRanges > 1) {
+        NSString *targetPlace = [[cleanCmd substringWithRange:[locMatch rangeAtIndex:1]] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSRange thenRange = [targetPlace rangeOfString:@"然后"];
+        if (thenRange.location != NSNotFound) {
+            targetPlace = [targetPlace substringToIndex:thenRange.location];
+        }
+        NSRange andRange = [targetPlace rangeOfString:@"并"];
+        if (andRange.location != NSNotFound) {
+            targetPlace = [targetPlace substringToIndex:andRange.location];
+        }
+        if (targetPlace.length >= 2) {
+            [self showActionBanner:[NSString stringWithFormat:@"📍 正在锁定虚拟定位：%@...", targetPlace]];
+            [[AGLocationSpoofManager sharedSpoofer] resolvePlaceAndPin:targetPlace completion:nil];
+            return YES;
+        }
+    }
+
     // 0A. 💬 微信未读消息检查与打开指定聊天窗
     if ([cleanCmd containsString:@"微信"] && ([cleanCmd containsString:@"未读"] || [cleanCmd containsString:@"谁给我发"] || [cleanCmd containsString:@"新消息"])) {
         [self executeActionDictionary:@{@"type": @"wechat_read_unread"}];
@@ -8354,6 +9745,45 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     [self.accumulatedReplyText setString:@""];
     [self.pendingSpeechChunk setString:@""];
     NSString *type = dict[@"type"];
+
+    if ([type isEqualToString:@"location_control"]) {
+        NSString *act = [dict[@"action"] ?: (dict[@"mode"] ?: @"pin") lowercaseString];
+        NSString *place = dict[@"place"] ?: (dict[@"destination"] ?: @"");
+        double lat = [dict[@"lat"] doubleValue];
+        double lng = [dict[@"lng"] ?: dict[@"lon"] doubleValue];
+        NSString *coordType = dict[@"coord_type"] ?: @"GCJ02";
+        double speed = [dict[@"speed"] doubleValue];
+
+        if ([act isEqualToString:@"reset"] || [act isEqualToString:@"stop"] || [act isEqualToString:@"real"]) {
+            [[AGLocationSpoofManager sharedSpoofer] stopAndResetToRealLocation];
+            [self showActionBanner:@"🛰️ 已恢复真实物理 GPS 定位"];
+        } else if ([act isEqualToString:@"stealth_on"]) {
+            [[AGLocationSpoofManager sharedSpoofer] enableAttendanceStealthPreset];
+            [self showActionBanner:@"🛡️ 已开启考勤防检测满配护盾"];
+        } else if ([act isEqualToString:@"open_panel"]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                AGLocationSpoofSettingsViewController *vc = [[AGLocationSpoofSettingsViewController alloc] init];
+                UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+                [self.overlayWindow.rootViewController presentViewController:nav animated:YES completion:nil];
+            });
+        } else if ([act isEqualToString:@"walk"] || [act isEqualToString:@"drive"]) {
+            double defaultSpd = [act isEqualToString:@"drive"] ? 12.0 : 1.4;
+            double finalSpd = (speed > 0.1) ? speed : defaultSpd;
+            [[AGLocationSpoofManager sharedSpoofer] startCruisingToPlace:place speed:finalSpd completion:^(BOOL ok, NSString *summary) {
+                if (ok) [self showActionBanner:summary];
+            }];
+        } else if (fabs(lat) > 0.001 && fabs(lng) > 0.001) {
+            [[AGLocationSpoofManager sharedSpoofer] pinLocationWithCoordinate:CLLocationCoordinate2DMake(lat, lng)
+                                                                  coordSystem:coordType
+                                                                    placeName:(place.length > 0 ? place : @"AI 指定坐标")];
+            [self showActionBanner:[NSString stringWithFormat:@"📍 虚拟定位已锁定：%@", place.length > 0 ? place : @"指定坐标"]];
+        } else if (place.length > 0) {
+            [[AGLocationSpoofManager sharedSpoofer] resolvePlaceAndPin:place completion:^(BOOL ok, NSString *summary) {
+                if (ok) [self showActionBanner:[NSString stringWithFormat:@"📍 %@", summary]];
+            }];
+        }
+        return;
+    }
 
     if ([type isEqualToString:@"open_app"]) {
         NSString *appName = dict[@"app"];
@@ -10942,7 +12372,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             @"20. 手机电量与空间自检：[ACTION:{\"type\":\"device_status\"}]\n"
             @"21. 地图导航与平台搜索：[ACTION:{\"type\":\"navigation\",\"destination\":\"地点\",\"app\":\"amap|baidu\"}] / [ACTION:{\"type\":\"search\",\"keyword\":\"词\",\"platform\":\"taobao|jd|douyin|bilibili|xhs|meituan|baidu\"}]\n"
             @"22. 电话/短信/锁屏/桌面：[ACTION:{\"type\":\"make_call\",\"target\":\"人名\"}] / [ACTION:{\"type\":\"send_sms\",\"target\":\"人名\",\"content\":\"内容\"}] / [ACTION:{\"type\":\"system_control\",\"action\":\"home|lock|respring\"}]\n"
-        @"23. 清理手机垃圾/释放内存：[ACTION:{\"type\":\"system_deep_clean\"}]",
+        @"23. 清理手机垃圾/释放内存：[ACTION:{\"type\":\"system_deep_clean\"}]\n"
+        @"24. 虚拟定位与反检测控制：[ACTION:{\"type\":\"location_control\",\"action\":\"pin|walk|drive|reset|stealth_on|open_panel\",\"place\":\"地点名称\",\"lat\":0,\"lng\":0,\"coord_type\":\"GCJ02\",\"speed\":1.4}]",
             promptFirstLine, [self currentVendorBrandName], exactModelID];
 
         if (self.isVideoChatActive || self.activeModeTab == AGConfigTabVideoAI) {
@@ -11416,6 +12847,16 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
 
 @implementation AngelGuardianSettingsViewController
 
+- (void)openLocationSpoofCenterTapped {
+    AGLocationSpoofSettingsViewController *locVC = [[AGLocationSpoofSettingsViewController alloc] init];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:locVC animated:YES];
+    } else {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:locVC];
+        [self presentViewController:nav animated:YES completion:nil];
+    }
+}
+
 - (UIWindow *)overlayWindow {
     return [GeminiAssistantManager sharedManager].overlayWindow;
 }
@@ -11526,6 +12967,37 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
     [topCard addSubview:self.webSearchEnableSwitch];
 
     y += 110.0;
+
+    // 📍 虚拟定位与反检测中心入口卡片
+    UIButton *locSpoofBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    locSpoofBtn.frame = CGRectMake(pad, y, cardW, 52.0);
+    locSpoofBtn.backgroundColor = [UIColor colorWithRed:0.12 green:0.16 blue:0.28 alpha:1.0];
+    locSpoofBtn.layer.cornerRadius = 14.0;
+    locSpoofBtn.layer.borderWidth = 1.0;
+    locSpoofBtn.layer.borderColor = [UIColor colorWithRed:0.25 green:0.60 blue:1.0 alpha:0.45].CGColor;
+    [locSpoofBtn addTarget:self action:@selector(openLocationSpoofCenterTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.scrollView addSubview:locSpoofBtn];
+
+    UILabel *locIconTitle = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, 200, 52)];
+    locIconTitle.text = @"📍 虚拟定位与反检测中心";
+    locIconTitle.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightBold];
+    locIconTitle.textColor = [UIColor whiteColor];
+    locIconTitle.userInteractionEnabled = NO;
+    [locSpoofBtn addSubview:locIconTitle];
+
+    NSDictionary *curLocPrefs = agReadOnlyPrefs();
+    BOOL curLocActive = [curLocPrefs[@"AG_LocSpoof_Active"] boolValue];
+    NSString *curLocDesc = curLocActive ? [NSString stringWithFormat:@"🟢 %@", curLocPrefs[@"AG_LocSpoof_Name"] ?: @"已开启"] : @"未开启";
+
+    UILabel *locStatusLabel = [[UILabel alloc] initWithFrame:CGRectMake(cardW - 170, 0, 140, 52)];
+    locStatusLabel.text = [NSString stringWithFormat:@"%@  ›", curLocDesc];
+    locStatusLabel.textAlignment = NSTextAlignmentRight;
+    locStatusLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightMedium];
+    locStatusLabel.textColor = curLocActive ? [UIColor colorWithRed:0.20 green:0.95 blue:0.55 alpha:1.0] : [UIColor colorWithWhite:0.6 alpha:1.0];
+    locStatusLabel.userInteractionEnabled = NO;
+    [locSpoofBtn addSubview:locStatusLabel];
+
+    y += 62.0;
 
     // 主题风格卡片
     UIView *themeCard = [[UIView alloc] initWithFrame:CGRectMake(pad, y, cardW, 118)];
@@ -14498,6 +15970,126 @@ static int my_TCCAccessPreflight(CFStringRef service, CFDictionaryRef options) {
     return 0;
 }
 
+// ==================== 虚拟定位与多维反检测迷彩 Hook 矩阵 ====================
+static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName) = NULL;
+static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        NSDictionary *p = agReadOnlyPrefs();
+        NSInteger wifiMode = p[@"AG_AntiDet_WiFiMode"] ? [p[@"AG_AntiDet_WiFiMode"] integerValue] : 1;
+        if (wifiMode == 1) {
+            return NULL; // 隐藏家庭/异地 Wi-Fi BSSID，伪装为蜂窝数据网络
+        } else if (wifiMode == 2) {
+            NSString *fakeSSID  = p[@"AG_AntiDet_FakeSSID"];
+            NSString *fakeBSSID = p[@"AG_AntiDet_FakeBSSID"];
+            if (fakeSSID.length > 0 || fakeBSSID.length > 0) {
+                NSDictionary *fakeDict = @{
+                    @"SSID": (fakeSSID.length > 0 ? fakeSSID : @"Office-5G"),
+                    @"BSSID": (fakeBSSID.length > 0 ? fakeBSSID : @"a4:50:46:2b:8c:10"),
+                    @"SSIDDATA": [(fakeSSID.length > 0 ? fakeSSID : @"Office-5G") dataUsingEncoding:NSUTF8StringEncoding]
+                };
+                return (__bridge_retained CFDictionaryRef)fakeDict;
+            }
+        }
+    }
+    return orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
+}
+
+%hook CLLocationSourceInformation
+
+- (BOOL)isSimulatedBySoftware {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        NSDictionary *p = agReadOnlyPrefs();
+        BOOL hideSim = (p[@"AG_AntiDet_HideSimFlag"] == nil) ? YES : [p[@"AG_AntiDet_HideSimFlag"] boolValue];
+        if (hideSim) return NO;
+    }
+    return %orig;
+}
+
+- (BOOL)isProducedByAccessory {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        NSDictionary *p = agReadOnlyPrefs();
+        BOOL hideSim = (p[@"AG_AntiDet_HideSimFlag"] == nil) ? YES : [p[@"AG_AntiDet_HideSimFlag"] boolValue];
+        if (hideSim) return NO;
+    }
+    return %orig;
+}
+
+%end
+
+%hook CLLocation
+
+- (CLLocationSourceInformation *)sourceInformation {
+    CLLocationSourceInformation *origInfo = %orig;
+    if (agIsCurrentProcessTargetedForLocSpoof() && origInfo) {
+        return origInfo;
+    }
+    return origInfo;
+}
+
+- (CLLocationCoordinate2D)coordinate {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        CLLocation *spoofed = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
+        if (fabs(spoofed.coordinate.latitude) > 0.001 || fabs(spoofed.coordinate.longitude) > 0.001) {
+            return spoofed.coordinate;
+        }
+    }
+    return %orig;
+}
+
+- (CLLocationAccuracy)horizontalAccuracy {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        CLLocation *spoofed = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
+        return spoofed.horizontalAccuracy;
+    }
+    return %orig;
+}
+
+- (CLLocationDistance)altitude {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        CLLocation *spoofed = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
+        return spoofed.altitude;
+    }
+    return %orig;
+}
+
+%end
+
+%hook CMMotionActivity
+
+- (BOOL)stationary {
+    if (agIsCurrentProcessTargetedForLocSpoof() && [AGLocationSpoofManager sharedSpoofer].isRouteMoving) {
+        NSDictionary *p = agReadOnlyPrefs();
+        if (p[@"AG_AntiDet_MotionSync"] == nil || [p[@"AG_AntiDet_MotionSync"] boolValue]) {
+            return NO;
+        }
+    }
+    return %orig;
+}
+
+- (BOOL)walking {
+    if (agIsCurrentProcessTargetedForLocSpoof() && [AGLocationSpoofManager sharedSpoofer].isRouteMoving) {
+        NSDictionary *p = agReadOnlyPrefs();
+        NSInteger profile = p[@"AG_LocSpoof_SpeedProfile"] ? [p[@"AG_LocSpoof_SpeedProfile"] integerValue] : 0;
+        if ((p[@"AG_AntiDet_MotionSync"] == nil || [p[@"AG_AntiDet_MotionSync"] boolValue]) && profile == 0) {
+            return YES;
+        }
+    }
+    return %orig;
+}
+
+- (BOOL)automotive {
+    if (agIsCurrentProcessTargetedForLocSpoof() && [AGLocationSpoofManager sharedSpoofer].isRouteMoving) {
+        NSDictionary *p = agReadOnlyPrefs();
+        NSInteger profile = p[@"AG_LocSpoof_SpeedProfile"] ? [p[@"AG_LocSpoof_SpeedProfile"] integerValue] : 0;
+        if ((p[@"AG_AntiDet_MotionSync"] == nil || [p[@"AG_AntiDet_MotionSync"] boolValue]) && profile == 3) {
+            return YES;
+        }
+    }
+    return %orig;
+}
+
+%end
+
 
 %ctor {
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -14505,6 +16097,9 @@ static int my_TCCAccessPreflight(CFStringRef service, CFDictionaryRef options) {
         initWeChatAngelGuardianService();
         return;
     }
+
+    [AGLocationSpoofManager sharedSpoofer];
+    MSHookFunction((void *)CNCopyCurrentNetworkInfo, (void *)hooked_CNCopyCurrentNetworkInfo, (void **)&orig_CNCopyCurrentNetworkInfo);
 
     void *tccHandle = dlopen("/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_NOW);
     if (tccHandle) {
