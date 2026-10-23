@@ -42,6 +42,40 @@
 #import <CoreMotion/CoreMotion.h>
 #import <SystemConfiguration/CaptiveNetwork.h>
 #import <NetworkExtension/NetworkExtension.h>
+#pragma pack(push, 4)
+typedef struct {
+    int suitability;                     // 0x00
+    struct {
+        double latitude;                 // 0x04
+        double longitude;                // 0x0C
+    } coordinate;
+    double horizontalAccuracy;           // 0x14
+    double altitude;                     // 0x1C
+    double verticalAccuracy;             // 0x24
+    double speed;                        // 0x2C
+    double speedAccuracy;                // 0x34
+    double course;                       // 0x3C
+    double courseAccuracy;               // 0x44
+    double timestamp;                    // 0x4C (CFAbsoluteTime)
+    int confidence;                      // 0x54
+    double lifespan;                     // 0x58
+    int type;                            // 0x60 (1 = 真实硬件 GPS，消除模拟源特征)
+    struct {
+        double latitude;                 // 0x64
+        double longitude;                // 0x6C
+    } rawCoordinate;
+    double rawCourse;                    // 0x74
+    int floor;                           // 0x7C
+    unsigned int integrity;              // 0x80
+    int referenceFrame;                  // 0x84
+    int rawReferenceFrame;               // 0x88
+    int signalEnvironmentType;           // 0x8C
+    double ellipsoidalAltitude;          // 0x90
+    BOOL fromSimulationController;       // 0x98
+    uint8_t _reservedPadding[32];        // 兼容 iOS 16/17 尾部扩展字节
+} AGCLDaemonLocation;
+#pragma pack(pop)
+
 
 extern char **environ;
 
@@ -16974,39 +17008,7 @@ static int my_TCCAccessPreflight(CFStringRef service, CFDictionaryRef options) {
 }
 
 // ==================== 1. 零侵入 CLLocation 底层 CLDaemonLocation 结构体定义 (4字节对齐, 兼容 iOS 15~17) ====================
-#pragma pack(push, 4)
-typedef struct {
-    int suitability;                     // 0x00
-    struct {
-        double latitude;                 // 0x04
-        double longitude;                // 0x0C
-    } coordinate;
-    double horizontalAccuracy;           // 0x14
-    double altitude;                     // 0x1C
-    double verticalAccuracy;             // 0x24
-    double speed;                        // 0x2C
-    double speedAccuracy;                // 0x34
-    double course;                       // 0x3C
-    double courseAccuracy;               // 0x44
-    double timestamp;                    // 0x4C (CFAbsoluteTime)
-    int confidence;                      // 0x54
-    double lifespan;                     // 0x58
-    int type;                            // 0x60 (1 = 真实硬件 GPS，消除模拟源特征)
-    struct {
-        double latitude;                 // 0x64
-        double longitude;                // 0x6C
-    } rawCoordinate;
-    double rawCourse;                    // 0x74
-    int floor;                           // 0x7C
-    unsigned int integrity;              // 0x80
-    int referenceFrame;                  // 0x84
-    int rawReferenceFrame;               // 0x88
-    int signalEnvironmentType;           // 0x8C
-    double ellipsoidalAltitude;          // 0x90
-    BOOL fromSimulationController;       // 0x98
-    uint8_t _reservedPadding[32];        // 兼容 iOS 16/17 尾部扩展字节
-} AGCLDaemonLocation;
-#pragma pack(pop)
+
 
 // 废除对第三方 App 自身类的 Runtime IMP 篡改，保留空函数以兼容旧调用点
 static void agHookLocationDelegateClassIfNeeded(id delegate) {
