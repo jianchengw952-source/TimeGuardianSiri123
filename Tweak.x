@@ -145,11 +145,21 @@ static NSString *agCameraStateName(AGCameraState st) {
     return @"UNKNOWN";
 }
 
+// 高速缓存判断当前是否为 SpringBoard 主桌面进程
+static inline BOOL agIsSpringBoardProcess(void) {
+    static BOOL sIsSB = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+        sIsSB = [bid isEqualToString:@"com.apple.springboard"];
+    });
+    return sIsSB;
+}
+
 typedef int (*TCCAccessSetForBundleIdFunc)(CFStringRef service, CFStringRef bundleId, Boolean allowed);
 static void ensureSpringBoardTCCGranted(void) {
-    // 铁律：严禁在 com.apple.Preferences（系统设置）或第三方 App 进程中执行 SpringBoard TCC 授权改写，否则 tccd 会立即 SIGKILL 重启 SpringBoard！
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (![bundleID isEqualToString:@"com.apple.springboard"]) {
+    // 铁律：严禁在 com.apple.Preferences 或第三方 App 进程中执行 TCC 授权改写，防止触发沙盒拦截与 tccd 崩溃
+    if (!agIsSpringBoardProcess()) {
         return;
     }
     static dispatch_once_t onceToken;
@@ -1113,34 +1123,100 @@ static CLLocationCoordinate2D agBD09ToWGS84Exact(double bdLat, double bdLon) {
 
 static BOOL agIsCurrentProcessTargetedForLocSpoof(void) {
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!bundleID ||
-        [bundleID isEqualToString:@"com.apple.springboard"] ||
+    if (!bundleID || bundleID.length == 0) return NO;
+
+    // 1. 强制排除主桌面、系统设置、WebKit 网络进程以及所有 VPN/代理工具与网络扩展进程（彻底根除代理断网）
+    NSString *lowerBID = [bundleID lowercaseString];
+    if ([bundleID isEqualToString:@"com.apple.springboard"] ||
         [bundleID isEqualToString:@"com.apple.Preferences"] ||
         [bundleID hasPrefix:@"com.apple.WebKit"] ||
-        [bundleID hasPrefix:@"com.apple.locationd"]) {
+        [bundleID hasPrefix:@"com.apple.locationd"] ||
+        [lowerBID containsString:@"tunnel"] ||
+        [lowerBID containsString:@"networkextension"] ||
+        [lowerBID containsString:@"shadowrocket"] ||
+        [lowerBID containsString:@"quantumult"] ||
+        [lowerBID containsString:@"surge"] ||
+        [lowerBID containsString:@"clash"] ||
+        [lowerBID containsString:@"stash"] ||
+        [lowerBID containsString:@"loon"] ||
+        [lowerBID containsString:@"singbox"] ||
+        [lowerBID containsString:@"v2ray"] ||
+        [lowerBID containsString:@"vpn"]) {
         return NO;
     }
+
+    // 2. 对于 com.apple.* 系统进程，仅放行用户可见的地图/天气/相机/查找，其余系统底层网络守护进程一律不拦截
+    BOOL isAppleSystemDaemon = ([bundleID hasPrefix:@"com.apple."] &&
+                                ![bundleID isEqualToString:@"com.apple.Maps"] &&
+                                ![bundleID isEqualToString:@"com.apple.weather"] &&
+                                ![bundleID isEqualToString:@"com.apple.camera"] &&
+                                ![bundleID isEqualToString:@"com.apple.findmy"]);
 
     BOOL kActive = NO, kMatch = NO;
     NSInteger kScope = 0;
     if (agReadSpoofStateFromKernel(&kActive, &kScope, NULL, NULL, NULL, NULL, NULL, NULL, &kMatch)) {
         if (!kActive) return NO;
-        if (kScope == 0) return YES;
+        if (kScope == 0) return !isAppleSystemDaemon;
         NSDictionary *p = agReadOnlyPrefs();
         NSArray *targetApps = [p[@"AG_LocSpoof_TargetApps"] isKindOfClass:[NSArray class]] ? p[@"AG_LocSpoof_TargetApps"] : @[];
         BOOL inList = kMatch || [targetApps containsObject:bundleID];
-        return (kScope == 1) ? inList : !inList;
+        if (kScope == 1) return inList;
+        return (!inList && !isAppleSystemDaemon);
     }
 
     NSDictionary *p = agReadOnlyPrefs();
     if (![p[@"AG_LocSpoof_Active"] boolValue]) return NO;
 
     NSInteger scopeMode = p[@"AG_LocSpoof_ScopeMode"] ? [p[@"AG_LocSpoof_ScopeMode"] integerValue] : 0;
-    if (scopeMode == 0) return YES;
+    if (scopeMode == 0) return !isAppleSystemDaemon;
 
     NSArray *targetApps = [p[@"AG_LocSpoof_TargetApps"] isKindOfClass:[NSArray class]] ? p[@"AG_LocSpoof_TargetApps"] : @[];
     BOOL isInList = [targetApps containsObject:bundleID];
-    return (scopeMode == 1) ? isInList : !isInList;
+    return (scopeMode == 1) ? isInList : (!isInList && !isAppleSystemDaemon);
+}
+
+// 为 WiFiMode == 1 (防真实Wi-Fi穿帮) 自动根据当前虚拟坐标派生稳定的高仿真路由器 SSID 与 BSSID，避免返回 NULL 导致部分软件误判无网
+static BOOL agResolveSpoofedWiFiInfo(NSString **outSSID, NSString **outBSSID) {
+    if (!agIsCurrentProcessTargetedForLocSpoof()) return NO;
+    NSDictionary *p = agReadOnlyPrefs();
+    NSInteger wifiMode = 1;
+    double lat = 0.0, lon = 0.0;
+    BOOL shieldOn = YES;
+    if (!agReadSpoofStateFromKernel(NULL, NULL, &shieldOn, &wifiMode, &lat, &lon, NULL, NULL, NULL)) {
+        shieldOn = (p[@"AG_AntiDet_ShieldEnabled"] == nil) ? YES : [p[@"AG_AntiDet_ShieldEnabled"] boolValue];
+        wifiMode = p[@"AG_AntiDet_WiFiMode"] ? [p[@"AG_AntiDet_WiFiMode"] integerValue] : (shieldOn ? 1 : 0);
+        lat = [p[@"AG_LocSpoof_Lat"] doubleValue];
+        lon = [p[@"AG_LocSpoof_Lon"] doubleValue];
+    }
+    if (wifiMode == 0 && !shieldOn) return NO;
+
+    if (wifiMode == 2) {
+        NSString *customSSID  = [p[@"AG_AntiDet_FakeSSID"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSString *customBSSID = [p[@"AG_AntiDet_FakeBSSID"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (customSSID.length > 0 && customBSSID.length > 0) {
+            if (outSSID)  *outSSID  = customSSID;
+            if (outBSSID) *outBSSID = [customBSSID lowercaseString];
+            return YES;
+        }
+    }
+
+    // WiFiMode == 1：根据虚拟经纬度网格派生固定的仿真办公/商用路由器特征（既隐藏真实家庭Wi-Fi，又保证App检测到正常Wi-Fi连接）
+    uint32_t latGrid = (uint32_t)fabs(round(lat * 1000.0));
+    uint32_t lonGrid = (uint32_t)fabs(round(lon * 1000.0));
+    uint32_t seed = (latGrid * 73856093u) ^ (lonGrid * 19349663u) ^ 0x5A3C9E17u;
+    NSArray<NSString *> *prefixes = @[@"ChinaNet-5G", @"TP-LINK_5G", @"CMCC-Office", @"Xiaomi_5G", @"HUAWEI-5G"];
+    NSString *prefix = prefixes[seed % prefixes.count];
+    if (outSSID) {
+        *outSSID = [NSString stringWithFormat:@"%@-%04X", prefix, (unsigned int)(seed & 0xFFFF)];
+    }
+    if (outBSSID) {
+        // 使用常见路由器厂商合法 OUI (TP-Link a4:2b:b0) + 坐标哈希后缀
+        *outBSSID = [NSString stringWithFormat:@"a4:2b:b0:%02x:%02x:%02x",
+                     (unsigned int)((seed >> 16) & 0xFF),
+                     (unsigned int)((seed >> 8) & 0xFF),
+                     (unsigned int)(seed & 0xFF)];
+    }
+    return YES;
 }
 
 static const void * const kAGHardwareCleanLocationKey = &kAGHardwareCleanLocationKey;
@@ -17228,12 +17304,12 @@ static void initInSituGlobalTouchMonitor(void) {
 
 static int (*orig_TCCAccessPreflight)(CFStringRef service, CFDictionaryRef options) = NULL;
 static int my_TCCAccessPreflight(CFStringRef service, CFDictionaryRef options) {
-    if (service) {
+    if (agIsSpringBoardProcess() && service) {
         if (CFEqual(service, CFSTR("kTCCServiceCamera")) ||
             CFEqual(service, CFSTR("kTCCServiceMicrophone")) ||
             CFEqual(service, CFSTR("kTCCServiceAddressBook")) ||
             CFEqual(service, CFSTR("kTCCServiceSpeechRecognition"))) {
-            return 0; // kTCCAccessPreflightGranted
+            return 0; // 仅在 SpringBoard 内免弹窗放行
         }
     }
     if (orig_TCCAccessPreflight) {
@@ -17333,55 +17409,15 @@ static int hooked_lstat(const char *path, struct stat *buf) {
 
 // ==================== 3. 双通道一致性虚拟 Wi-Fi 护盾 ====================
 static NSDictionary *agBuildConsistentVirtualWiFiDict(void) {
-    BOOL kActive = NO, kShield = YES;
-    NSInteger wifiMode = 1;
-    double lat = 0.0, lon = 0.0;
-    if (!agReadSpoofStateFromKernel(&kActive, NULL, &kShield, &wifiMode, &lat, &lon, NULL, NULL, NULL)) {
-        NSDictionary *p = agReadOnlyPrefs();
-        wifiMode = p[@"AG_AntiDet_WiFiMode"] ? [p[@"AG_AntiDet_WiFiMode"] integerValue] : 1;
-        lat = [p[@"AG_LocSpoof_Lat"] doubleValue];
-        lon = [p[@"AG_LocSpoof_Lon"] doubleValue];
+    NSString *fakeSSID = nil;
+    NSString *fakeBSSID = nil;
+    if (!agResolveSpoofedWiFiInfo(&fakeSSID, &fakeBSSID)) {
+        return nil;
     }
-    if (wifiMode == 0) return nil;
-
-    NSDictionary *p = agReadOnlyPrefs();
-    NSString *ssid = nil;
-    NSString *bssid = nil;
-
-    if (wifiMode == 2) {
-        ssid = [p[@"AG_AntiDet_FakeSSID"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        bssid = [[p[@"AG_AntiDet_FakeBSSID"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
-    }
-
-    int32_t gridLat = (int32_t)llround(lat * 200.0);
-    int32_t gridLon = (int32_t)llround(lon * 200.0);
-    uint32_t seed = (uint32_t)(gridLat * 73856093u) ^ (uint32_t)(gridLon * 19349663u) ^ 0x5A3C9E71u;
-
-    if (!ssid || ssid.length == 0) {
-        NSArray<NSString *> *enterpriseSSIDs = @[
-            @"ChinaNet-Office-5G",
-            @"HUAWEI-Enterprise-5G",
-            @"TP-LINK_Business_5G",
-            @"CMCC-GovNet-5G",
-            @"Ruijie-Work-5G",
-            @"Aruba-Corp-WiFi"
-        ];
-        ssid = enterpriseSSIDs[seed % enterpriseSSIDs.count];
-    }
-
-    if (!bssid || bssid.length < 11) {
-        NSArray<NSString *> *validOUIs = @[@"48:8e:ef", @"38:91:d5", @"58:69:6c", @"ec:6c:9f", @"00:24:6c"];
-        NSString *oui = validOUIs[(seed >> 4) % validOUIs.count];
-        uint8_t b3 = (uint8_t)((seed >> 8) & 0xFE);
-        uint8_t b4 = (uint8_t)((seed >> 16) & 0xFF);
-        uint8_t b5 = (uint8_t)(((seed >> 24) & 0xFD) | 0x02);
-        bssid = [NSString stringWithFormat:@"%@:%02x:%02x:%02x", oui, b3, b4, b5];
-    }
-
-    NSData *ssidData = [ssid dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+    NSData *ssidData = [fakeSSID dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
     return @{
-        @"SSID": ssid,
-        @"BSSID": bssid,
+        @"SSID": fakeSSID,
+        @"BSSID": fakeBSSID,
         @"SSIDDATA": ssidData
     };
 }
@@ -18000,32 +18036,63 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 %hook NSBundle
 - (NSDictionary *)infoDictionary {
     NSDictionary *orig = %orig;
-    if (self == [NSBundle mainBundle]) {
-        NSMutableDictionary *dict = orig ? [orig mutableCopy] : [NSMutableDictionary dictionary];
-        dict[@"NSCameraUsageDescription"] = @"天使守护需要使用相机进行独立实景视频 AI 对话";
-        dict[@"NSMicrophoneUsageDescription"] = @"天使守护需要使用麦克风进行实时语音对话";
-        dict[@"NSSpeechRecognitionUsageDescription"] = @"天使守护需要使用语音识别实现原厂级打断检测";
-        return dict;
+    // 关键修复：仅在 SpringBoard 桌面进程内注入权限说明！严禁篡改第三方 App 的 infoDictionary 导致大厂安全网关拒签断网！
+    if (agIsSpringBoardProcess() && self == [NSBundle mainBundle]) {
+        NSMutableDictionary *mutableInfo = orig ? [orig mutableCopy] : [NSMutableDictionary dictionary];
+        mutableInfo[@"NSMicrophoneUsageDescription"] = @"天使守护需要使用麦克风进行实时语音对讲";
+        mutableInfo[@"NSCameraUsageDescription"] = @"天使守护需要使用相机进行独立实景视频 AI 对话";
+        mutableInfo[@"NSContactsUsageDescription"] = @"天使守护需要访问通讯录为您拨打电话与发送短信";
+        return mutableInfo;
     }
     return orig;
+}
+
+- (id)objectForInfoDictionaryKey:(NSString *)key {
+    if (agIsSpringBoardProcess() && self == [NSBundle mainBundle]) {
+        if ([key isEqualToString:@"NSCameraUsageDescription"]) {
+            return @"天使守护需要使用相机进行独立实景视频 AI 对话";
+        }
+        if ([key isEqualToString:@"NSMicrophoneUsageDescription"]) {
+            return @"天使守护需要使用麦克风进行实时语音对讲";
+        }
+        if ([key isEqualToString:@"NSContactsUsageDescription"]) {
+            return @"天使守护需要访问通讯录为您拨打电话与发送短信";
+        }
+    }
+    return %orig(key);
 }
 %end
 
 %hook AVCaptureDevice
 + (AVAuthorizationStatus)authorizationStatusForMediaType:(AVMediaType)mediaType {
-    return AVAuthorizationStatusAuthorized;
+    if (agIsSpringBoardProcess() && ([mediaType isEqualToString:AVMediaTypeVideo] || [mediaType isEqualToString:AVMediaTypeAudio])) {
+        return AVAuthorizationStatusAuthorized;
+    }
+    return %orig(mediaType);
 }
+
 + (void)requestAccessForMediaType:(AVMediaType)mediaType completionHandler:(void (^)(BOOL granted))handler {
-    if (handler) handler(YES);
+    if (agIsSpringBoardProcess() && ([mediaType isEqualToString:AVMediaTypeVideo] || [mediaType isEqualToString:AVMediaTypeAudio])) {
+        if (handler) handler(YES);
+        return;
+    }
+    %orig(mediaType, handler);
 }
 %end
 
 %hook SFSpeechRecognizer
 + (SFSpeechRecognizerAuthorizationStatus)authorizationStatus {
-    return SFSpeechRecognizerAuthorizationStatusAuthorized;
+    if (agIsSpringBoardProcess()) {
+        return SFSpeechRecognizerAuthorizationStatusAuthorized;
+    }
+    return %orig;
 }
 + (void)requestAuthorization:(void (^)(SFSpeechRecognizerAuthorizationStatus status))handler {
-    if (handler) handler(SFSpeechRecognizerAuthorizationStatusAuthorized);
+    if (agIsSpringBoardProcess()) {
+        if (handler) handler(SFSpeechRecognizerAuthorizationStatusAuthorized);
+        return;
+    }
+    %orig(handler);
 }
 %end
 
@@ -18059,6 +18126,7 @@ static int hooked_ag_dladdr(const void *addr, Dl_info *info) {
 }
 
 static void agInstallDladdrStealthHookIfNeeded(void) {
+    if (agIsSpringBoardProcess()) return;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         Dl_info selfInfo;
