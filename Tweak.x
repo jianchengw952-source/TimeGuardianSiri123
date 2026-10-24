@@ -3260,7 +3260,8 @@ static BOOL isDeviceCurrentlyLocked(void) {
 typedef NS_ENUM(NSInteger, AGVisualTheme) {
     AGVisualThemeLightLuxury = 0, // 1. 轻奢 (高定黑金琉璃)
     AGVisualThemeMinimalist  = 1, // 2. 简约 (超折射液态玻璃)
-    AGVisualThemeCyberCool   = 2  // 3. 炫酷 (全息流光液态玻璃)
+    AGVisualThemeCyberCool   = 2, // 3. 炫酷 (全息流光液态玻璃)
+    AGVisualThemeSakura      = 3  // 4. 樱花 (粉晶琉璃液态玻璃)
 };
 
 typedef NS_ENUM(NSInteger, AGVectorIconType) {
@@ -3447,7 +3448,7 @@ static AGVisualTheme agCurrentVisualTheme(void) {
     NSNumber *val = gCachedPrefs[@"AG_Visual_Theme"];
     if (!val) return AGVisualThemeCyberCool;
     NSInteger idx = [val integerValue];
-    if (idx < 0 || idx > 2) return AGVisualThemeCyberCool;
+    if (idx < 0 || idx > 3) return AGVisualThemeCyberCool;
     return (AGVisualTheme)idx;
 }
 
@@ -3690,6 +3691,22 @@ static void agDrawRadialGradient(CGContextRef ctx, CGPoint startCenter, CGFloat 
             podFillBot   = [UIColor colorWithRed:0.10 green:0.16 blue:0.36 alpha:0.48];
             podStrokeCol = [UIColor colorWithWhite:1.0 alpha:0.68];
             edgeGlowCol  = [UIColor colorWithRed:0.48 green:0.82 blue:1.00 alpha:0.28];
+        } else if (theme == AGVisualThemeSakura) {
+            // 4. 樱花：50% 液态粉晶琉璃镜面玻璃底
+            baseCols = @[(id)[UIColor colorWithRed:0.20 green:0.09 blue:0.16 alpha:glassAlpha * 0.94].CGColor,
+                         (id)[UIColor colorWithRed:0.11 green:0.05 blue:0.10 alpha:glassAlpha * 1.04].CGColor,
+                         (id)[UIColor colorWithRed:0.22 green:0.10 blue:0.18 alpha:glassAlpha * 0.98].CGColor];
+            rimGradCols = @[(id)[UIColor whiteColor].CGColor,
+                            (id)[UIColor colorWithRed:1.00 green:0.78 blue:0.88 alpha:0.98].CGColor,
+                            (id)[UIColor colorWithRed:0.96 green:0.56 blue:0.76 alpha:0.84].CGColor,
+                            (id)[UIColor colorWithRed:1.00 green:0.86 blue:0.92 alpha:0.95].CGColor,
+                            (id)[UIColor whiteColor].CGColor];
+            grooveColor  = [UIColor colorWithRed:0.08 green:0.03 blue:0.06 alpha:0.65];
+            innerWireCol = [UIColor colorWithRed:1.00 green:0.90 blue:0.95 alpha:0.78];
+            podFillTop   = [UIColor colorWithRed:0.48 green:0.22 blue:0.35 alpha:0.34];
+            podFillBot   = [UIColor colorWithRed:0.16 green:0.07 blue:0.13 alpha:0.54];
+            podStrokeCol = [UIColor colorWithRed:1.00 green:0.82 blue:0.90 alpha:0.70];
+            edgeGlowCol  = [UIColor colorWithRed:1.00 green:0.68 blue:0.84 alpha:0.30];
         } else {
             // 3. 炫酷：50% 液态全息深空镜面玻璃底
             baseCols = @[(id)[UIColor colorWithRed:0.06 green:0.10 blue:0.26 alpha:glassAlpha * 0.95].CGColor,
@@ -3831,6 +3848,12 @@ static void agDrawRadialGradient(CGContextRef ctx, CGPoint startCenter, CGFloat 
         _blob2.colors = @[(__bridge id)[UIColor colorWithRed:0.68 green:0.42 blue:0.98 alpha:0.22].CGColor, (__bridge id)[UIColor clearColor].CGColor];
         _blob3.colors = @[(__bridge id)[UIColor colorWithRed:0.56 green:0.85 blue:1.00 alpha:0.20].CGColor, (__bridge id)[UIColor clearColor].CGColor];
         NSArray *hsCols = @[(__bridge id)[UIColor whiteColor].CGColor, (__bridge id)[UIColor colorWithRed:0.56 green:0.85 blue:1.00 alpha:0.82].CGColor, (__bridge id)[UIColor clearColor].CGColor];
+        _hotspotTL.colors = hsCols; _hotspotBR.colors = hsCols;
+    } else if (theme == AGVisualThemeSakura) {
+        _blob1.colors = @[(__bridge id)[UIColor colorWithRed:1.00 green:0.72 blue:0.85 alpha:0.25].CGColor, (__bridge id)[UIColor clearColor].CGColor];
+        _blob2.colors = @[(__bridge id)[UIColor colorWithRed:0.98 green:0.52 blue:0.74 alpha:0.22].CGColor, (__bridge id)[UIColor clearColor].CGColor];
+        _blob3.colors = @[(__bridge id)[UIColor colorWithRed:0.88 green:0.62 blue:0.94 alpha:0.20].CGColor, (__bridge id)[UIColor clearColor].CGColor];
+        NSArray *hsCols = @[(__bridge id)[UIColor whiteColor].CGColor, (__bridge id)[UIColor colorWithRed:1.00 green:0.78 blue:0.88 alpha:0.85].CGColor, (__bridge id)[UIColor clearColor].CGColor];
         _hotspotTL.colors = hsCols; _hotspotBR.colors = hsCols;
     } else {
         _blob1.colors = @[(__bridge id)[UIColor colorWithRed:0.00 green:0.96 blue:1.00 alpha:0.26].CGColor, (__bridge id)[UIColor clearColor].CGColor];
@@ -3993,6 +4016,19 @@ static void agDrawRadialGradient(CGContextRef ctx, CGPoint startCenter, CGFloat 
         _subBlob2.colors = @[(__bridge id)[UIColor colorWithRed:0.56 green:0.85 blue:1.00 alpha:0.75].CGColor, (__bridge id)[UIColor clearColor].CGColor];
         _outerRing.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.95].CGColor;
         _innerRing.strokeColor = [UIColor colorWithRed:0.73 green:0.90 blue:1.00 alpha:0.78].CGColor;
+    } else if (theme == AGVisualThemeSakura) {
+        _coreGrad.colors = @[
+            (__bridge id)[UIColor whiteColor].CGColor,
+            (__bridge id)[UIColor colorWithRed:1.00 green:0.84 blue:0.91 alpha:0.98].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.96 green:0.52 blue:0.74 alpha:0.94].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.68 green:0.28 blue:0.54 alpha:0.92].CGColor
+        ];
+        _subBlob1.hidden = NO;
+        _subBlob1.colors = @[(__bridge id)[UIColor colorWithWhite:1.0 alpha:0.88].CGColor, (__bridge id)[UIColor clearColor].CGColor];
+        _subBlob2.hidden = NO;
+        _subBlob2.colors = @[(__bridge id)[UIColor colorWithRed:1.00 green:0.76 blue:0.88 alpha:0.80].CGColor, (__bridge id)[UIColor clearColor].CGColor];
+        _outerRing.strokeColor = [UIColor colorWithRed:1.00 green:0.94 blue:0.97 alpha:0.95].CGColor;
+        _innerRing.strokeColor = [UIColor colorWithRed:1.00 green:0.76 blue:0.88 alpha:0.82].CGColor;
     } else {
         _coreGrad.colors = @[
             (__bridge id)[UIColor whiteColor].CGColor,
@@ -4120,6 +4156,23 @@ static void agDrawRadialGradient(CGContextRef ctx, CGPoint startCenter, CGFloat 
         _fill2.fillColor     = [UIColor colorWithRed:0.78 green:0.36 blue:0.96 alpha:0.18].CGColor;
 
         _stroke3.hidden = YES; _glow3.hidden = YES; _fill3.hidden = YES;
+    } else if (theme == AGVisualThemeSakura) {
+        _bottomHorizonGlow.colors = @[
+            (__bridge id)[UIColor clearColor].CGColor,
+            (__bridge id)[UIColor colorWithRed:1.00 green:0.68 blue:0.84 alpha:0.26].CGColor
+        ];
+        _stroke1.strokeColor = [UIColor colorWithRed:1.00 green:0.93 blue:0.96 alpha:1.0].CGColor;
+        _glow1.strokeColor   = [UIColor colorWithRed:1.00 green:0.74 blue:0.86 alpha:0.38].CGColor;
+        _fill1.fillColor     = [UIColor colorWithRed:1.00 green:0.76 blue:0.88 alpha:0.24].CGColor;
+
+        _stroke2.strokeColor = [UIColor colorWithRed:1.00 green:0.56 blue:0.76 alpha:0.98].CGColor;
+        _glow2.strokeColor   = [UIColor colorWithRed:0.98 green:0.46 blue:0.70 alpha:0.32].CGColor;
+        _fill2.fillColor     = [UIColor colorWithRed:0.96 green:0.48 blue:0.72 alpha:0.19].CGColor;
+
+        _stroke3.hidden = NO; _glow3.hidden = NO; _fill3.hidden = NO;
+        _stroke3.strokeColor = [UIColor colorWithRed:0.88 green:0.64 blue:0.96 alpha:0.92].CGColor;
+        _glow3.strokeColor   = [UIColor colorWithRed:0.84 green:0.54 blue:0.94 alpha:0.26].CGColor;
+        _fill3.fillColor     = [UIColor colorWithRed:0.84 green:0.54 blue:0.94 alpha:0.15].CGColor;
     } else {
         _bottomHorizonGlow.colors = @[
             (__bridge id)[UIColor clearColor].CGColor,
@@ -4257,6 +4310,26 @@ static UIImage *agRenderCompleteCircleButtonImage(AGVectorIconType iconType, CGF
                 iconColor = [UIColor whiteColor];
                 outerRimColor = [UIColor colorWithWhite:1.0 alpha:0.90];
                 innerRimColor = [UIColor colorWithRed:0.73 green:0.90 blue:1.00 alpha:0.52];
+            }
+        } else if (theme == AGVisualThemeSakura) {
+            if (isActive) {
+                CGFloat locs[3] = {0.0, 0.52, 1.0};
+                agDrawRadialGradient(ctx, CGPointMake(diameter * 0.5, diameter * 0.22), 1.0, CGPointMake(diameter * 0.5, diameter * 0.52), diameter * 0.62,
+                                     @[[UIColor whiteColor],
+                                       [UIColor colorWithRed:1.00 green:0.78 blue:0.88 alpha:0.95],
+                                       [UIColor colorWithRed:0.90 green:0.44 blue:0.66 alpha:0.98]], locs);
+                iconColor = [UIColor colorWithRed:0.24 green:0.06 blue:0.14 alpha:1.0];
+                outerRimColor = [UIColor whiteColor];
+                innerRimColor = [UIColor colorWithRed:1.00 green:0.92 blue:0.96 alpha:0.92];
+            } else {
+                CGFloat locs[3] = {0.0, 0.58, 1.0};
+                agDrawRadialGradient(ctx, CGPointMake(diameter * 0.45, diameter * 0.22), 1.0, CGPointMake(diameter * 0.5, diameter * 0.5), diameter * 0.68,
+                                     @[[UIColor colorWithRed:0.62 green:0.32 blue:0.48 alpha:0.66],
+                                       [UIColor colorWithRed:0.14 green:0.06 blue:0.11 alpha:0.85],
+                                       [UIColor colorWithRed:0.38 green:0.16 blue:0.28 alpha:0.88]], locs);
+                iconColor = [UIColor colorWithRed:1.00 green:0.94 blue:0.97 alpha:0.98];
+                outerRimColor = [UIColor colorWithRed:1.00 green:0.82 blue:0.90 alpha:0.90];
+                innerRimColor = [UIColor colorWithWhite:1.0 alpha:0.42];
             }
         } else {
             if (isActive) {
@@ -6713,6 +6786,25 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         self.inputField.layer.borderColor = [UIColor colorWithRed:0.82 green:0.94 blue:1.00 alpha:0.76].CGColor;
         self.modelPickerContainer.backgroundColor = [UIColor colorWithRed:0.07 green:0.12 blue:0.28 alpha:0.92];
         self.modelPickerContainer.layer.borderColor = [UIColor colorWithRed:0.78 green:0.92 blue:1.00 alpha:0.76].CGColor;
+    } else if (theme == AGVisualThemeSakura) {
+        // 4. 樱花：深玫瑰粉晶对话舱 + 初绽樱花粉高光边
+        self.overlayWindow.capsuleWrapper.layer.shadowColor = [UIColor colorWithRed:1.00 green:0.68 blue:0.84 alpha:1.0].CGColor;
+        self.cardBlurView.contentView.backgroundColor = [UIColor clearColor];
+        self.titleGradientLayer.colors = @[
+            (__bridge id)[UIColor whiteColor].CGColor,
+            (__bridge id)[UIColor colorWithRed:1.00 green:0.84 blue:0.92 alpha:1.0].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.98 green:0.62 blue:0.80 alpha:1.0].CGColor
+        ];
+        self.modeBadgeLabel.textColor = [UIColor colorWithRed:1.00 green:0.95 blue:0.98 alpha:1.0];
+        self.modeBadgeLabel.backgroundColor = [UIColor colorWithRed:0.36 green:0.15 blue:0.26 alpha:0.68];
+        self.modeBadgeLabel.layer.borderColor = [UIColor colorWithRed:1.00 green:0.82 blue:0.90 alpha:0.88].CGColor;
+        self.innerGlassBox.backgroundColor = [UIColor colorWithRed:0.09 green:0.04 blue:0.08 alpha:boxAlpha];
+        self.innerGlassBox.layer.borderColor = [UIColor colorWithRed:1.00 green:0.78 blue:0.88 alpha:0.72].CGColor;
+        self.subStatusLabel.textColor = [UIColor colorWithRed:1.00 green:0.86 blue:0.93 alpha:1.0];
+        self.inputField.backgroundColor = [UIColor colorWithRed:0.11 green:0.05 blue:0.09 alpha:0.72];
+        self.inputField.layer.borderColor = [UIColor colorWithRed:1.00 green:0.80 blue:0.90 alpha:0.76].CGColor;
+        self.modelPickerContainer.backgroundColor = [UIColor colorWithRed:0.12 green:0.05 blue:0.10 alpha:0.94];
+        self.modelPickerContainer.layer.borderColor = [UIColor colorWithRed:1.00 green:0.78 blue:0.88 alpha:0.76].CGColor;
     } else {
         // 3. 炫酷：深空黑晶对话舱 + 电光青紫霓虹边
         self.overlayWindow.capsuleWrapper.layer.shadowColor = [UIColor colorWithRed:0.00 green:0.92 blue:1.00 alpha:1.0].CGColor;
@@ -6821,6 +6913,31 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         flareColors = @[
             (__bridge id)[UIColor whiteColor].CGColor,
             (__bridge id)[UIColor colorWithRed:0.38 green:0.86 blue:1.00 alpha:0.95].CGColor,
+            (__bridge id)[UIColor clearColor].CGColor
+        ];
+    } else if (theme == AGVisualThemeSakura) {
+        // 4. 樱花：初绽樱花粉 + 蜜桃玫瑰 + 冰晶粉白 + 微醺浅紫环绕流光 (首尾闭合防接缝)
+        coreColors = @[
+            (__bridge id)[UIColor colorWithRed:1.00 green:0.82 blue:0.90 alpha:1.0].CGColor,
+            (__bridge id)[UIColor colorWithRed:1.00 green:0.58 blue:0.76 alpha:1.0].CGColor,
+            (__bridge id)[UIColor colorWithRed:1.00 green:0.95 blue:0.98 alpha:1.0].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.88 green:0.56 blue:0.92 alpha:0.98].CGColor,
+            (__bridge id)[UIColor colorWithRed:1.00 green:0.74 blue:0.86 alpha:1.0].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.96 green:0.48 blue:0.72 alpha:0.98].CGColor,
+            (__bridge id)[UIColor colorWithRed:1.00 green:0.82 blue:0.90 alpha:1.0].CGColor
+        ];
+        featherColors = coreColors;
+        bloomColors = @[
+            (__bridge id)[UIColor colorWithRed:1.00 green:0.76 blue:0.88 alpha:0.92].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.96 green:0.52 blue:0.74 alpha:0.86].CGColor,
+            (__bridge id)[UIColor colorWithRed:1.00 green:0.92 blue:0.96 alpha:0.92].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.88 green:0.58 blue:0.92 alpha:0.84].CGColor,
+            (__bridge id)[UIColor colorWithRed:1.00 green:0.76 blue:0.88 alpha:0.92].CGColor
+        ];
+        flareColors = @[
+            (__bridge id)[UIColor whiteColor].CGColor,
+            (__bridge id)[UIColor colorWithRed:1.00 green:0.78 blue:0.88 alpha:0.96].CGColor,
+            (__bridge id)[UIColor colorWithRed:0.98 green:0.54 blue:0.76 alpha:0.85].CGColor,
             (__bridge id)[UIColor clearColor].CGColor
         ];
     } else {
@@ -14223,8 +14340,8 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
     tStatus.font = [UIFont boldSystemFontOfSize:11.0];
     [themeCard addSubview:tStatus];
 
-    NSArray *titles = @[@"1. 轻奢", @"2. 简约", @"3. 炫酷"];
-    NSArray *subs   = @[@"高定黑金琉璃", @"超折射液态玻璃", @"全息量子液态玻璃"];
+    NSArray *titles = @[@"1. 轻奢", @"2. 简约", @"3. 炫酷", @"4. 樱花"];
+    NSArray *subs   = @[@"高定黑金琉璃", @"超折射液态玻璃", @"全息量子液态玻璃", @"粉晶琉璃液态玻璃"];
     NSArray *swatchColors = @[
         @[(__bridge id)[UIColor colorWithRed:0.09 green:0.07 blue:0.08 alpha:1.0].CGColor,
           (__bridge id)[UIColor colorWithRed:0.90 green:0.75 blue:0.60 alpha:1.0].CGColor,
@@ -14234,12 +14351,15 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
           (__bridge id)[UIColor whiteColor].CGColor],
         @[(__bridge id)[UIColor colorWithRed:0.00 green:0.96 blue:1.00 alpha:1.0].CGColor,
           (__bridge id)[UIColor colorWithRed:0.66 green:0.33 blue:0.97 alpha:1.0].CGColor,
-          (__bridge id)[UIColor colorWithRed:1.00 green:0.16 blue:0.52 alpha:1.0].CGColor]
+          (__bridge id)[UIColor colorWithRed:1.00 green:0.16 blue:0.52 alpha:1.0].CGColor],
+        @[(__bridge id)[UIColor colorWithRed:1.00 green:0.84 blue:0.91 alpha:1.0].CGColor,
+          (__bridge id)[UIColor colorWithRed:0.96 green:0.52 blue:0.74 alpha:1.0].CGColor,
+          (__bridge id)[UIColor colorWithRed:1.00 green:0.95 blue:0.98 alpha:1.0].CGColor]
     ];
 
-    CGFloat itemGap = 8.0;
-    CGFloat itemW = (cardW - 24.0 - itemGap * 2.0) / 3.0;
-    for (int i = 0; i < 3; i++) {
+    CGFloat itemGap = 6.0;
+    CGFloat itemW = (cardW - 24.0 - itemGap * 3.0) / 4.0;
+    for (int i = 0; i < 4; i++) {
         UIButton *optCard = [UIButton buttonWithType:UIButtonTypeCustom];
         optCard.tag = 97501 + i;
         optCard.frame = CGRectMake(12.0 + i * (itemW + itemGap), 36.0, itemW, 72.0);
@@ -14728,10 +14848,10 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
 
 - (void)agRefreshThemeCardsSelectionState {
     AGVisualTheme cur = agCurrentVisualTheme();
-    NSArray *statusNames = @[@"当前：1. 轻奢 (高定黑金琉璃)", @"当前：2. 简约 (超折射液态玻璃)", @"当前：3. 炫酷 (全息流光液态玻璃)"];
+    NSArray *statusNames = @[@"当前：1. 轻奢 (高定黑金琉璃)", @"当前：2. 简约 (超折射液态玻璃)", @"当前：3. 炫酷 (全息流光液态玻璃)", @"当前：4. 樱花 (粉晶琉璃液态玻璃)"];
     UILabel *st = (UILabel *)[self.view viewWithTag:97509];
-    if (st) st.text = statusNames[cur];
-    for (int i = 0; i < 3; i++) {
+    if (st) st.text = (cur >= 0 && cur < statusNames.count) ? statusNames[cur] : @"";
+    for (int i = 0; i < 4; i++) {
         UIButton *card = (UIButton *)[self.view viewWithTag:97501 + i];
         if (!card) continue;
         if (i == cur) {
@@ -14746,7 +14866,7 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
 
 - (void)agSelectThemeCardTapped:(UIButton *)sender {
     NSInteger idx = sender.tag - 97501;
-    if (idx < 0 || idx > 2) return;
+    if (idx < 0 || idx > 3) return;
     NSMutableDictionary *p = loadGeminiPrefs();
     p[@"AG_Visual_Theme"] = @(idx);
     gIsSavingFromSettingsUI = YES;
