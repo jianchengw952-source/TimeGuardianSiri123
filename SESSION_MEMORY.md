@@ -41,6 +41,8 @@
 | :--- | :--- | :--- |
 | **本地工作目录** | `C:\Users\57132\.gemini\antigravity\scratch\TimeGuardianSiri123` | 当前活跃的 Git 仓库根目录，包含完整源码与构建配置 |
 | **D盘归档目录** | `D:\天使siri测试版` | 完整备份目录，包含 `.git` 库、源码及最新双版本 `.deb` |
+| **E盘归档目录** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调` | 完整项目工程归档，含源码、配置及双版本 `.deb` |
+| **E盘单文件归档** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调.txt` | 最新可打卡正常版本 `Tweak.x` 完整代码镜像 |
 | **远端 Git 仓库** | `https://github.com/jianchengw952-source/TimeGuardianSiri123.git` | GitHub 远程仓库（分支：`main`） |
 | **当前 Git Commit** | `c25eebf` | `feat(stealth): implement dual-mode tiered anti-detection kernel and fix kernel state sync in prefs cache` |
 | **GitHub Actions 运行记录** | Run #88 (ID: `40216105202`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
@@ -57,12 +59,18 @@
 * **[AngelCameraHelper.m](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/AngelCameraHelper.m)** (17,191 字节)
 * **[Makefile](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Makefile)** (1,414 字节)
 
-### 2. 外部镜像与归档文件（四向字节级完全对齐）
+### 2. 外部镜像与归档文件（全向字节级完全对齐）
 * **[主修实时翻译.txt](file:///D:/主修实时翻译.txt)**
   - SHA256: `C506BC03FA19F4EC6576E212D8B539CFABA7D645F84D5A156C3B0768B776D6A4`
 * **[主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt)**
   - SHA256: `C506BC03FA19F4EC6576E212D8B539CFABA7D645F84D5A156C3B0768B776D6A4`
 * **[D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x)**
+  - SHA256: `C506BC03FA19F4EC6576E212D8B539CFABA7D645F84D5A156C3B0768B776D6A4`
+* **[E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调.txt](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调.txt)**
+  - SHA256: `C506BC03FA19F4EC6576E212D8B539CFABA7D645F84D5A156C3B0768B776D6A4`
+* **[E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\Tweak.x](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/Tweak.x)**
+  - SHA256: `C506BC03FA19F4EC6576E212D8B539CFABA7D645F84D5A156C3B0768B776D6A4`
+* **[E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt)**
   - SHA256: `C506BC03FA19F4EC6576E212D8B539CFABA7D645F84D5A156C3B0768B776D6A4`
 * **[D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt)** (729 行，26,455 字节)
 
