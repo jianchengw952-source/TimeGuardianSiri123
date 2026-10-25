@@ -61,20 +61,29 @@
 * [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (983,167 字节，SHA256: `23F49ED11B2022FBCA588A93AA3B4814679B9C607C352712F12EB74EB0A3F671`)
 * [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (37,549 字节)
 
-### 3. 最新云端编译产物（Run #94 / Commit `2a74320`）
+### 3. 最新云端编译产物（Run #96 / Commit d0f836）
+> **解决 Sileo 报错「错误的deb文件：无法读取提供的deb文件」**：
+> - 强制启用 THEOS_PACKAGE_COMPRESSOR = xz 与 dpkg-deb -Zxz -b，彻底废除 Sileo 不支持的 zstd / lzma。
+> - 规范 control 格式为纯 LF 换行，末尾保留单空行，权限严格配置为 chmod 755 DEBIAN / chmod 644 DEBIAN/control / chmod 755 DEBIAN/postinst。
+> - 经 r -t 验证，归档文件仅包含 debian-binary、control.tar.xz、data.tar.xz。
+
 * **Dopamine (Rootless arm64)**：
-  - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
-  - 文件大小：`406,016` 字节
-  - SHA256: `22db7ecfef5938e562d2e3195dd247c2096e07c58373455e9893d88d01fd9dca`
+  - 包名：com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb
+  - 文件大小：405,580 字节
+  - SHA256: 0c8b22f741189100b55b747a6bca3fbcef23dca4c12cba5a15ce48012293b2d
+  - 归档结构：debian-binary (4 字节), control.tar.xz (776 字节), data.tar.xz (404,612 字节)
+  - 内置二进制：GeminiSiriOverlay.dylib (1,929,168 字节), AngelCameraHelper (242,320 字节)
   - 分发路径：
     - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
     - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
     - [packages/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/packages/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
 
 * **Relaxin (RootHide arm64e)**：
-  - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
-  - 文件大小：`264,606` 字节
-  - SHA256: `f5416099a63551f6c547b3204b7158f1507301380d74660f19b4133600d2ba36`
+  - 包名：com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb
+  - 文件大小：264,872 字节
+  - SHA256: 146d3770d2af5d63ab9fc099183edd12ffa189f7303f38e60d328f1f808e0a0b
+  - 归档结构：debian-binary (4 字节), control.tar.xz (780 字节), data.tar.xz (263,900 字节)
+  - 内置二进制：GeminiSiriOverlay.dylib (962,512 字节), AngelCameraHelper (242,320 字节)
   - 分发路径：
     - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
     - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
