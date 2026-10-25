@@ -49,17 +49,17 @@
 ## 三、当前会话中涉及的关键文件和路径
 
 ### 1. 核心工程源码文件
-* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,479 行，971,898 字节)
-  - SHA256: `F9FF6256261BE820D57BD76A82A214F3BC3A46839650B46CD075CB0B0348958D`
+* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,479 行，989,741 字节)
+  - SHA256: `9DA50ECACC64720991BB3BD810C2285611FF7BFD5A51F30A15B173C15174B9CC`
 * **[layout/DEBIAN/postinst](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/layout/DEBIAN/postinst)** (362 字节)
 * **[.github/workflows/build.yml](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/.github/workflows/build.yml)** (1,757 字节)
 
 ### 2. 四路同步镜像文件（100% 字节一致）
-* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (971,898 字节，SHA256: `F9FF6256261BE820D57BD76A82A214F3BC3A46839650B46CD075CB0B0348958D`)
-* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (971,898 字节，SHA256: `F9FF6256261BE820D57BD76A82A214F3BC3A46839650B46CD075CB0B0348958D`)
-* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (971,898 字节，SHA256: `F9FF6256261BE820D57BD76A82A214F3BC3A46839650B46CD075CB0B0348958D`)
-* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (971,898 字节，SHA256: `F9FF6256261BE820D57BD76A82A214F3BC3A46839650B46CD075CB0B0348958D`)
-* [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (28,285 字节)
+* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (989,741 字节，SHA256: `9DA50ECACC64720991BB3BD810C2285611FF7BFD5A51F30A15B173C15174B9CC`)
+* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (989,741 字节，SHA256: `9DA50ECACC64720991BB3BD810C2285611FF7BFD5A51F30A15B173C15174B9CC`)
+* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (989,741 字节，SHA256: `9DA50ECACC64720991BB3BD810C2285611FF7BFD5A51F30A15B173C15174B9CC`)
+* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (989,741 字节，SHA256: `9DA50ECACC64720991BB3BD810C2285611FF7BFD5A51F30A15B173C15174B9CC`)
+* [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (41,427 字节)
 
 ### 3. 最新云端编译产物（Run #98 / Commit `8250a1d`）
 > **本次更新（4 处关键修复与底层精简）**：
