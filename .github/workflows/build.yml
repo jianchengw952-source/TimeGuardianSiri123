@@ -34,14 +34,47 @@ jobs:
         THEOS: ${{ runner.os == 'macOS' && format('{0}/theos', env.HOME) || '' }}
       run: |
         export THEOS=$HOME/theos
+        mkdir -p layout/DEBIAN
+        cp -f control layout/DEBIAN/control
+        chmod 755 layout/DEBIAN
+        chmod 644 control
+        chmod 644 layout/DEBIAN/control
         chmod 755 layout/DEBIAN/postinst
+
         if [ "${{ matrix.jailbreak_scheme }}" = "roothide" ]; then
           make clean
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64e || make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64e
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide THEOS_PACKAGE_COMPRESSOR=xz ARCHS=arm64e || make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless THEOS_PACKAGE_COMPRESSOR=xz ARCHS=arm64e
         else
           make clean
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS="arm64 arm64e"
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless THEOS_PACKAGE_COMPRESSOR=xz ARCHS="arm64 arm64e"
         fi
+
+        echo "=== Package Verification and Sileo Compatibility Enforcement ==="
+        for deb in packages/*.deb; do
+          [ -f "$deb" ] || continue
+          echo "Original package structure for $deb:"
+          ar -t "$deb"
+
+          # 严格重构为 -Zxz 标准格式（生成 control.tar.xz 与 data.tar.xz，100% 杜绝 Sileo 报坏包）
+          echo "Ensuring Sileo xz compression for $deb..."
+          rm -rf /tmp/repack_deb
+          mkdir -p /tmp/repack_deb
+          dpkg-deb -R "$deb" /tmp/repack_deb
+          chmod 755 /tmp/repack_deb/DEBIAN
+          chmod 644 /tmp/repack_deb/DEBIAN/control
+          if [ -f /tmp/repack_deb/DEBIAN/postinst ]; then
+            chmod 755 /tmp/repack_deb/DEBIAN/postinst
+          fi
+          dpkg-deb -Zxz -b /tmp/repack_deb "$deb"
+          rm -rf /tmp/repack_deb
+
+          echo "=== Verified ar -t result ==="
+          ar -t "$deb"
+          echo "=== Verified dpkg-deb -I result ==="
+          dpkg-deb -I "$deb"
+          echo "=== Verified dpkg-deb -c result ==="
+          dpkg-deb -c "$deb"
+        done
 
     - name: Upload Deb Artifact (${{ matrix.jailbreak_scheme }})
       uses: actions/upload-artifact@v4

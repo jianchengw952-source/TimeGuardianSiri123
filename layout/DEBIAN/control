@@ -1,0 +1,11 @@
+Package: com.custom.timeguardiansiri123
+Name: 时光守护siri123
+Version: 6.0.0
+Architecture: iphoneos-arm64
+Description: 时光守护siri123 (TimeGuardian Siri 123) - 主修实时翻译 v6.0 Zero-Latency Pro + 微信跨进程直达 + 官方级全双工对讲视讯
+Maintainer: Custom
+Author: Custom
+Section: Tweaks
+Depends: mobilesubstrate | org.coolstar.libhooker | ellekit
+Replaces: com.custom.geminisirioverlay, com.custom.aisiri, com.custom.timeguardian
+Conflicts: com.custom.geminisirioverlay, com.custom.aisiri

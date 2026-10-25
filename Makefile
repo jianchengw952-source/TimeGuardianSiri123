@@ -1,3 +1,4 @@
+THEOS_PACKAGE_COMPRESSOR = xz
 TARGET := iphone:clang:16.5:15.0
 ARCHS = arm64 arm64e
 THEOS_PACKAGE_SCHEME = rootless
