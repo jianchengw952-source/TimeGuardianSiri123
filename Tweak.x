@@ -18136,7 +18136,7 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
             return;
         }
     }
-    %orig(location, completionHandler);
+    %orig(location, locale, completionHandler);
 }
 
 %end
