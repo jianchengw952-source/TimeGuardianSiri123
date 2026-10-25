@@ -1256,18 +1256,17 @@ static BOOL agIsAntiDetectionShieldActive(void) {
     return NO;
 }
 
-// 为开启防检测后的应用提供稳定的高仿真路由器 SSID 与 BSSID（采用 500m 锚定网格，彻底消除 1 米微漂移跨边界导致 MAC 地址跳变穿帮）
-static BOOL agResolveSpoofedWiFiInfo(NSString **outSSID, NSString **outBSSID) {
-    // 第一行铁律：只要未开启防检测开关，立即返回 NO，100% 透传真实网络！
-    if (!agIsAntiDetectionShieldActive()) return NO;
+// 返回值：0 = 不干预(透传真实网络)，1 = 伪装为 5G 蜂窝流量(隐藏真实家庭 Wi-Fi 防止 BSSID 穿帮)，2 = 返回用户指定的公司真实 Wi-Fi
+static NSInteger agResolveSpoofedWiFiAction(NSString **outSSID, NSString **outBSSID) {
+    if (!agIsAntiDetectionShieldActive()) return 0;
 
     NSInteger wifiMode = 1;
     double lat = 0.0, lon = 0.0;
     BOOL shieldOn = NO;
     if (!agReadSpoofStateFromKernel(NULL, NULL, &shieldOn, &wifiMode, &lat, &lon, NULL, NULL, NULL) || !shieldOn) {
-        return NO;
+        return 0;
     }
-    if (wifiMode == 0) return NO;
+    if (wifiMode == 0) return 0;
 
     if (wifiMode == 2) {
         NSDictionary *p = agReadOnlyPrefs();
@@ -1276,26 +1275,11 @@ static BOOL agResolveSpoofedWiFiInfo(NSString **outSSID, NSString **outBSSID) {
         if (customSSID.length > 0 && customBSSID.length > 0) {
             if (outSSID)  *outSSID  = customSSID;
             if (outBSSID) *outBSSID = [customBSSID lowercaseString];
-            return YES;
+            return 2;
         }
     }
-
-    // 采用粗粒度锚定网格 round(lat * 200.0)，保证在考勤点附近 ±200 米微漂移时虚拟路由器 MAC 地址 100% 恒定不跳变
-    uint32_t latGrid = (uint32_t)fabs(round(lat * 200.0));
-    uint32_t lonGrid = (uint32_t)fabs(round(lon * 200.0));
-    uint32_t seed = (latGrid * 73856093u) ^ (lonGrid * 19349663u) ^ 0x5A3C9E17u;
-    NSArray<NSString *> *prefixes = @[@"ChinaNet-5G", @"TP-LINK_5G", @"CMCC-Office", @"Xiaomi_5G", @"HUAWEI-5G"];
-    NSString *prefix = prefixes[seed % prefixes.count];
-    if (outSSID) {
-        *outSSID = [NSString stringWithFormat:@"%@-%04X", prefix, (unsigned int)(seed & 0xFFFF)];
-    }
-    if (outBSSID) {
-        *outBSSID = [NSString stringWithFormat:@"a4:2b:b0:%02x:%02x:%02x",
-                     (unsigned int)((seed >> 16) & 0xFF),
-                     (unsigned int)((seed >> 8) & 0xFF),
-                     (unsigned int)(seed & 0xFF)];
-    }
-    return YES;
+    // 默认防检测模式(wifiMode == 1)：向钉钉/飞书/企微隐藏当前连接的家庭/异地 Wi-Fi，伪装为纯 5G 蜂窝网络打卡，零 BSSID 破绽
+    return 1;
 }
 
 static const void * const kAGHardwareCleanLocationKey = &kAGHardwareCleanLocationKey;
@@ -1836,17 +1820,24 @@ static BOOL agGetCurrentSpoofedTelemetry(AGSpoofedTelemetry *outTel) {
 
     NSTimeInterval now = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_lock(&sTelemetryCacheLock);
-    // SpringBoard 主控端已经以 1Hz 频率计算好平滑微漂移并写入内核，客户端直接使用内核坐标，严禁二次叠加漂移导致偏位！
     double baseAlt = agEstimatedBaseAltitudeForCoord(lat, lon);
-    double hAcc = kShield ? (4.2 + ((double)arc4random_uniform(12)) * 0.1) : 4.5;
-    double vAcc = kShield ? (3.2 + ((double)arc4random_uniform(10)) * 0.1) : 3.5;
+    double microLat = lat;
+    double microLon = lon;
+    if (kShield) {
+        // 注入 ±0.25 米亚米级 GNSS 芯片热噪，破除钉钉/飞书连续采样 0 方差检测，同时确保位置 100% 精准不偏位
+        microLat += agGaussianRandom() * 0.0000022;
+        microLon += agGaussianRandom() * 0.0000022;
+        baseAlt  += agGaussianRandom() * 0.04;
+    }
+    double hAcc = kShield ? (4.1 + ((double)arc4random_uniform(18)) * 0.1) : 4.5;
+    double vAcc = kShield ? (3.1 + ((double)arc4random_uniform(14)) * 0.1) : 3.5;
 
     double validCourse = kCourse;
     double validSpeed  = (kSpeed >= 0.0) ? kSpeed : 0.0;
 
     sLastTelemetry.valid  = YES;
-    sLastTelemetry.lat    = lat;
-    sLastTelemetry.lon    = lon;
+    sLastTelemetry.lat    = microLat;
+    sLastTelemetry.lon    = microLon;
     sLastTelemetry.alt    = baseAlt;
     sLastTelemetry.hAcc   = hAcc;
     sLastTelemetry.vAcc   = vAcc;
@@ -17491,28 +17482,29 @@ static int my_TCCAccessPreflight(CFStringRef service, CFDictionaryRef options) {
     return 0;
 }
 
-// ==================== 1. 双通道一致性虚拟 Wi-Fi 护盾（严格受 agIsAntiDetectionShieldActive 控制） ====================
+// ==================== 1. 双通道一致性虚拟 Wi-Fi 护盾（支持 5G 流量隐身模式与指定公司 Wi-Fi 模式） ====================
 static NSDictionary *agBuildConsistentVirtualWiFiDict(void) {
-    if (!agIsAntiDetectionShieldActive()) {
-        return nil;
-    }
     NSString *fakeSSID = nil;
     NSString *fakeBSSID = nil;
-    if (!agResolveSpoofedWiFiInfo(&fakeSSID, &fakeBSSID)) {
-        return nil;
+    if (agResolveSpoofedWiFiAction(&fakeSSID, &fakeBSSID) == 2 && fakeSSID && fakeBSSID) {
+        NSData *ssidData = [fakeSSID dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+        return @{
+            @"SSID": fakeSSID,
+            @"BSSID": fakeBSSID,
+            @"SSIDDATA": ssidData
+        };
     }
-    NSData *ssidData = [fakeSSID dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
-    return @{
-        @"SSID": fakeSSID,
-        @"BSSID": fakeBSSID,
-        @"SSIDDATA": ssidData
-    };
+    return nil;
 }
 
 static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName) = NULL;
 static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
-    // 只有当【虚拟定位开启】且【防检测保护开关开启】时才返回虚拟 Wi-Fi；关闭防检测时 100% 透传系统原生网络！
-    if (agIsAntiDetectionShieldActive()) {
+    NSString *s = nil, *b = nil;
+    NSInteger action = agResolveSpoofedWiFiAction(&s, &b);
+    if (action == 1) {
+        // 伪装为未连接 Wi-Fi（使用 5G 移动网络打卡），彻底阻断家庭路由器 MAC 地址泄露
+        return NULL;
+    } else if (action == 2) {
         NSDictionary *fakeWiFi = agBuildConsistentVirtualWiFiDict();
         if (fakeWiFi) {
             return (__bridge_retained CFDictionaryRef)[fakeWiFi copy];
@@ -17565,9 +17557,18 @@ static CLLocation *agBuildAppMatchedSpoofLocation(void) {
 
 %end
 
+// 判断某个坐标是否已经是当前虚拟定位纠偏后的 GCJ-02 火星坐标（误差在 ~80 米内）
+static inline BOOL agIsCoordinateAlreadyShiftedGCJ02(CLLocationCoordinate2D coord) {
+    AGSpoofedTelemetry tel;
+    if (!agGetCurrentSpoofedTelemetry(&tel) || !tel.valid) return NO;
+    CLLocationCoordinate2D expectedGCJ = agWGS84ToGCJ02(tel.lat, tel.lon);
+    return (fabs(coord.latitude - expectedGCJ.latitude) < 0.0008 &&
+            fabs(coord.longitude - expectedGCJ.longitude) < 0.0008);
+}
+
 %hook CLLocation
 
-// 保护所有由 App 或高德/腾讯/MapKit 纠偏器通过公开方法手动创建的 CLLocation（如已纠偏完的 GCJ-02 坐标、考勤中心点），严禁把已纠偏的 GCJ-02 再覆盖回 WGS-84！
+// 1. 双参数 initWithLatitude:longitude: 仅用于 App 创建静态打卡中心点/商家点，标记保护以维持真实距离计算
 - (instancetype)initWithLatitude:(CLLocationDegrees)latitude longitude:(CLLocationDegrees)longitude {
     CLLocation *loc = %orig(latitude, longitude);
     if (loc && !sIsCreatingInternalSpoofLocation) {
@@ -17576,6 +17577,7 @@ static CLLocation *agBuildAppMatchedSpoofLocation(void) {
     return loc;
 }
 
+// 2. 多参数 initWithCoordinate:...：仅当传入的坐标已经是 SDK 纠偏后的虚拟 GCJ-02 坐标（或海拔/精度全为 0 的纯静态点）时才加保护；若传入的是真实物理 GPS 坐标，绝不加保护，交由下方 getter 强制覆写为虚拟定位！
 - (instancetype)initWithCoordinate:(CLLocationCoordinate2D)coordinate
                           altitude:(CLLocationDistance)altitude
                 horizontalAccuracy:(CLLocationAccuracy)hAccuracy
@@ -17583,7 +17585,9 @@ static CLLocation *agBuildAppMatchedSpoofLocation(void) {
                          timestamp:(NSDate *)timestamp {
     CLLocation *loc = %orig(coordinate, altitude, hAccuracy, vAccuracy, timestamp);
     if (loc && !sIsCreatingInternalSpoofLocation) {
-        agMarkAppCustomLocationPtr(loc);
+        if ((fabs(altitude) < 0.001 && fabs(hAccuracy) < 0.001) || agIsCoordinateAlreadyShiftedGCJ02(coordinate)) {
+            agMarkAppCustomLocationPtr(loc);
+        }
     }
     return loc;
 }
@@ -17597,7 +17601,9 @@ static CLLocation *agBuildAppMatchedSpoofLocation(void) {
                          timestamp:(NSDate *)timestamp {
     CLLocation *loc = %orig(coordinate, altitude, hAccuracy, vAccuracy, course, speed, timestamp);
     if (loc && !sIsCreatingInternalSpoofLocation) {
-        agMarkAppCustomLocationPtr(loc);
+        if ((fabs(altitude) < 0.001 && fabs(hAccuracy) < 0.001) || agIsCoordinateAlreadyShiftedGCJ02(coordinate)) {
+            agMarkAppCustomLocationPtr(loc);
+        }
     }
     return loc;
 }
@@ -17613,7 +17619,9 @@ static CLLocation *agBuildAppMatchedSpoofLocation(void) {
                          timestamp:(NSDate *)timestamp {
     CLLocation *loc = %orig(coordinate, altitude, hAccuracy, vAccuracy, course, courseAccuracy, speed, speedAccuracy, timestamp);
     if (loc && !sIsCreatingInternalSpoofLocation) {
-        agMarkAppCustomLocationPtr(loc);
+        if (agIsCoordinateAlreadyShiftedGCJ02(coordinate)) {
+            agMarkAppCustomLocationPtr(loc);
+        }
     }
     return loc;
 }
@@ -17630,7 +17638,9 @@ static CLLocation *agBuildAppMatchedSpoofLocation(void) {
                         sourceInfo:(CLLocationSourceInformation *)sourceInfo {
     CLLocation *loc = %orig(coordinate, altitude, hAccuracy, vAccuracy, course, courseAccuracy, speed, speedAccuracy, timestamp, sourceInfo);
     if (loc && !sIsCreatingInternalSpoofLocation) {
-        agMarkAppCustomLocationPtr(loc);
+        if (agIsCoordinateAlreadyShiftedGCJ02(coordinate)) {
+            agMarkAppCustomLocationPtr(loc);
+        }
     }
     return loc;
 }
@@ -17969,10 +17979,75 @@ static void agSwizzleLocationDelegateClassIfNeeded(Class delCls) {
     }
 }
 
+// 针对钉钉、飞书、美团内置的高德定位 SDK (AMapLocationManager) 进行反检测与回调劫持
+static void agHookAMapLocationSDKIfPresent(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class amapCls = objc_getClass("AMapLocationManager");
+        if (!amapCls) return;
+
+        // 1. 强制关闭高德 SDK 的 detectRiskOfFakeLocation（虚拟定位风险检测）
+        Method mDetect = class_getInstanceMethod(amapCls, NSSelectorFromString(@"detectRiskOfFakeLocation"));
+        if (mDetect) {
+            method_setImplementation(mDetect, imp_implementationWithBlock(^BOOL(id _self) {
+                return NO;
+            }));
+        }
+        Method mSetDetect = class_getInstanceMethod(amapCls, NSSelectorFromString(@"setDetectRiskOfFakeLocation:"));
+        if (mSetDetect) {
+            typedef void (*SetDetIMP)(id, SEL, BOOL);
+            __block SetDetIMP origSetDet = (SetDetIMP)method_getImplementation(mSetDetect);
+            method_setImplementation(mSetDetect, imp_implementationWithBlock(^(id _self, BOOL det) {
+                if (origSetDet) origSetDet(_self, NSSelectorFromString(@"setDetectRiskOfFakeLocation:"), NO);
+            }));
+        }
+
+        // 2. 拦截高德单次定位 Block 回调（钉钉打卡最常调用的接口：requestLocationWithReGeocode:completionBlock:）
+        SEL reqSel = NSSelectorFromString(@"requestLocationWithReGeocode:completionBlock:");
+        Method mReq = class_getInstanceMethod(amapCls, reqSel);
+        if (mReq) {
+            typedef BOOL (*AMapReqIMP)(id, SEL, BOOL, void(^)(CLLocation *, id, NSError *));
+            __block AMapReqIMP origReqIMP = (AMapReqIMP)method_getImplementation(mReq);
+            method_setImplementation(mReq, imp_implementationWithBlock(^BOOL(id _self, BOOL withReGeocode, void(^completionBlock)(CLLocation *location, id regeocode, NSError *error)) {
+                if (agIsCurrentProcessTargetedForLocSpoof() && completionBlock) {
+                    agReportAppLocationHookHitToSpringBoard();
+                    void (^wrappedBlock)(CLLocation *, id, NSError *) = ^(CLLocation *loc, id regeo, NSError *err) {
+                        if (agIsCurrentProcessTargetedForLocSpoof()) {
+                            AGSpoofedTelemetry tel;
+                            if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) {
+                                CLLocationCoordinate2D gcj = agWGS84ToGCJ02(tel.lat, tel.lon);
+                                CLLocation *gcjLoc = agCreateHardwareGradeLocation(gcj, tel.alt, tel.hAcc, tel.vAcc, tel.course, tel.speed);
+                                if (gcjLoc) {
+                                    agMarkAppCustomLocationPtr(gcjLoc);
+                                    completionBlock(gcjLoc, regeo, nil);
+                                    return;
+                                }
+                            }
+                        }
+                        completionBlock(loc, regeo, err);
+                    };
+                    return origReqIMP ? origReqIMP(_self, reqSel, withReGeocode, wrappedBlock) : NO;
+                }
+                return origReqIMP ? origReqIMP(_self, reqSel, withReGeocode, completionBlock) : NO;
+            }));
+        }
+    });
+}
+
 %hook CLLocationManager
+
+- (instancetype)init {
+    CLLocationManager *mgr = %orig;
+    if (mgr) {
+        agRegisterActiveLocationManager(mgr);
+        agHookAMapLocationSDKIfPresent();
+    }
+    return mgr;
+}
 
 - (void)setDelegate:(id<CLLocationManagerDelegate>)delegate {
     agRegisterActiveLocationManager(self);
+    agHookAMapLocationSDKIfPresent();
     if (delegate) {
         agSwizzleLocationDelegateClassIfNeeded([delegate class]);
     }
@@ -18210,13 +18285,16 @@ static void agSwizzleLocationDelegateClassIfNeeded(Class delCls) {
 %hook NEHotspotNetwork
 
 + (void)fetchCurrentWithCompletionHandler:(void (^)(NEHotspotNetwork * _Nullable currentNetwork))completionHandler {
-    // 关键修复：不再构造 [[NEHotspotNetwork alloc] init] 空壳未初始化对象！
-    // 直接透传系统原生回调；若设备当前已连接 Wi-Fi，则由下方 -SSID / -BSSID 实例方法自动完成无损替换；若处于 5G/4G 流量则原样返回 nil，彻底根除断网 Bug！
+    if (completionHandler && agResolveSpoofedWiFiAction(NULL, NULL) == 1) {
+        // 5G 流量隐身模式：向打卡软件报告当前未连接任何 Wi-Fi 热点
+        completionHandler(nil);
+        return;
+    }
     %orig(completionHandler);
 }
 
 - (NSString *)SSID {
-    if (agIsAntiDetectionShieldActive()) {
+    if (agResolveSpoofedWiFiAction(NULL, NULL) == 2) {
         NSDictionary *fakeWiFi = agBuildConsistentVirtualWiFiDict();
         if (fakeWiFi[@"SSID"]) return fakeWiFi[@"SSID"];
     }
@@ -18224,7 +18302,7 @@ static void agSwizzleLocationDelegateClassIfNeeded(Class delCls) {
 }
 
 - (NSString *)BSSID {
-    if (agIsAntiDetectionShieldActive()) {
+    if (agResolveSpoofedWiFiAction(NULL, NULL) == 2) {
         NSDictionary *fakeWiFi = agBuildConsistentVirtualWiFiDict();
         if (fakeWiFi[@"BSSID"]) return fakeWiFi[@"BSSID"];
     }
