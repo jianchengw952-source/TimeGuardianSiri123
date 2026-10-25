@@ -1,6 +1,6 @@
 # TimeGuardianSiri123 项目会话记忆文件 (SESSION_MEMORY.md)
 
-> **生成时间**：2026-10-26 02:14:00 (本地时间)  
+> **生成时间**：2026-10-26 02:40:00 (本地时间)  
 > **会话标识**：`02de72ea-60df-4738-8977-4a4ebaf78b2f`  
 > **用途说明**：供用户切换 Google Antigravity 账号或开启新会话后，直接读取本文件无缝继承当前项目的完整开发上下文。
 
@@ -17,23 +17,18 @@
      3. **天使守护 Siri 悬浮工作台**：全局浮动交互 UI、多主题液态镜面玻璃渲染、双麦克风语音监听与 Edge TTS 语音合成。
      4. **独立相机辅助工具**：`AngelCameraHelper` 独立守护进程与虚拟视频流注入。
 
-2. **最新应用的 5 大防覆盖与原生 IMP 动态还原核心重构（Commit `3e1a07e`）**：
-   - **【修改点 1】修复 `reloadGeminiPrefsCache` 反向覆盖漏洞**：
-     - 加入 `if (!newestDict)` 严格守卫；
-     - 仅当进程无法读取磁盘 plist（如受沙盒限制的第三方 App）时，才用内核寄存器状态填充；SpringBoard 与 Preferences 永远以磁盘最新 plist 为唯一权威源，杜绝定时器旧状态反向覆盖关闭指令。
-   - **【修改点 2】守护进程与模拟定时器残留彻底消除**：
-     - 开机关闭时向内核写 `isActive=NO` 并延迟 2.0s 强制清空 `locationd` 模拟队列；
-     - `onSimulationTick` 检测到内核关闭立即刷新缓存并触发复位；
-     - `pushSimulatedLocationToDaemon` 在关闭或非全局模式时无条件清空并停止模拟；
-     - `stopAndResetToRealLocation` 末尾在 SpringBoard 内主动触发停止模拟。
-   - **【修改点 3】`syncMasterStateFromPrefsAndRestartTimer` 状态刷新**：
-     - 关闭分支同步调用 `agPublishSpoofStateToKernel` 刷新寄存器并清除残留。
-   - **【修改点 4】严格隔离 `StealthLocationClientHooks` 中的防检测方法**：
-     - `sourceInformation`、`type`、`isSimulated`、`_isSimulated` 以及 `clientLocation` 中的模拟标志抹除仅在 `agIsAntiDetectionShieldActive()` 为真时生效，不开防检测绝不伪装，杜绝日常模式的任何不自然特征。
-   - **【修改点 5】原生 IMP 保存与动态还原引擎（关闭虚拟定位时 100% 恢复原生函数表）**：
-     - 启动时备份全部 40+ 个 CoreLocation/MapKit/CoreMotion 方法的苹果原生 IMP；
-     - 关闭虚拟定位时通过 `method_setImplementation` 将每个方法 **100% 原地还原为苹果原生实现**，杜绝大厂反作弊扫描到非原生 IMP；
-     - 仅在【虚拟定位开启 + 防检测开启】时，才挂载底层 C 函数（`access` / `stat` / `lstat` / `dladdr` / `_dyld_get_image_name` / `CNCopyCurrentNetworkInfo`）防检测 Hook。
+2. **最新应用的 4 大深度去特征化与反检测动态引擎重构（Commit `2a74320`）**：
+   - **【修改点 1】补充顶部反风控宏并移除暴露在 Mach-O 属性表中的 CLSimulationManager 类型声明**：
+     - 追加 `simManager -> spatialBridgeObj`、`_simManager -> _spatialBridgeObj`、`isDaemonSimRunning -> isSpatialBridgeActive`、`onSimulationTick -> onSpatialSyncTick`、`ssidInputField -> primaryTagInputField`、`bssidInputField -> secondaryTagInputField`、`customWiFiSwitchChanged -> spatialTagSwitchChanged` 宏定义；
+     - 彻底清除静态明文 `@interface CLSimulationManager` 与 `@interface CLLocationSourceInformation`，替换为运行时 XOR 解码器 `agDecodeObfuscatedCStr` 与 `agDecodeSelector`；
+     - 属性表中将 `CLSimulationManager *simManager` 声明为 `id simManager`，消除 Mach-O 属性签名类型特征。
+   - **【修改点 2】彻底停止向系统 locationd 写入模拟位置（消除 locationd 缓存污染）**：
+     - 重写 `- (void)pushSimulatedLocationToDaemonWithCourse:speed:forceRestart:`，不再向 `locationd` 注入任何模拟坐标，仅在首次或关闭时利用 XOR 混淆选择器将历史残留模拟状态彻底清零并 flush，杜绝 `locationd` 缓存被标记为 `isSimulatedBySoftware=YES`。
+   - **【修改点 3】消除 agCreateHardwareGradeLocation 中的明文 initWithSoftwareSimulationState: 选择器**：
+     - 在构建硬件级 CLLocation 时，通过 XOR 动态解码 `kEncSrcCls`、`kEncInitSrc` 与 `kEncInitLoc` 并结合 `objc_msgSend` 动态调用，彻底从二进制中消除明文方法特征。
+   - **【修改点 4】CLLocationManager 统一进程内回调 & 敏感防检测 Hook 改为无符号动态挂载**：
+     - `startUpdatingLocation` 与 `requestLocation` 无论全局模式还是白名单模式，统一在当前进程直接以真实委托方式回调虚拟位置，解除对 `CLSimulationManager` 的依赖；
+     - 将 `isSimulatedBySoftware`、`isProducedByAccessory`、`_isSimulated`、`isSimulated`、`sourceInformation`、`type`、`clientLocation` 从静态 `%hook` 中移除，转为纯 C 函数；在进程运行时通过 XOR 解码选择器动态查找 Method 并替换/还原 IMP，绝不在 Mach-O 的 `__objc_methname` 表中留下任何敏感选择器明文。
 
 ---
 
@@ -46,55 +41,41 @@
 | **E盘归档目录** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调` | 完整项目工程归档，含源码、配置及双版本 `.deb` |
 | **E盘单文件归档** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调.txt` | 钉钉可打卡版本完整代码备份 |
 | **远端 Git 仓库** | `https://github.com/jianchengw952-source/TimeGuardianSiri123.git` | GitHub 远程仓库（分支：`main`） |
-| **当前 Git Commit** | `3e1a07e` | `fix(build): eliminate redefinition of moveMode in syncMasterStateFromPrefsAndRestartTimer` |
-| **GitHub Actions 运行记录** | Run #92 (ID: `40220032273`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
+| **当前 Git Commit** | `2a74320` | `feat(stealth): eliminate CLSimulationManager and CLLocationSourceInformation static metadata, dynamically register sensitive anti-detection hooks` |
+| **GitHub Actions 运行记录** | Run #94 (ID: `40222039693`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
 
 ---
 
 ## 三、当前会话中涉及的关键文件和路径
 
 ### 1. 核心工程源码文件
-* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,396 行，975,298 字节)
-  - SHA256: `4A5AF97928256D4214B886A497E64A4DC457220544EBE2E7CCB0F7A90A0F00E2`
+* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,479 行，983,167 字节)
+  - SHA256: `23F49ED11B2022FBCA588A93AA3B4814679B9C607C352712F12EB74EB0A3F671`
 * **[layout/DEBIAN/postinst](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/layout/DEBIAN/postinst)** (362 字节)
 * **[.github/workflows/build.yml](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/.github/workflows/build.yml)** (1,757 字节)
-* **[AngelCameraHelper.m](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/AngelCameraHelper.m)** (17,191 字节)
-* **[Makefile](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Makefile)** (1,414 字节)
 
-### 2. 外部镜像与归档文件（全向字节级完全对齐）
-* **[主修实时翻译.txt](file:///D:/主修实时翻译.txt)**
-  - SHA256: `4A5AF97928256D4214B886A497E64A4DC457220544EBE2E7CCB0F7A90A0F00E2`
-* **[主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt)**
-  - SHA256: `4A5AF97928256D4214B886A497E64A4DC457220544EBE2E7CCB0F7A90A0F00E2`
-* **[D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x)**
-  - SHA256: `4A5AF97928256D4214B886A497E64A4DC457220544EBE2E7CCB0F7A90A0F00E2`
-* **[E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt)**
-  - SHA256: `4A5AF97928256D4214B886A497E64A4DC457220544EBE2E7CCB0F7A90A0F00E2`
-* **[D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt)** (868 行，35,320 字节)
+### 2. 四路同步镜像文件（100% 字节一致）
+* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (983,167 字节，SHA256: `23F49ED11B2022FBCA588A93AA3B4814679B9C607C352712F12EB74EB0A3F671`)
+* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (983,167 字节，SHA256: `23F49ED11B2022FBCA588A93AA3B4814679B9C607C352712F12EB74EB0A3F671`)
+* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (983,167 字节，SHA256: `23F49ED11B2022FBCA588A93AA3B4814679B9C607C352712F12EB74EB0A3F671`)
+* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (983,167 字节，SHA256: `23F49ED11B2022FBCA588A93AA3B4814679B9C607C352712F12EB74EB0A3F671`)
+* [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (37,549 字节)
 
-### 3. 最新编译产出的两套安装包（Run #92）
-* **Dopamine 版 (Rootless / arm64)**：
-  - 本地路径 1：[D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
-  - 本地路径 2：[D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
-  - 本地路径 3：[C:\Users\57132\.gemini\antigravity\scratch\TimeGuardianSiri123\packages\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/packages/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
-  - 文件大小：`405,650` 字节
-  - SHA256：`E2A275E92AB755034363E81B0CB05A948047CCE26976B3008E66DAA02B5CEBF4`
-* **Relaxin 版 (RootHide / arm64e)**：
-  - 本地路径 1：[D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
-  - 本地路径 2：[D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
-  - 本地路径 3：[C:\Users\57132\.gemini\antigravity\scratch\TimeGuardianSiri123\packages\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/packages/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
-  - 文件大小：`264,660` 字节
-  - SHA256：`976D72B87AD8823B45390369E8AB9CF701196E28929B3D970270EE4296D44982`
+### 3. 最新云端编译产物（Run #94 / Commit `2a74320`）
+* **Dopamine (Rootless arm64)**：
+  - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
+  - 文件大小：`406,016` 字节
+  - SHA256: `22db7ecfef5938e562d2e3195dd247c2096e07c58373455e9893d88d01fd9dca`
+  - 分发路径：
+    - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+    - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+    - [packages/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/packages/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
 
----
-
-## 四、工作状态分类表
-
-| 状态 | 工作项 | 对应位置 / 备注 |
-| :---: | :--- | :--- |
-| **已完成** | 5 处状态防覆盖与原生 IMP 动态还原重构 | `Tweak.x` 全部 5 处修改精准落盘 |
-| **已完成** | 源码全向同步与校验和一致性核验 | `Tweak.x`（多端本地备份）SHA256 完全对齐 (`4A5AF9...`) |
-| **已完成** | Git 提交与远程推送 | Commit `3e1a07e` 推送至 `origin/main` |
-| **已完成** | GitHub Actions 双矩阵云端构建 | Run #92 (ID: `40220032273`) 🟢 Rootless & Roothide 全部成功构建 |
-| **已完成** | 双格式安装包自动下载与多端归档 | Dopamine arm64 版与 Relaxin arm64e 版已同步落盘至 D 盘根目录、`D:\天使siri测试版` 及 packages |
-| **待验证** | 越狱真机安装实测 | 用户在真机上验证关闭虚拟定位时 100% 恢复原生、无任何插件提示 |
+* **Relaxin (RootHide arm64e)**：
+  - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
+  - 文件大小：`264,606` 字节
+  - SHA256: `f5416099a63551f6c547b3204b7158f1507301380d74660f19b4133600d2ba36`
+  - 分发路径：
+    - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+    - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+    - [packages/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/packages/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
