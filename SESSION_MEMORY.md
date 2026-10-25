@@ -49,17 +49,17 @@
 ## 三、当前会话中涉及的关键文件和路径
 
 ### 1. 核心工程源码文件
-* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,479 行，996,681 字节)
-  - SHA256: `9023BC4DE25877F2B0D57D774F3E0E0B2A85EEEF5D83554DE1C6BC84CC2A7270`
+* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,479 行，1,000,706 字节)
+  - SHA256: `6B05BDBB2162B3570F1ED628756DE2D07C7E206FE051FE53585650CB140578F1`
 * **[layout/DEBIAN/postinst](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/layout/DEBIAN/postinst)** (362 字节)
 * **[.github/workflows/build.yml](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/.github/workflows/build.yml)** (1,757 字节)
 
 ### 2. 四路同步镜像文件（100% 字节一致）
-* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (996,681 字节，SHA256: `9023BC4DE25877F2B0D57D774F3E0E0B2A85EEEF5D83554DE1C6BC84CC2A7270`)
-* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (996,681 字节，SHA256: `9023BC4DE25877F2B0D57D774F3E0E0B2A85EEEF5D83554DE1C6BC84CC2A7270`)
-* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (996,681 字节，SHA256: `9023BC4DE25877F2B0D57D774F3E0E0B2A85EEEF5D83554DE1C6BC84CC2A7270`)
-* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (996,681 字节，SHA256: `9023BC4DE25877F2B0D57D774F3E0E0B2A85EEEF5D83554DE1C6BC84CC2A7270`)
-* [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (49,598 字节)
+* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (1,000,706 字节，SHA256: `6B05BDBB2162B3570F1ED628756DE2D07C7E206FE051FE53585650CB140578F1`)
+* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (1,000,706 字节，SHA256: `6B05BDBB2162B3570F1ED628756DE2D07C7E206FE051FE53585650CB140578F1`)
+* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (1,000,706 字节，SHA256: `6B05BDBB2162B3570F1ED628756DE2D07C7E206FE051FE53585650CB140578F1`)
+* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (1,000,706 字节，SHA256: `6B05BDBB2162B3570F1ED628756DE2D07C7E206FE051FE53585650CB140578F1`)
+* [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (49,830 字节)
 
 ### 3. 最新云端编译产物（Run #105 / Commit `008a5e0`）
 > **本次更新（5 处反风控与动态过滤升级）**：
