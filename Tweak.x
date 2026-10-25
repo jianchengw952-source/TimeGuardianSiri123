@@ -75,7 +75,8 @@ typedef struct {
     int rawReferenceFrame;               // 0x88
     int signalEnvironmentType;           // 0x8C
     double ellipsoidalAltitude;          // 0x90
-    BOOL fromSimulationController;       // 0x98 (严格对齐 0x9C = 156 字节，防止写穿调用方 x8 栈帧)
+    BOOL fromSimulationController;       // 0x98
+    uint8_t _reservedPadding[32];        // 必须保留！兼容 iOS 16/17 尾部扩展字节，防止 gOrig_CLLoc_clientLoc 写穿栈帧
 } AGCLDaemonLocation;
 #pragma pack(pop)
 
@@ -17960,7 +17961,9 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 - (CLLocationDistance)ellipsoidalAltitude {
     if (agIsCurrentProcessTargetedForLocSpoof() && !agIsInAppCustomConstructedLocation(self) && !agIsCleanSpoofedLocation(self)) {
         AGSpoofedTelemetry tel;
-        if (agGetOrBindTelemetryForLocation(self, &tel) && tel.valid) return tel.alt - 3.2;
+        if (agGetOrBindTelemetryForLocation(self, &tel) && tel.valid) {
+            return tel.alt + agGeoidSeparationForCoord(tel.lat, tel.lon);
+        }
     }
     return %orig;
 }
@@ -17999,7 +18002,8 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 
 - (CLLocationSpeedAccuracy)speedAccuracy {
     CLLocationSpeedAccuracy orig = %orig;
-    if (agIsCurrentProcessTargetedForLocSpoof() && orig < 0.0) {
+    if (agIsCurrentProcessTargetedForLocSpoof() && !agIsInAppCustomConstructedLocation(self)) {
+        if ([self speed] <= 0.0) return (orig >= 0.0) ? orig : 0.18;
         return 0.24;
     }
     return orig;
@@ -18007,8 +18011,10 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 
 - (CLLocationDirectionAccuracy)courseAccuracy {
     CLLocationDirectionAccuracy orig = %orig;
-    if (agIsCurrentProcessTargetedForLocSpoof() && orig < 0.0) {
-        return 14.2;
+    if (agIsCurrentProcessTargetedForLocSpoof() && !agIsInAppCustomConstructedLocation(self)) {
+        // 关键防检测修复：当静止无航向 (course < 0) 时，硬件原生 courseAccuracy 必须为 -1.0，绝不能返回正数 14.2！
+        if ([self course] < 0.0) return -1.0;
+        return (orig > 0.0) ? orig : 14.2;
     }
     return orig;
 }
@@ -18044,6 +18050,15 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
         return 6378137.0 * c;
     }
     return %orig(location);
+}
+
+- (NSString *)description {
+    if (agIsCurrentProcessTargetedForLocSpoof() && !agIsInAppCustomConstructedLocation(self)) {
+        CLLocationCoordinate2D c = [self coordinate];
+        return [NSString stringWithFormat:@"<+%.8f,+%.8f> +/- %.2fm (speed %.2f mps / course %.2f) @ %@",
+                c.latitude, c.longitude, [self horizontalAccuracy], [self speed], [self course], [self timestamp]];
+    }
+    return %orig;
 }
 
 %end
@@ -18292,7 +18307,7 @@ static AGCLDaemonLocation agDyn_CLLoc_clientLoc(CLLocation *self, SEL _cmd) {
             raw.rawCoordinate.longitude = tel.lon;
             raw.horizontalAccuracy = tel.hAcc;
             raw.altitude = tel.alt;
-            raw.ellipsoidalAltitude = tel.alt - 3.2;
+            raw.ellipsoidalAltitude = tel.alt + agGeoidSeparationForCoord(tel.lat, tel.lon);
             raw.verticalAccuracy = tel.vAcc;
             raw.speed = spd;
             raw.course = crs;
@@ -18303,8 +18318,8 @@ static AGCLDaemonLocation agDyn_CLLoc_clientLoc(CLLocation *self, SEL _cmd) {
 
             if (shieldOn) {
                 raw.suitability = 1;
-                raw.speedAccuracy = 0.24;
-                raw.courseAccuracy = 14.2;
+                raw.speedAccuracy = (spd <= 0.0) ? 0.18 : 0.24;
+                raw.courseAccuracy = (tel.course < 0.0) ? -1.0 : 14.2;
                 raw.confidence = 65;
                 raw.lifespan = 20.0;
                 raw.type = 1;
@@ -18405,6 +18420,7 @@ static AGMethodIMPBackup gClientHookTable[] = {
     {"CLLocation", "courseAccuracy", NO, NO, NULL, NULL, NULL},
     {"CLLocation", "timestamp", NO, NO, NULL, NULL, NULL},
     {"CLLocation", "distanceFromLocation:", NO, NO, NULL, NULL, NULL},
+    {"CLLocation", "description", NO, NO, NULL, NULL, NULL},
     {"CLLocationManager", "location", NO, NO, NULL, NULL, NULL},
     {"CLLocationManager", "startUpdatingLocation", NO, NO, NULL, NULL, NULL},
     {"CLLocationManager", "requestLocation", NO, NO, NULL, NULL, NULL},
@@ -18429,9 +18445,8 @@ static void agInstallAntiDetectionCHooksIfNeeded(void) {
     if (gHasInstalledCHooks) return;
     gHasInstalledCHooks = YES;
 
-    MSHookFunction((void *)dladdr, (void *)hooked_dladdr, (void **)&orig_dladdr);
-    MSHookFunction((void *)_dyld_get_image_name, (void *)hooked_dyld_get_image_name, (void **)&orig_dyld_get_image_name);
-
+    // 铁律：严禁 MSHookFunction(dladdr) 与 _dyld_get_image_name！
+    // 现代 App (抖音 HMD / 微信 Matrix / 钉钉 KSCrash) 后台线程高频调用 dladdr 回溯调用栈，篡改 dli_fbase/dli_saddr 会导致偏移下溢触发 SIGBUS(10)/SIGSEGV(11) 群崩！
     void *snHandle = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY);
     if (snHandle) {
         void *cnSym = dlsym(snHandle, "CNCopyCurrentNetworkInfo");
