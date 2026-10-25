@@ -1,29 +1,52 @@
-name: Build 时光守护siri123 (v6.0.0)
+name: Build Dopamine (Rootless) & Relaxin (RootHide) Packages
 
-on: [push, workflow_dispatch]
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        jailbreak_scheme: [rootless, roothide]
+
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Setup Theos on macOS
-        run: |
-          brew install ldid xz
-          git clone --recursive --depth=1 https://github.com/theos/theos.git $HOME/theos
-          rm -rf $HOME/theos/sdks
-          git clone --depth=1 https://github.com/theos/sdks.git $HOME/theos/sdks
+    - name: Install Theos & Dependencies
+      run: |
+        brew install ldid xz dpkg
+        git clone --recursive https://github.com/theos/theos.git $HOME/theos
+        if [ "${{ matrix.jailbreak_scheme }}" = "roothide" ]; then
+          git clone https://github.com/roothide/theos-roothide.git /tmp/theos-roothide || true
+          if [ -d "/tmp/theos-roothide" ]; then
+            cp -rf /tmp/theos-roothide/* $HOME/theos/ || true
+          fi
+        fi
+        curl -sL https://github.com/theos/sdks/archive/master.tar.gz | tar -xz -C $HOME/theos/sdks --strip-components=1
 
-      - name: Build Package
-        run: |
-          export THEOS=$HOME/theos
-          chmod 0755 layout/DEBIAN/postinst || true
-          make package FINALPACKAGE=1
+    - name: Build Tweak Package (${{ matrix.jailbreak_scheme }})
+      env:
+        THEOS: ${{ runner.os == 'macOS' && format('{0}/theos', env.HOME) || '' }}
+      run: |
+        export THEOS=$HOME/theos
+        chmod 755 layout/DEBIAN/postinst
+        if [ "${{ matrix.jailbreak_scheme }}" = "roothide" ]; then
+          make clean
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64e || make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64e
+        else
+          make clean
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS="arm64 arm64e"
+        fi
 
-      - name: Upload Compiled .deb
-        uses: actions/upload-artifact@v4
-        with:
-          name: TimeGuardianSiri123-arm64-Deb
-          path: packages/*.deb
+    - name: Upload Deb Artifact (${{ matrix.jailbreak_scheme }})
+      uses: actions/upload-artifact@v4
+      with:
+        name: AngelGuardian-${{ matrix.jailbreak_scheme }}-deb
+        path: packages/*.deb

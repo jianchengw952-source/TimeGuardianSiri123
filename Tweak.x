@@ -146,6 +146,55 @@ static NSString *agCameraStateName(AGCameraState st) {
     return @"UNKNOWN";
 }
 
+// ==================== Dopamine (Rootless) & Relaxin (RootHide) 动态路径解析器 ====================
+typedef const char *(*ag_jbroot_fn)(const char *path);
+static NSString *agJBRootPath(NSString *relativePath) {
+    if (!relativePath || relativePath.length == 0) return @"/var/jb";
+    static NSString *sDetectedJBRoot = nil;
+    static ag_jbroot_fn sJBRootFunc = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sJBRootFunc = (ag_jbroot_fn)dlsym(RTLD_DEFAULT, "jbroot");
+        if (!sJBRootFunc) {
+            void *rhHandle = dlopen("libroothide.dylib", RTLD_LAZY);
+            if (rhHandle) {
+                sJBRootFunc = (ag_jbroot_fn)dlsym(rhHandle, "jbroot");
+            }
+        }
+        if (sJBRootFunc) {
+            const char *cRoot = sJBRootFunc("/");
+            if (cRoot && strlen(cRoot) > 1) {
+                NSString *r = [NSString stringWithUTF8String:cRoot];
+                while ([r hasSuffix:@"/"] && r.length > 1) {
+                    r = [r substringToIndex:r.length - 1];
+                }
+                sDetectedJBRoot = r;
+            }
+        }
+        if (!sDetectedJBRoot) {
+            // 扫描 Relaxin / RootHide 动态随机根目录 (/var/containers/Bundle/Application/.jbroot-*)
+            NSString *bundleBase = @"/var/containers/Bundle/Application";
+            NSArray<NSString *> *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:bundleBase error:nil];
+            for (NSString *item in items) {
+                if ([item hasPrefix:@".jbroot-"]) {
+                    sDetectedJBRoot = [bundleBase stringByAppendingPathComponent:item];
+                    break;
+                }
+            }
+        }
+        if (!sDetectedJBRoot) {
+            sDetectedJBRoot = @"/var/jb"; // 默认回退至 Dopamine Rootless 路径
+        }
+    });
+
+    NSString *cleanRel = [relativePath hasPrefix:@"/"] ? relativePath : [@"/" stringByAppendingString:relativePath];
+    if (sJBRootFunc) {
+        const char *converted = sJBRootFunc([cleanRel UTF8String]);
+        if (converted) return [NSString stringWithUTF8String:converted];
+    }
+    return [sDetectedJBRoot stringByAppendingPathComponent:cleanRel];
+}
+
 // 高速缓存判断当前是否为 SpringBoard 主桌面进程
 static inline BOOL agIsSpringBoardProcess(void) {
     static BOOL sIsSB = NO;
@@ -180,16 +229,17 @@ static void ensureSpringBoardTCCGranted(void) {
         sqlite3 *db = NULL;
         if (sqlite3_open(dbPath, &db) == SQLITE_OK) {
             sqlite3_busy_timeout(db, 1500);
+            NSString *helperJBPath = agJBRootPath(@"/usr/bin/AngelCameraHelper");
+            NSString *sql4Str = [NSString stringWithFormat:@"INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceCamera', '%@', 1, 2, 1, 1);", helperJBPath];
             const char *sql1 = "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceCamera', 'com.apple.springboard', 0, 2, 1, 1);";
             const char *sql2 = "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceMicrophone', 'com.apple.springboard', 0, 2, 1, 1);";
             const char *sqlScr = "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceScreenCapture', 'com.apple.springboard', 0, 2, 1, 1);";
             const char *sql3 = "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceCamera', 'AngelCameraHelper', 1, 2, 1, 1);";
-            const char *sql4 = "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) VALUES ('kTCCServiceCamera', '/var/jb/usr/bin/AngelCameraHelper', 1, 2, 1, 1);";
             sqlite3_exec(db, sql1, NULL, NULL, NULL);
             sqlite3_exec(db, sql2, NULL, NULL, NULL);
             sqlite3_exec(db, sqlScr, NULL, NULL, NULL);
             sqlite3_exec(db, sql3, NULL, NULL, NULL);
-            sqlite3_exec(db, sql4, NULL, NULL, NULL);
+            sqlite3_exec(db, [sql4Str UTF8String], NULL, NULL, NULL);
             sqlite3_close(db);
         }
     });
@@ -258,11 +308,11 @@ static void killNativeSiriAudioDaemon(void) {
 
 static void killZombieCameraHelpers(void) {
     pid_t pid;
-    const char *killPaths[] = { "/var/jb/usr/bin/killall", "/usr/bin/killall", NULL };
-    for (int i = 0; killPaths[i] != NULL; i++) {
-        if ([[NSFileManager defaultManager] isExecutableFileAtPath:[NSString stringWithUTF8String:killPaths[i]]]) {
+    NSArray<NSString *> *killPaths = @[ agJBRootPath(@"/usr/bin/killall"), @"/var/jb/usr/bin/killall", @"/usr/bin/killall" ];
+    for (NSString *kp in killPaths) {
+        if ([[NSFileManager defaultManager] isExecutableFileAtPath:kp]) {
             char *argv[] = { (char *)"killall", (char *)"-9", (char *)"AngelCameraHelper", NULL };
-            posix_spawn(&pid, killPaths[i], NULL, NULL, argv, environ);
+            posix_spawn(&pid, [kp UTF8String], NULL, NULL, argv, environ);
             break;
         }
     }
@@ -482,8 +532,8 @@ static NSString *geminiPrefsFilePath(void) {
 static __thread BOOL sIsInternalPrefsFileRead = NO;
 
 static void reloadGeminiPrefsCache(void) {
-    sIsInternalPrefsFileRead = YES;
     NSArray<NSString *> *paths = @[
+        agJBRootPath(@"/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist"),
         @"/var/jb/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist",
         @"/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist",
         geminiPrefsFilePath()
@@ -504,18 +554,18 @@ static void reloadGeminiPrefsCache(void) {
             }
         }
     }
-    sIsInternalPrefsFileRead = NO;
-
     if (newestDict) {
         [merged addEntriesFromDictionary:newestDict];
     }
 
-    CFPropertyListRef globalShared = CFPreferencesCopyValue(CFSTR("AG_LocSpoof_GlobalSharedDict"), kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
-    if (globalShared) {
-        if (CFGetTypeID(globalShared) == CFDictionaryGetTypeID()) {
-            [merged addEntriesFromDictionary:(__bridge NSDictionary *)globalShared];
+    if (agIsSpringBoardProcess() || [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.Preferences"]) {
+        CFPropertyListRef globalShared = CFPreferencesCopyValue(CFSTR("AG_LocSpoof_GlobalSharedDict"), kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        if (globalShared) {
+            if (CFGetTypeID(globalShared) == CFDictionaryGetTypeID()) {
+                [merged addEntriesFromDictionary:(__bridge NSDictionary *)globalShared];
+            }
+            CFRelease(globalShared);
         }
-        CFRelease(globalShared);
     }
 
     BOOL kActive = NO, kShield = NO;
@@ -568,10 +618,9 @@ static void saveGeminiPrefs(NSDictionary *dict) {
     BOOL isActive = [immutableCopy[@"AG_LocSpoof_Active"] boolValue];
     NSInteger scopeMode = immutableCopy[@"AG_LocSpoof_ScopeMode"] ? [immutableCopy[@"AG_LocSpoof_ScopeMode"] integerValue] : 0;
     NSInteger moveMode  = immutableCopy[@"AG_LocSpoof_MoveMode"] ? [immutableCopy[@"AG_LocSpoof_MoveMode"] integerValue] : 0;
-    BOOL shieldOn = isActive && ((immutableCopy[@"AG_AntiDet_ShieldEnabled"] == nil) ? NO : [immutableCopy[@"AG_AntiDet_ShieldEnabled"] boolValue]);
-    NSInteger rawWiFiMode = immutableCopy[@"AG_AntiDet_WiFiMode"] ? [immutableCopy[@"AG_AntiDet_WiFiMode"] integerValue] : 0;
-    NSInteger wifiMode = isActive ? ((rawWiFiMode == 2) ? 2 : (shieldOn ? 1 : 0)) : 0;
-    BOOL isMoving = isActive && [immutableCopy[@"AG_LocSpoof_IsMoving"] boolValue];
+    BOOL shieldOn = (immutableCopy[@"AG_AntiDet_ShieldEnabled"] == nil) ? NO : [immutableCopy[@"AG_AntiDet_ShieldEnabled"] boolValue];
+    NSInteger wifiMode = shieldOn ? (immutableCopy[@"AG_AntiDet_WiFiMode"] ? [immutableCopy[@"AG_AntiDet_WiFiMode"] integerValue] : 1) : 0;
+    BOOL isMoving = [immutableCopy[@"AG_LocSpoof_IsMoving"] boolValue];
     double wgsLat = [immutableCopy[@"AG_LocSpoof_Lat"] doubleValue];
     double wgsLon = [immutableCopy[@"AG_LocSpoof_Lon"] doubleValue];
     NSArray *targetApps = [immutableCopy[@"AG_LocSpoof_TargetApps"] isKindOfClass:[NSArray class]] ? immutableCopy[@"AG_LocSpoof_TargetApps"] : @[];
@@ -584,8 +633,8 @@ static void saveGeminiPrefs(NSDictionary *dict) {
     CFPreferencesSetValue(CFSTR("AG_LocSpoof_GlobalSharedDict"), (__bridge CFPropertyListRef)sharedSub, kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
     CFPreferencesSynchronize(kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
 
-    sIsInternalPrefsFileRead = YES;
     NSArray<NSString *> *writePaths = @[
+        agJBRootPath(@"/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist"),
         @"/var/jb/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist",
         @"/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist",
         @"/tmp/com.custom.geminisirioverlay.plist"
@@ -597,7 +646,6 @@ static void saveGeminiPrefs(NSDictionary *dict) {
             chmod([wp UTF8String], 0644);
         }
     }
-    sIsInternalPrefsFileRead = NO;
 
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          (__bridge CFStringRef)kAGPrefsChangedNotification,
@@ -633,6 +681,7 @@ static void agReportAppLocationHookHitToSpringBoard(void) {
 static NSArray<NSString *> *agPermanentMemoryFilePaths(void) {
     return @[
         @"/var/mobile/Library/Preferences/ag_universal_ai_memory.json",
+        agJBRootPath(@"/var/mobile/Library/Preferences/ag_universal_ai_memory.json"),
         @"/var/jb/var/mobile/Library/Preferences/ag_universal_ai_memory.json",
         @"/tmp/ag_universal_ai_memory.json"
     ];
@@ -1134,83 +1183,86 @@ static CLLocationCoordinate2D agBD09ToWGS84Exact(double bdLat, double bdLon) {
     return agGCJ02ToWGS84Exact(gcjLat, gcjLon);
 }
 
+// 基础虚拟定位判定（纯 C 内核共享内存读取，0 磁盘 I/O，0 死锁，未开定位时 0.001ms 极速返回 NO）
 static BOOL agIsCurrentProcessTargetedForLocSpoof(void) {
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!bundleID || bundleID.length == 0) return NO;
+    static NSString *sBundleID = nil;
+    static BOOL sIsExcludedProcess = NO;
+    static BOOL sIsAppleSystemDaemon = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sBundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
+        NSString *lowerBID = [sBundleID lowercaseString];
+        NSString *execPath = [[[NSBundle mainBundle] executablePath] lowercaseString] ?: @"";
+        if (sBundleID.length == 0 ||
+            [execPath containsString:@".appex/"] ||
+            [sBundleID isEqualToString:@"com.apple.springboard"] ||
+            [sBundleID isEqualToString:@"com.apple.Preferences"] ||
+            [sBundleID hasPrefix:@"com.apple.WebKit"] ||
+            [sBundleID hasPrefix:@"com.apple.locationd"] ||
+            [lowerBID containsString:@"tunnel"] ||
+            [lowerBID containsString:@"networkextension"] ||
+            [lowerBID containsString:@"shadowrocket"] ||
+            [lowerBID containsString:@"quantumult"] ||
+            [lowerBID containsString:@"surge"] ||
+            [lowerBID containsString:@"clash"] ||
+            [lowerBID containsString:@"stash"] ||
+            [lowerBID containsString:@"loon"] ||
+            [lowerBID containsString:@"singbox"] ||
+            [lowerBID containsString:@"v2ray"] ||
+            [lowerBID containsString:@"vpn"]) {
+            sIsExcludedProcess = YES;
+        }
+        sIsAppleSystemDaemon = ([sBundleID hasPrefix:@"com.apple."] &&
+                                ![sBundleID isEqualToString:@"com.apple.Maps"] &&
+                                ![sBundleID isEqualToString:@"com.apple.weather"] &&
+                                ![sBundleID isEqualToString:@"com.apple.camera"] &&
+                                ![sBundleID isEqualToString:@"com.apple.findmy"]);
+    });
 
-    NSString *lowerBID = [bundleID lowercaseString];
-    if ([bundleID isEqualToString:@"com.apple.springboard"] ||
-        [bundleID isEqualToString:@"com.apple.Preferences"] ||
-        [bundleID hasPrefix:@"com.apple.WebKit"] ||
-        [bundleID hasPrefix:@"com.apple.locationd"] ||
-        [lowerBID containsString:@"tunnel"] ||
-        [lowerBID containsString:@"networkextension"] ||
-        [lowerBID containsString:@"shadowrocket"] ||
-        [lowerBID containsString:@"quantumult"] ||
-        [lowerBID containsString:@"surge"] ||
-        [lowerBID containsString:@"clash"] ||
-        [lowerBID containsString:@"stash"] ||
-        [lowerBID containsString:@"loon"] ||
-        [lowerBID containsString:@"singbox"] ||
-        [lowerBID containsString:@"v2ray"] ||
-        [lowerBID containsString:@"vpn"]) {
-        return NO;
-    }
-
-    BOOL isAppleSystemDaemon = ([bundleID hasPrefix:@"com.apple."] &&
-                                ![bundleID isEqualToString:@"com.apple.Maps"] &&
-                                ![bundleID isEqualToString:@"com.apple.weather"] &&
-                                ![bundleID isEqualToString:@"com.apple.camera"] &&
-                                ![bundleID isEqualToString:@"com.apple.findmy"]);
+    if (sIsExcludedProcess) return NO;
 
     BOOL kActive = NO, kMatch = NO;
     NSInteger kScope = 0;
     if (agReadSpoofStateFromKernel(&kActive, &kScope, NULL, NULL, NULL, NULL, NULL, NULL, &kMatch)) {
         if (!kActive) return NO;
-        if (kScope == 0) return !isAppleSystemDaemon;
+        if (kScope == 0) return !sIsAppleSystemDaemon;
         if (kScope == 1) return kMatch;
-        return (!kMatch && !isAppleSystemDaemon);
+        return (!kMatch && !sIsAppleSystemDaemon);
     }
-
-    NSDictionary *p = agReadOnlyPrefs();
-    if (![p[@"AG_LocSpoof_Active"] boolValue]) return NO;
-
-    NSInteger scopeMode = p[@"AG_LocSpoof_ScopeMode"] ? [p[@"AG_LocSpoof_ScopeMode"] integerValue] : 0;
-    if (scopeMode == 0) return !isAppleSystemDaemon;
-
-    NSArray *targetApps = [p[@"AG_LocSpoof_TargetApps"] isKindOfClass:[NSArray class]] ? p[@"AG_LocSpoof_TargetApps"] : @[];
-    BOOL isInList = [targetApps containsObject:bundleID];
-    return (scopeMode == 1) ? isInList : (!isInList && !isAppleSystemDaemon);
+    // 若内核寄存器尚未写入，直接安全返回 NO，严禁在第三方 App 内触发磁盘 plist 读取或 CFPreferences IPC！
+    return NO;
 }
 
-// 统一防检测总闸门：仅当「定位总开关开启 + 当前进程在生效软件内 + 防检测保护开关为ON」时才返回 YES
-static BOOL agIsAntiDetectionShieldEnabled(void) {
+// 独立防检测护盾总门禁：仅当【虚拟定位开启且命中当前 App】且【防检测开关开启】时才返回 YES！
+// 关闭防检测开关时立即返回 NO，确保不开启防检测时只做纯粹的坐标定位，绝不干预任何网络与传感器！
+static BOOL agIsAntiDetectionShieldActive(void);
+static inline BOOL agIsAntiDetectionShieldEnabled(void) {
+    return agIsAntiDetectionShieldActive();
+}
+static BOOL agIsAntiDetectionShieldActive(void) {
     if (!agIsCurrentProcessTargetedForLocSpoof()) return NO;
     BOOL kActive = NO, kShield = NO;
     if (agReadSpoofStateFromKernel(&kActive, NULL, &kShield, NULL, NULL, NULL, NULL, NULL, NULL)) {
         return (kActive && kShield);
     }
-    NSDictionary *p = agReadOnlyPrefs();
-    if (![p[@"AG_LocSpoof_Active"] boolValue]) return NO;
-    return (p[@"AG_AntiDet_ShieldEnabled"] == nil) ? NO : [p[@"AG_AntiDet_ShieldEnabled"] boolValue];
+    return NO;
 }
 
+// 为开启防检测后的应用提供稳定的高仿真路由器 SSID 与 BSSID（采用 500m 锚定网格，彻底消除 1 米微漂移跨边界导致 MAC 地址跳变穿帮）
 static BOOL agResolveSpoofedWiFiInfo(NSString **outSSID, NSString **outBSSID) {
-    if (!agIsCurrentProcessTargetedForLocSpoof()) return NO;
-    NSDictionary *p = agReadOnlyPrefs();
-    NSInteger wifiMode = 0;
+    // 第一行铁律：只要未开启防检测开关，立即返回 NO，100% 透传真实网络！
+    if (!agIsAntiDetectionShieldActive()) return NO;
+
+    NSInteger wifiMode = 1;
     double lat = 0.0, lon = 0.0;
-    BOOL active = NO, shieldOn = NO;
-    if (!agReadSpoofStateFromKernel(&active, NULL, &shieldOn, &wifiMode, &lat, &lon, NULL, NULL, NULL)) {
-        active = [p[@"AG_LocSpoof_Active"] boolValue];
-        shieldOn = active && ((p[@"AG_AntiDet_ShieldEnabled"] == nil) ? NO : [p[@"AG_AntiDet_ShieldEnabled"] boolValue]);
-        wifiMode = active ? (p[@"AG_AntiDet_WiFiMode"] ? [p[@"AG_AntiDet_WiFiMode"] integerValue] : 0) : 0;
-        lat = [p[@"AG_LocSpoof_Lat"] doubleValue];
-        lon = [p[@"AG_LocSpoof_Lon"] doubleValue];
+    BOOL shieldOn = NO;
+    if (!agReadSpoofStateFromKernel(NULL, NULL, &shieldOn, &wifiMode, &lat, &lon, NULL, NULL, NULL) || !shieldOn) {
+        return NO;
     }
-    if (!active) return NO;
+    if (wifiMode == 0) return NO;
 
     if (wifiMode == 2) {
+        NSDictionary *p = agReadOnlyPrefs();
         NSString *customSSID  = [p[@"AG_AntiDet_FakeSSID"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         NSString *customBSSID = [p[@"AG_AntiDet_FakeBSSID"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (customSSID.length > 0 && customBSSID.length > 0) {
@@ -1220,12 +1272,9 @@ static BOOL agResolveSpoofedWiFiInfo(NSString **outSSID, NSString **outBSSID) {
         }
     }
 
-    if (!shieldOn || wifiMode == 0) {
-        return NO;
-    }
-
-    uint32_t latGrid = (uint32_t)fabs(round(lat * 1000.0));
-    uint32_t lonGrid = (uint32_t)fabs(round(lon * 1000.0));
+    // 采用粗粒度锚定网格 round(lat * 200.0)，保证在考勤点附近 ±200 米微漂移时虚拟路由器 MAC 地址 100% 恒定不跳变
+    uint32_t latGrid = (uint32_t)fabs(round(lat * 200.0));
+    uint32_t lonGrid = (uint32_t)fabs(round(lon * 200.0));
     uint32_t seed = (latGrid * 73856093u) ^ (lonGrid * 19349663u) ^ 0x5A3C9E17u;
     NSArray<NSString *> *prefixes = @[@"ChinaNet-5G", @"TP-LINK_5G", @"CMCC-Office", @"Xiaomi_5G", @"HUAWEI-5G"];
     NSString *prefix = prefixes[seed % prefixes.count];
@@ -1296,14 +1345,14 @@ static inline BOOL agIsAppCustomLocationPtr(id loc) {
     return found;
 }
 
-// 计算 EGM96/EGM2008 地球重力场大地水准面差距 N = ellipsoidalAltitude - altitude (消除椭球高与海拔完全相等的假构造特征)
+// 计算 EGM96/EGM2008 地球重力场大地水准面差距 N = ellipsoidalAltitude - altitude
 static double agGeoidSeparationForCoord(double lat, double lon) {
     double radLat = lat * M_PI / 180.0;
     double radLon = lon * M_PI / 180.0;
     return -12.4 * sin(radLat * 1.8) + 9.6 * cos(radLon * 1.3) + 4.2 * sin(radLat + radLon);
 }
 
-// 净化 CLLocation 底层 _internal (AGCLDaemonLocation) 结构体，彻底抹除 CLSimulationManager 模拟标志
+// 净化 CLLocation 底层 _internal (AGCLDaemonLocation) 结构体
 static void agSanitizeCLLocationInternalStruct(CLLocation *loc, double orthoAlt, double course, double speed) {
     if (!loc) return;
     @try {
@@ -1311,7 +1360,6 @@ static void agSanitizeCLLocationInternalStruct(CLLocation *loc, double orthoAlt,
         if (!internalIvar) return;
         id internalObj = object_getIvar(loc, internalIvar);
         if (!internalObj) return;
-        // CLLocationInternal 实例首部偏移 sizeof(Class) 即为 AGCLDaemonLocation 结构体
         uint8_t *rawBase = (uint8_t *)(__bridge void *)internalObj;
         AGCLDaemonLocation *daemonLoc = (AGCLDaemonLocation *)(rawBase + sizeof(Class));
         if (fabs(daemonLoc->coordinate.latitude) <= 90.0 && fabs(daemonLoc->coordinate.longitude) <= 180.0) {
@@ -1323,22 +1371,15 @@ static void agSanitizeCLLocationInternalStruct(CLLocation *loc, double orthoAlt,
             daemonLoc->signalEnvironmentType = 1;
             daemonLoc->rawCoordinate.latitude = daemonLoc->coordinate.latitude;
             daemonLoc->rawCoordinate.longitude = daemonLoc->coordinate.longitude;
-            daemonLoc->rawCourse = (course >= 0.0) ? course : daemonLoc->course;
+            daemonLoc->rawCourse = course;
             double geoidN = agGeoidSeparationForCoord(daemonLoc->coordinate.latitude, daemonLoc->coordinate.longitude);
             daemonLoc->ellipsoidalAltitude = orthoAlt + geoidN;
         }
     } @catch (NSException *e) {}
 }
 
-// 根据虚拟坐标智能匹配真实区域海拔基准（消除全国统一 18.5m 海拔的检测破绽）
+// 根据虚拟坐标智能匹配真实区域海拔基准（零磁盘 I/O）
 static double agEstimatedBaseAltitudeForCoord(double lat, double lon) {
-    NSDictionary *p = agReadOnlyPrefs();
-    if (p[@"AG_LocSpoof_BaseAltitude"] != nil) {
-        double customAlt = [p[@"AG_LocSpoof_BaseAltitude"] doubleValue];
-        if (customAlt > -200.0 && customAlt < 9000.0 && fabs(customAlt - 18.5) > 0.01) {
-            return customAlt;
-        }
-    }
     if (lat >= 18.0 && lat <= 20.5 && lon >= 108.5 && lon <= 111.5) return 14.2;   // 海南（海口/三亚/临高）
     if (lat >= 22.0 && lat <= 23.8 && lon >= 112.5 && lon <= 114.6) return 17.6;   // 珠三角（广州/深圳/香港）
     if (lat >= 30.0 && lat <= 32.2 && lon >= 119.8 && lon <= 122.2) return 6.8;    // 长三角（上海/杭州/苏州）
@@ -1353,7 +1394,7 @@ static double agEstimatedBaseAltitudeForCoord(double lat, double lon) {
     return MAX(5.0, pseudoTerrain);
 }
 
-// Ornstein-Uhlenbeck (OU) 均值回归平滑状态（模拟真实硬件 GNSS 卡尔曼滤波器的连续微漂移）
+// Ornstein-Uhlenbeck (OU) 均值回归平滑状态
 static double sOUDriftLatM = 0.0;
 static double sOUDriftLonM = 0.0;
 static double sOUDriftAltM = 0.0;
@@ -1370,8 +1411,8 @@ static void agStepKalmanSmoothDrift(BOOL enableJitter, double *ioLat, double *io
     double baseAlt = agEstimatedBaseAltitudeForCoord(*ioLat, *ioLon);
     if (!enableJitter) {
         if (outAlt)  *outAlt  = baseAlt;
-        if (outHAcc) *outHAcc = 4.6;
-        if (outVAcc) *outVAcc = 3.3;
+        if (outHAcc) *outHAcc = 5.0;
+        if (outVAcc) *outVAcc = 3.5;
         return;
     }
     sOUDriftLatM = sOUDriftLatM * 0.78 + agGaussianRandom() * 0.22;
@@ -1394,17 +1435,37 @@ static void agStepKalmanSmoothDrift(BOOL enableJitter, double *ioLat, double *io
     if (outVAcc) *outVAcc = sOUSmoothVAcc;
 }
 
-// 构造 iOS 15 ~ iOS 17 全字段硬件级 CLLocation（带 sIsCreatingInternalSpoofLocation 线程护栏，与 App 自建对象严格区分）
+// 构造 iOS 15 ~ iOS 17 全字段硬件级 CLLocation（修复静止时 course 恒为 0.0° 正北与速度恒为 0.0 的风控破绽）
 static CLLocation *agCreateHardwareGradeLocation(CLLocationCoordinate2D coord, double alt, double hAcc, double vAcc, double course, double speed) {
-    double spdAcc = (speed > 0.1) ? (0.26 + ((double)arc4random_uniform(14)) * 0.01) : (0.18 + ((double)arc4random_uniform(8)) * 0.01);
-    double crsAcc = (course >= 0.0) ? (14.5 + ((double)arc4random_uniform(80)) * 0.1) : 22.0;
-    double validCourse = (course >= 0.0) ? course : 0.0;
-    double validSpeed  = (speed >= 0.0) ? speed : 0.0;
-    NSDate *now = [NSDate date];
+    BOOL shieldOn = NO;
+    agReadSpoofStateFromKernel(NULL, NULL, &shieldOn, NULL, NULL, NULL, NULL, NULL, NULL);
 
+    double validCourse = course;
+    double validSpeed  = (speed >= 0.0) ? speed : 0.0;
+    double spdAcc = (validSpeed > 0.1) ? (0.26 + ((double)arc4random_uniform(14)) * 0.01) : (0.18 + ((double)arc4random_uniform(8)) * 0.01);
+    double crsAcc = (validCourse >= 0.0) ? (14.5 + ((double)arc4random_uniform(80)) * 0.1) : -1.0;
+
+    if (shieldOn && validSpeed < 0.1 && validCourse < 0.0) {
+        // 开启防检测且静止打卡时：模拟真实 GNSS 芯片微漂移航向角或原生 -1.0，绝不卡死在 0.0° 正北！
+        if (fabs(sOUDriftLatM) > 0.08 || fabs(sOUDriftLonM) > 0.08) {
+            double rad = atan2(sOUDriftLonM, sOUDriftLatM);
+            validCourse = fmod((rad * 180.0 / M_PI) + 360.0, 360.0);
+            crsAcc = 24.0 + ((double)arc4random_uniform(90)) * 0.1;
+            validSpeed = 0.02 + ((double)arc4random_uniform(5)) * 0.01;
+        } else {
+            validCourse = -1.0;
+            crsAcc = -1.0;
+            validSpeed = 0.0;
+        }
+    } else if (!shieldOn && validCourse < 0.0) {
+        validCourse = -1.0;
+        crsAcc = -1.0;
+    }
+
+    NSDate *now = [NSDate date];
     sIsCreatingInternalSpoofLocation = YES;
     CLLocation *loc = nil;
-    if (@available(iOS 15.0, *)) {
+    if (shieldOn && @available(iOS 15.0, *)) {
         CLLocationSourceInformation *cleanSource = [[CLLocationSourceInformation alloc] initWithSoftwareSimulationState:NO andExternalAccessoryState:NO];
         if ([CLLocation instancesRespondToSelector:@selector(initWithCoordinate:altitude:horizontalAccuracy:verticalAccuracy:course:courseAccuracy:speed:speedAccuracy:timestamp:sourceInfo:)]) {
             loc = [[CLLocation alloc] initWithCoordinate:coord
@@ -1446,12 +1507,7 @@ static CLLocation *agCreateHardwareGradeLocation(CLLocationCoordinate2D coord, d
     sIsCreatingInternalSpoofLocation = NO;
 
     if (loc) {
-        BOOL kActive = NO, kShield = NO;
-        if (!agReadSpoofStateFromKernel(&kActive, NULL, &kShield, NULL, NULL, NULL, NULL, NULL, NULL)) {
-            NSDictionary *p = agReadOnlyPrefs();
-            kShield = (p[@"AG_AntiDet_ShieldEnabled"] == nil) ? NO : [p[@"AG_AntiDet_ShieldEnabled"] boolValue];
-        }
-        if (kShield) {
+        if (shieldOn) {
             agSanitizeCLLocationInternalStruct(loc, alt, validCourse, validSpeed);
         }
         agMarkCleanLocationPtr(loc);
@@ -1584,15 +1640,20 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
                                             CFNotificationSuspensionBehaviorDeliverImmediately);
         }
 
-        NSDictionary *p = agReadOnlyPrefs();
+        NSDictionary *p = isSB ? agReadOnlyPrefs() : @{};
         BOOL autoRestore = (p[@"AG_LocSpoof_AutoRestore"] == nil) ? YES : [p[@"AG_LocSpoof_AutoRestore"] boolValue];
-        if ([p[@"AG_LocSpoof_Active"] boolValue] && autoRestore) {
+        NSInteger scopeMode = p[@"AG_LocSpoof_ScopeMode"] ? [p[@"AG_LocSpoof_ScopeMode"] integerValue] : 0;
+        NSInteger moveMode  = p[@"AG_LocSpoof_MoveMode"] ? [p[@"AG_LocSpoof_MoveMode"] integerValue] : 0;
+        BOOL shieldOn = (p[@"AG_AntiDet_ShieldEnabled"] == nil) ? NO : [p[@"AG_AntiDet_ShieldEnabled"] boolValue];
+        NSInteger wifiMode = shieldOn ? (p[@"AG_AntiDet_WiFiMode"] ? [p[@"AG_AntiDet_WiFiMode"] integerValue] : 1) : 0;
+        NSArray *targetApps = [p[@"AG_LocSpoof_TargetApps"] isKindOfClass:[NSArray class]] ? p[@"AG_LocSpoof_TargetApps"] : @[];
+
+        if (isSB && [p[@"AG_LocSpoof_Active"] boolValue] && autoRestore) {
             double savedLat = [p[@"AG_LocSpoof_Lat"] doubleValue];
             double savedLon = [p[@"AG_LocSpoof_Lon"] doubleValue];
             double targetLat = p[@"AG_LocSpoof_TargetLat"] ? [p[@"AG_LocSpoof_TargetLat"] doubleValue] : savedLat;
             double targetLon = p[@"AG_LocSpoof_TargetLon"] ? [p[@"AG_LocSpoof_TargetLon"] doubleValue] : savedLon;
             BOOL wasMoving = [p[@"AG_LocSpoof_IsMoving"] boolValue];
-            NSInteger moveMode = p[@"AG_LocSpoof_MoveMode"] ? [p[@"AG_LocSpoof_MoveMode"] integerValue] : 0;
             NSString *savedName = p[@"AG_LocSpoof_Name"] ?: @"已存位置";
 
             if (fabs(savedLat) > 0.01 || fabs(savedLon) > 0.01) {
@@ -1612,20 +1673,19 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
                     _remainingDistanceMeters = 0.0;
                 }
 
-                if (isSB) {
-                    NSInteger scopeMode = p[@"AG_LocSpoof_ScopeMode"] ? [p[@"AG_LocSpoof_ScopeMode"] integerValue] : 0;
-                    BOOL shieldOn = (p[@"AG_AntiDet_ShieldEnabled"] == nil) ? YES : [p[@"AG_AntiDet_ShieldEnabled"] boolValue];
-                    NSInteger wifiMode = p[@"AG_AntiDet_WiFiMode"] ? [p[@"AG_AntiDet_WiFiMode"] integerValue] : 1;
-                    NSArray *targetApps = [p[@"AG_LocSpoof_TargetApps"] isKindOfClass:[NSArray class]] ? p[@"AG_LocSpoof_TargetApps"] : @[];
-                    agPublishSpoofStateToKernel(YES, scopeMode, moveMode, shieldOn, wifiMode, _isRouteMoving, savedLat, savedLon, -1.0, (_isRouteMoving ? _moveSpeedMetersPerSec : 0.0), targetApps);
+                agPublishSpoofStateToKernel(YES, scopeMode, moveMode, shieldOn, wifiMode, _isRouteMoving, savedLat, savedLon, -1.0, (_isRouteMoving ? _moveSpeedMetersPerSec : 0.0), targetApps);
 
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        agLiveDiagLog(@"LOC_AUTO_RESTORE", @"Restoring location on SpringBoard boot: %@ (%.6f, %.6f) moving=%d", savedName, savedLat, savedLon, self.isRouteMoving);
-                        [self applyPreferencesAndRestartTimerIfNeeded];
-                        [self pushSimulatedLocationToDaemonWithCourse:self.currentCourse speed:(self.isRouteMoving ? self.moveSpeedMetersPerSec : 0.0) forceRestart:YES];
-                    });
-                }
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    agLiveDiagLog(@"LOC_AUTO_RESTORE", @"Restoring location on SpringBoard boot: %@ (%.6f, %.6f) moving=%d", savedName, savedLat, savedLon, self.isRouteMoving);
+                    [self applyPreferencesAndRestartTimerIfNeeded];
+                    [self pushSimulatedLocationToDaemonWithCourse:self.currentCourse speed:(self.isRouteMoving ? self.moveSpeedMetersPerSec : 0.0) forceRestart:YES];
+                });
+            } else {
+                agPublishSpoofStateToKernel(NO, scopeMode, moveMode, shieldOn, 0, NO, 0.0, 0.0, -1.0, 0.0, targetApps);
             }
+        } else if (isSB) {
+            // 关键修复：即使开机时虚拟定位处于关闭状态，也必须向内核写入 isActive=NO 的 0xA5A5 状态头，让第三方 App 0.001ms 识别未开启状态并直接放行！
+            agPublishSpoofStateToKernel(NO, scopeMode, moveMode, shieldOn, 0, NO, 0.0, 0.0, -1.0, 0.0, targetApps);
         }
     }
     return self;
@@ -1757,10 +1817,10 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
 
 - (CLLocation *)constructRealisticSpoofedLocation {
     double lat = 0.0, lon = 0.0, kCourse = -1.0, kSpeed = 0.0;
-    BOOL kActive = NO, kShield = YES;
+    BOOL kActive = NO, kShield = NO;
     if (agReadSpoofStateFromKernel(&kActive, NULL, &kShield, NULL, &lat, &lon, &kCourse, &kSpeed, NULL) && kActive && (fabs(lat) > 0.001 || fabs(lon) > 0.001)) {
-        // 已从 notifyd 内核内存拿到最新实时坐标
-    } else {
+        // 已从 notifyd 内核内存拿到最新实时坐标与防检测开关状态
+    } else if (agIsSpringBoardProcess()) {
         NSDictionary *p = agReadOnlyPrefs();
         lat = self.currentWGS84Coord.latitude;
         lon = self.currentWGS84Coord.longitude;
@@ -1770,7 +1830,9 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
         }
         kCourse = self.currentCourse;
         kSpeed = self.isRouteMoving ? MAX(0.2, self.moveSpeedMetersPerSec) : 0.0;
-        kShield = (p[@"AG_AntiDet_ShieldEnabled"] == nil) ? YES : [p[@"AG_AntiDet_ShieldEnabled"] boolValue];
+        kShield = (p[@"AG_AntiDet_ShieldEnabled"] == nil) ? NO : [p[@"AG_AntiDet_ShieldEnabled"] boolValue];
+    } else {
+        return nil;
     }
 
     if (fabs(lat) < 0.001 && fabs(lon) < 0.001) {
@@ -1779,15 +1841,17 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
 
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     CLLocation *cached = self.cachedTickLocation;
-    if (cached && fabs(now - [cached.timestamp timeIntervalSince1970]) < 0.20) {
+    // 对齐 iOS 硬件 GPS 芯片 1Hz (约 0.92s) 采样更新周期，防止高频读取 location 时暴露时间戳 0ms 重合破绽
+    if (cached && fabs(now - [cached.timestamp timeIntervalSince1970]) < 0.92) {
         return cached;
     }
 
-    double alt = 18.5, hAcc = 4.6, vAcc = 3.4;
+    double alt = 18.5, hAcc = 5.0, vAcc = 3.5;
     BOOL needLocalDrift = (kShield && kSpeed < 0.1 && !self.jitterTimer);
     double localLat = lat, localLon = lon;
     agStepKalmanSmoothDrift(needLocalDrift, &localLat, &localLon, &alt, &hAcc, &vAcc);
-    if (!needLocalDrift) {
+    if (!kShield) {
+        // 防检测关闭时：只做纯净的固定虚拟坐标定位，不叠加任何微漂移
         localLat = lat;
         localLon = lon;
     }
@@ -3305,39 +3369,43 @@ static void agSettingsPanelTickDarwinCallback(CFNotificationCenterRef center, vo
 
 - (void)stealthShieldSwitchChanged:(UISwitch *)sender {
     NSMutableDictionary *p = loadGeminiPrefs();
-    if (![p[@"AG_LocSpoof_Active"] boolValue]) {
-        [sender setOn:NO animated:YES];
-        [[AGGlobalActionPillWindow sharedPill] showActionPill:@"⚠️ 请先开启上方「虚拟定位总开关」"];
-        return;
-    }
     BOOL on = sender.isOn;
     p[@"AG_AntiDet_ShieldEnabled"] = @(on);
     p[@"AG_AntiDet_HideSimFlag"] = @(on);
     p[@"AG_AntiDet_MotionSync"] = @(on);
     p[@"AG_AntiDet_HideHookPtr"] = @(on);
     p[@"AG_LocSpoof_JitterEnabled"] = @(on);
-    if ([p[@"AG_AntiDet_WiFiMode"] integerValue] != 2) {
-        p[@"AG_AntiDet_WiFiMode"] = on ? @1 : @0;
+    if (!on) {
+        // 关键修复：关闭防检测开关时，强制将 WiFiMode 置为 0，100% 停用一切 Wi-Fi 与网络伪装！
+        p[@"AG_AntiDet_WiFiMode"] = @0;
+    } else if ([p[@"AG_AntiDet_WiFiMode"] integerValue] == 0) {
+        p[@"AG_AntiDet_WiFiMode"] = @1;
     }
+    gIsSavingFromSettingsUI = YES;
     saveGeminiPrefs(p);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        gIsSavingFromSettingsUI = NO;
+    });
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          (__bridge CFStringRef)kAGLocMasterSyncNotification,
                                          NULL, NULL, YES);
-    [self.tableView reloadData];
-    [[AGGlobalActionPillWindow sharedPill] showActionPill:(on ? @"🛡️ 已开启防检测保护" : @"⚡ 已关闭防检测 (日常纯定位模式)")];
     agLiveDiagLog(@"LOC_SHIELD_TOGGLE", @"Anti-detection shield toggled: %d", on);
+    [self.tableView reloadData];
 }
 
 - (void)customWiFiSwitchChanged:(UISwitch *)sender {
     NSMutableDictionary *p = loadGeminiPrefs();
-    if (![p[@"AG_LocSpoof_Active"] boolValue]) {
-        [sender setOn:NO animated:YES];
-        [[AGGlobalActionPillWindow sharedPill] showActionPill:@"⚠️ 请先开启上方「虚拟定位总开关」"];
-        return;
-    }
     BOOL shieldOn = (p[@"AG_AntiDet_ShieldEnabled"] == nil) ? NO : [p[@"AG_AntiDet_ShieldEnabled"] boolValue];
+    if (sender.isOn && !shieldOn) {
+        p[@"AG_AntiDet_ShieldEnabled"] = @YES;
+        shieldOn = YES;
+    }
     p[@"AG_AntiDet_WiFiMode"] = sender.isOn ? @2 : (shieldOn ? @1 : @0);
+    gIsSavingFromSettingsUI = YES;
     saveGeminiPrefs(p);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        gIsSavingFromSettingsUI = NO;
+    });
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          (__bridge CFStringRef)kAGLocMasterSyncNotification,
                                          NULL, NULL, YES);
@@ -5687,6 +5755,7 @@ static void agSafeLaunchURL(NSURL *url) {
 // ==================== 微信跨进程自动发消息与系统底层控制核心服务 ====================
 static NSString *agGetGlobalSharedDir(void) {
     NSArray *dirs = @[
+        agJBRootPath(@"/var/mobile/Library/Preferences"),
         @"/var/jb/var/mobile/Library/Preferences",
         @"/var/mobile/Library/Preferences",
         @"/tmp"
@@ -8524,10 +8593,13 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         [self terminateHelperDaemonSync];
         [[NSFileManager defaultManager] removeItemAtPath:agSharedCameraStopFlagPath() error:nil];
 
-        const char *helperPaths[] = { "/var/jb/usr/bin/AngelCameraHelper", "/usr/bin/AngelCameraHelper", NULL };
+        NSArray<NSString *> *helperPaths = @[
+            agJBRootPath(@"/usr/bin/AngelCameraHelper"),
+            @"/var/jb/usr/bin/AngelCameraHelper",
+            @"/usr/bin/AngelCameraHelper"
+        ];
         NSString *foundPath = nil;
-        for (int i = 0; helperPaths[i] != NULL; i++) {
-            NSString *p = [NSString stringWithUTF8String:helperPaths[i]];
+        for (NSString *p in helperPaths) {
             if ([[NSFileManager defaultManager] isExecutableFileAtPath:p]) {
                 foundPath = p;
                 break;
@@ -15042,7 +15114,8 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
 
 @end
 
-// ==================== 4. 手机《设置》入口 + 桌面拦截钩子 ====================
+// ==================== 4. 手机《设置》入口 + 桌面拦截钩子 (严格分组隔离，严禁注入第三方 App) ====================
+%group PreferencesOnlyHooks
 %hook UINavigationController
 - (void)viewDidAppear:(BOOL)animated {
     %orig(animated);
@@ -15067,7 +15140,9 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
     [self presentViewController:nav animated:YES completion:nil];
 }
 %end
+%end // end group PreferencesOnlyHooks
 
+%group SpringBoardCoreHooks
 %hook SBLockHardwareButtonActions
 - (void)performLongPressActions {
     if ([[GeminiAssistantManager sharedManager] isTweakEnabled]) {
@@ -15177,6 +15252,7 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
     }
 }
 %end
+%end // end group SpringBoardCoreHooks
 // ==============================================================================
 // Module: AngelGuardian Live Screen & Audio Translator (v5.9.0 Pro Extension)
 // 使用方法：直接将本段代码粘贴在 Tweak.x / Tweak.xm 的最底部（替换旧的翻译扩展）！
@@ -17185,6 +17261,7 @@ static void initInSituGlobalTouchMonitor(void) {
 @end
 
 // ==================== 挂钩主界面与《设置》面板 ====================
+%group SpringBoardOverlayExtHooks
 %hook GeminiAssistantManager
 
 - (void)setupWindowIfNeeded {
@@ -17364,6 +17441,7 @@ static void initInSituGlobalTouchMonitor(void) {
 }
 
 %end
+%end // end group SpringBoardOverlayExtHooks
 
 static int (*orig_TCCAccessPreflight)(CFStringRef service, CFDictionaryRef options) = NULL;
 static int my_TCCAccessPreflight(CFStringRef service, CFDictionaryRef options) {
@@ -17381,152 +17459,11 @@ static int my_TCCAccessPreflight(CFStringRef service, CFDictionaryRef options) {
     return 0;
 }
 
-// ==================== 1. 零侵入 CLLocation 底层 CLDaemonLocation 结构体 (已前置于文件顶部定义) ====================
-
-static void agHookLocationDelegateClassIfNeeded(id delegate) {
-    (void)delegate;
-}
-
-// ==================== 2. 顶级反插件检测护盾：仅在 agIsAntiDetectionShieldEnabled() 开启时介入 ====================
-static void *gSelfDylibBase = NULL;
-static void *gCoreLocationBase = NULL;
-static const char *gCoreLocationPath = "/System/Library/Frameworks/CoreLocation.framework/CoreLocation";
-static uintptr_t sAGImageSlideStart = 0;
-static uintptr_t sAGImageSlideEnd   = 0;
-
-static int (*orig_ag_dladdr)(const void *addr, Dl_info *info) = NULL;
-static int hooked_ag_dladdr(const void *addr, Dl_info *info) {
-    int ret = orig_ag_dladdr ? orig_ag_dladdr(addr, info) : 0;
-    if (ret != 0 && info && addr && agIsAntiDetectionShieldEnabled()) {
-        uintptr_t uAddr = (uintptr_t)addr;
-        if ((sAGImageSlideStart != 0 && uAddr >= sAGImageSlideStart && uAddr < sAGImageSlideEnd) ||
-            (gSelfDylibBase != NULL && info->dli_fbase == gSelfDylibBase) ||
-            (info->dli_fname && (strstr(info->dli_fname, "TimeGuardian") != NULL ||
-                                 strstr(info->dli_fname, "AngelGuardian") != NULL ||
-                                 strstr(info->dli_fname, "/var/jb/") != NULL ||
-                                 strstr(info->dli_fname, "MobileSubstrate") != NULL ||
-                                 strstr(info->dli_fname, "TweakInject") != NULL ||
-                                 strstr(info->dli_fname, "ellekit") != NULL))) {
-            info->dli_fname = gCoreLocationPath;
-            if (gCoreLocationBase != NULL) {
-                info->dli_fbase = gCoreLocationBase;
-            }
-            info->dli_sname = "CLClientGetLocation";
-            info->dli_saddr = (void *)addr;
-        }
-    }
-    return ret;
-}
-
-static void agInstallDladdrStealthHookIfNeeded(void) {
-    if (agIsSpringBoardProcess()) return;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Dl_info selfInfo;
-        if (dladdr((const void *)&agInstallDladdrStealthHookIfNeeded, &selfInfo) && selfInfo.dli_fbase) {
-            gSelfDylibBase     = selfInfo.dli_fbase;
-            sAGImageSlideStart = (uintptr_t)selfInfo.dli_fbase;
-            sAGImageSlideEnd   = sAGImageSlideStart + 0x800000;
-        }
-        MSHookFunction((void *)dladdr, (void *)hooked_ag_dladdr, (void **)&orig_ag_dladdr);
-    });
-}
-
-static const char *(*orig_dyld_get_image_name)(uint32_t image_index) = NULL;
-static const char *hooked_dyld_get_image_name(uint32_t image_index) {
-    const char *name = orig_dyld_get_image_name ? orig_dyld_get_image_name(image_index) : NULL;
-    if (name && agIsAntiDetectionShieldEnabled()) {
-        if (strstr(name, "/var/jb/") != NULL ||
-            strstr(name, "MobileSubstrate") != NULL ||
-            strstr(name, "TweakInject") != NULL ||
-            strstr(name, "substitute") != NULL ||
-            strstr(name, "ellekit") != NULL ||
-            strstr(name, "Substrate") != NULL) {
-            return gCoreLocationPath;
-        }
-    }
-    return name;
-}
-
-static BOOL agIsSuspiciousJailbreakPath(const char *path) {
-    if (!path) return NO;
-    if (sIsInternalPrefsFileRead) return NO; // 放行本插件内部自身读取配置
-    return (strstr(path, "/var/jb") != NULL ||
-            strstr(path, "MobileSubstrate") != NULL ||
-            strstr(path, "TweakInject") != NULL ||
-            strstr(path, "ellekit") != NULL ||
-            strstr(path, "substitute") != NULL ||
-            strstr(path, "Cydia") != NULL ||
-            strstr(path, "Sileo") != NULL ||
-            strstr(path, "Zebra") != NULL ||
-            strstr(path, "/apt/") != NULL ||
-            strstr(path, "geminisirioverlay") != NULL ||
-            strstr(path, "ag_live_diagnostic") != NULL ||
-            strstr(path, "ag_cam_") != NULL ||
-            strstr(path, "ag_universal_ai_memory") != NULL ||
-            strstr(path, "AngelCameraHelper") != NULL ||
-            strstr(path, "TimeGuardian") != NULL);
-}
-
-static int (*orig_access)(const char *path, int amode) = NULL;
-static int hooked_access(const char *path, int amode) {
-    if (agIsAntiDetectionShieldEnabled() && agIsSuspiciousJailbreakPath(path)) {
-        errno = ENOENT;
-        return -1;
-    }
-    return orig_access ? orig_access(path, amode) : -1;
-}
-
-static int (*orig_stat)(const char *path, struct stat *buf) = NULL;
-static int hooked_stat(const char *path, struct stat *buf) {
-    if (agIsAntiDetectionShieldEnabled() && agIsSuspiciousJailbreakPath(path)) {
-        errno = ENOENT;
-        return -1;
-    }
-    return orig_stat ? orig_stat(path, buf) : -1;
-}
-
-static int (*orig_lstat)(const char *path, struct stat *buf) = NULL;
-static int hooked_lstat(const char *path, struct stat *buf) {
-    if (agIsAntiDetectionShieldEnabled() && agIsSuspiciousJailbreakPath(path)) {
-        errno = ENOENT;
-        return -1;
-    }
-    return orig_lstat ? orig_lstat(path, buf) : -1;
-}
-
-static FILE *(*orig_fopen)(const char *path, const char *mode) = NULL;
-static FILE *hooked_fopen(const char *path, const char *mode) {
-    if (agIsAntiDetectionShieldEnabled() && agIsSuspiciousJailbreakPath(path)) {
-        errno = ENOENT;
-        return NULL;
-    }
-    return orig_fopen ? orig_fopen(path, mode) : NULL;
-}
-
-static DIR *(*orig_opendir)(const char *name) = NULL;
-static DIR *hooked_opendir(const char *name) {
-    if (agIsAntiDetectionShieldEnabled() && agIsSuspiciousJailbreakPath(name)) {
-        errno = ENOENT;
-        return NULL;
-    }
-    return orig_opendir ? orig_opendir(name) : NULL;
-}
-
-static char *(*orig_getenv)(const char *name) = NULL;
-static char *hooked_getenv(const char *name) {
-    if (name && agIsAntiDetectionShieldEnabled()) {
-        if (strcmp(name, "DYLD_INSERT_LIBRARIES") == 0 ||
-            strcmp(name, "_MSSafeMode") == 0 ||
-            strcmp(name, "MSSafeMode") == 0) {
-            return NULL;
-        }
-    }
-    return orig_getenv ? orig_getenv(name) : NULL;
-}
-
-// ==================== 3. 双通道一致性虚拟 Wi-Fi 护盾 ====================
+// ==================== 1. 双通道一致性虚拟 Wi-Fi 护盾（严格受 agIsAntiDetectionShieldActive 控制） ====================
 static NSDictionary *agBuildConsistentVirtualWiFiDict(void) {
+    if (!agIsAntiDetectionShieldActive()) {
+        return nil;
+    }
     NSString *fakeSSID = nil;
     NSString *fakeBSSID = nil;
     if (!agResolveSpoofedWiFiInfo(&fakeSSID, &fakeBSSID)) {
@@ -17540,21 +17477,10 @@ static NSDictionary *agBuildConsistentVirtualWiFiDict(void) {
     };
 }
 
-static CFArrayRef (*orig_CNCopySupportedInterfaces)(void) = NULL;
-static CFArrayRef hooked_CNCopySupportedInterfaces(void) {
-    if (agIsCurrentProcessTargetedForLocSpoof()) {
-        NSDictionary *fakeWiFi = agBuildConsistentVirtualWiFiDict();
-        if (fakeWiFi) {
-            NSArray *ifaces = @[@"en0"];
-            return (__bridge_retained CFArrayRef)[ifaces copy];
-        }
-    }
-    return orig_CNCopySupportedInterfaces ? orig_CNCopySupportedInterfaces() : NULL;
-}
-
 static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName) = NULL;
 static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
-    if (agIsCurrentProcessTargetedForLocSpoof()) {
+    // 只有当【虚拟定位开启】且【防检测保护开关开启】时才返回虚拟 Wi-Fi；关闭防检测时 100% 透传系统原生网络！
+    if (agIsAntiDetectionShieldActive()) {
         NSDictionary *fakeWiFi = agBuildConsistentVirtualWiFiDict();
         if (fakeWiFi) {
             return (__bridge_retained CFDictionaryRef)[fakeWiFi copy];
@@ -17573,7 +17499,7 @@ static inline BOOL agIsCleanSpoofedLocation(CLLocation *loc) {
     return agIsCleanLocationPtr(loc);
 }
 
-// ==================== 气压计 CMAltimeter + 计步器 CMPedometer + 电子罗盘 CLHeading 闭环 ====================
+// ==================== 2. 气压计 CMAltimeter + 计步器 CMPedometer + 电子罗盘 CLHeading 闭环 ====================
 static NSTimeInterval sPedometerWalkStartTimestamp = 0;
 static NSInteger sAccumulatedVirtualSteps = 1260;
 static double sAccumulatedVirtualDistM = 945.0;
@@ -17582,9 +17508,8 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
     double lat = 0.0, lon = 0.0;
     BOOL kActive = NO;
     if (!agReadSpoofStateFromKernel(&kActive, NULL, NULL, NULL, &lat, &lon, NULL, NULL, NULL) || !kActive) {
-        NSDictionary *p = agReadOnlyPrefs();
-        lat = [p[@"AG_LocSpoof_Lat"] doubleValue];
-        lon = [p[@"AG_LocSpoof_Lon"] doubleValue];
+        lat = 39.9087;
+        lon = 116.3975;
     }
     double baseAlt = agEstimatedBaseAltitudeForCoord(lat, lon);
     double microAlt = sOUDriftAltM + agGaussianRandom() * 0.06;
@@ -17595,18 +17520,18 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
     if (outRelAltM)     *outRelAltM     = microAlt;
 }
 
-// ==================== 4. 客户端隐身定位 Hook 组 ====================
+// ==================== 3. 客户端定位与防检测 Hook 组（基础定位与防检测手段严格分级） ====================
 %group StealthLocationClientHooks
 
 %hook CLLocationSourceInformation
 
 - (BOOL)isSimulatedBySoftware {
-    if (agIsCurrentProcessTargetedForLocSpoof()) return NO;
+    if (agIsAntiDetectionShieldActive()) return NO;
     return %orig;
 }
 
 - (BOOL)isProducedByAccessory {
-    if (agIsCurrentProcessTargetedForLocSpoof()) return NO;
+    if (agIsAntiDetectionShieldActive()) return NO;
     return %orig;
 }
 
@@ -17614,6 +17539,7 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 
 %hook CLLocation
 
+// 仅在当前进程开启虚拟定位时才记录 App 自建坐标，未开启虚拟定位时 0 锁竞争、100% 原生直通！
 - (instancetype)initWithLatitude:(CLLocationDegrees)latitude longitude:(CLLocationDegrees)longitude {
     CLLocation *instance = %orig(latitude, longitude);
     if (instance && !sIsCreatingInternalSpoofLocation && agIsCurrentProcessTargetedForLocSpoof()) {
@@ -17697,9 +17623,12 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 - (AGCLDaemonLocation)clientLocation {
     AGCLDaemonLocation raw = %orig;
     if (agIsCurrentProcessTargetedForLocSpoof()) {
+        BOOL shieldOn = agIsAntiDetectionShieldActive();
         if (agIsInAppCustomConstructedLocation(self)) {
-            raw.fromSimulationController = NO;
-            if (raw.type <= 0) raw.type = 1;
+            if (shieldOn) {
+                raw.fromSimulationController = NO;
+                if (raw.type <= 0) raw.type = 1;
+            }
             return raw;
         }
         CLLocation *spoof = agIsCleanSpoofedLocation(self) ? self : [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
@@ -17707,7 +17636,7 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
             agReportAppLocationHookHitToSpringBoard();
             CLLocationCoordinate2D sc = [spoof coordinate];
             double spd = MAX(0.0, [spoof speed]);
-            double crs = ([spoof course] >= 0.0) ? [spoof course] : 0.0;
+            double crs = [spoof course];
             double orthoAlt = [spoof altitude];
 
             raw.suitability = 1;
@@ -17723,15 +17652,18 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
             raw.speedAccuracy = 0.24;
             raw.course = crs;
             raw.rawCourse = crs;
-            raw.courseAccuracy = 14.2;
+            raw.courseAccuracy = (crs >= 0.0) ? 14.2 : -1.0;
             raw.timestamp = [[self timestamp] timeIntervalSinceReferenceDate];
-            raw.confidence = 95;
-            raw.lifespan = 30.0;
-            raw.type = 1;
-            raw.integrity = 100;
-            raw.referenceFrame = 1;
-            raw.rawReferenceFrame = 1;
-            raw.fromSimulationController = NO;
+            if (shieldOn) {
+                raw.confidence = 95;
+                raw.lifespan = 30.0;
+                raw.type = 1;
+                raw.integrity = 100;
+                raw.referenceFrame = 1;
+                raw.rawReferenceFrame = 1;
+                raw.signalEnvironmentType = 1;
+                raw.fromSimulationController = NO;
+            }
         }
     }
     return raw;
@@ -17764,7 +17696,7 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 }
 
 - (CLLocationDistance)ellipsoidalAltitude {
-    if (agIsAntiDetectionShieldEnabled() && !agIsAppCustomLocationPtr(self)) {
+    if (agIsAntiDetectionShieldActive() && !agIsAppCustomLocationPtr(self)) {
         CLLocationCoordinate2D c = [self coordinate];
         double orthoAlt = [self altitude];
         return orthoAlt + agGeoidSeparationForCoord(c.latitude, c.longitude);
@@ -17813,7 +17745,7 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 
 - (CLLocationSpeedAccuracy)speedAccuracy {
     CLLocationSpeedAccuracy orig = %orig;
-    if (agIsAntiDetectionShieldEnabled() && orig < 0.0) {
+    if (agIsAntiDetectionShieldActive() && orig < 0.0) {
         return 0.24;
     }
     return orig;
@@ -17821,7 +17753,7 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 
 - (CLLocationDirectionAccuracy)courseAccuracy {
     CLLocationDirectionAccuracy orig = %orig;
-    if (agIsAntiDetectionShieldEnabled() && orig < 0.0) {
+    if (agIsAntiDetectionShieldActive() && orig < 0.0 && [self course] >= 0.0) {
         return 14.2;
     }
     return orig;
@@ -17833,13 +17765,18 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
         if (origDate && fabs([origDate timeIntervalSinceNow]) < 15.0) {
             return origDate;
         }
-        return [NSDate date];
+        NSDate *fixed = objc_getAssociatedObject(self, kAGFixedTimestampKey);
+        if (!fixed) {
+            fixed = [NSDate date];
+            objc_setAssociatedObject(self, kAGFixedTimestampKey, fixed, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        return fixed;
     }
     return origDate;
 }
 
 - (CLLocationSourceInformation *)sourceInformation {
-    if (agIsCurrentProcessTargetedForLocSpoof()) {
+    if (agIsAntiDetectionShieldActive()) {
         if (@available(iOS 15.0, *)) {
             static CLLocationSourceInformation *sCleanSource = nil;
             static dispatch_once_t onceToken;
@@ -17853,19 +17790,19 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 }
 
 - (int)type {
-    if (agIsCurrentProcessTargetedForLocSpoof() && !agIsInAppCustomConstructedLocation(self)) {
+    if (agIsAntiDetectionShieldActive() && !agIsInAppCustomConstructedLocation(self)) {
         return 1;
     }
     return %orig;
 }
 
 - (BOOL)_isSimulated {
-    if (agIsCurrentProcessTargetedForLocSpoof()) return NO;
+    if (agIsAntiDetectionShieldActive()) return NO;
     return %orig;
 }
 
 - (BOOL)isSimulated {
-    if (agIsCurrentProcessTargetedForLocSpoof()) return NO;
+    if (agIsAntiDetectionShieldActive()) return NO;
     return %orig;
 }
 
@@ -17921,29 +17858,30 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
     }
 }
 
+// 蓝牙信标防检测：仅在开启防检测保护开关时才屏蔽真实蓝牙考勤信标
 - (void)startRangingBeaconsInRegion:(CLBeaconRegion *)region {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         return;
     }
     %orig(region);
 }
 
 - (void)startRangingBeaconsSatisfyingConstraint:(CLBeaconIdentityConstraint *)constraint {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         return;
     }
     %orig(constraint);
 }
 
 - (NSSet *)rangedRegions {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         return [NSSet set];
     }
     return %orig;
 }
 
 - (NSSet *)rangedBeaconConstraints {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         return [NSSet set];
     }
     return %orig;
@@ -17977,10 +17915,11 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 
 %end
 
+// 运动传感器、气压计、计步器、电子罗盘、虚拟 Wi-Fi：全部严格受 agIsAntiDetectionShieldActive() 控制！
 %hook CMMotionActivity
 
 - (BOOL)stationary {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         double kSpeed = 0.0;
         agReadSpoofStateFromKernel(NULL, NULL, NULL, NULL, NULL, NULL, NULL, &kSpeed, NULL);
         return (kSpeed < 0.2);
@@ -17989,7 +17928,7 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 }
 
 - (BOOL)walking {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         double kSpeed = 0.0;
         agReadSpoofStateFromKernel(NULL, NULL, NULL, NULL, NULL, NULL, NULL, &kSpeed, NULL);
         return (kSpeed >= 0.2 && kSpeed <= 4.5);
@@ -17998,7 +17937,7 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 }
 
 - (BOOL)automotive {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         double kSpeed = 0.0;
         agReadSpoofStateFromKernel(NULL, NULL, NULL, NULL, NULL, NULL, NULL, &kSpeed, NULL);
         return (kSpeed > 4.5);
@@ -18010,7 +17949,7 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 
 %hook CMAltitudeData
 - (NSNumber *)pressure {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         double pKPa = 101.12;
         agComputeRealisticBarometer(&pKPa, NULL);
         return @(pKPa);
@@ -18018,7 +17957,7 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
     return %orig;
 }
 - (NSNumber *)relativeAltitude {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         double relM = 0.0;
         agComputeRealisticBarometer(NULL, &relM);
         return @(relM);
@@ -18029,14 +17968,14 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 
 %hook CMAltimeter
 + (BOOL)isRelativeAltitudeAvailable {
-    if (agIsAntiDetectionShieldEnabled()) return YES;
+    if (agIsAntiDetectionShieldActive()) return YES;
     return %orig;
 }
 %end
 
 %hook CMPedometerData
 - (NSNumber *)numberOfSteps {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         double spd = 0.0;
         agReadSpoofStateFromKernel(NULL, NULL, NULL, NULL, NULL, NULL, NULL, &spd, NULL);
         if (spd >= 0.4 && spd <= 4.5) {
@@ -18053,14 +17992,14 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
     return %orig;
 }
 - (NSNumber *)distance {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         (void)[self numberOfSteps];
         return @(sAccumulatedVirtualDistM);
     }
     return %orig;
 }
 - (NSNumber *)currentCadence {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         double spd = 0.0;
         agReadSpoofStateFromKernel(NULL, NULL, NULL, NULL, NULL, NULL, NULL, &spd, NULL);
         if (spd >= 0.4 && spd <= 4.5) {
@@ -18071,7 +18010,7 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
     return %orig;
 }
 - (NSNumber *)currentPace {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         double spd = 0.0;
         agReadSpoofStateFromKernel(NULL, NULL, NULL, NULL, NULL, NULL, NULL, &spd, NULL);
         if (spd >= 0.4) return @(1.0 / spd);
@@ -18081,26 +18020,9 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 }
 %end
 
-%hook CMPedometer
-- (void)queryPedometerDataFromDate:(NSDate *)start toDate:(NSDate *)end withHandler:(CMPedometerHandler)handler {
-    if (agIsAntiDetectionShieldEnabled() && handler) {
-        %orig(start, end, ^(CMPedometerData * _Nullable pedometerData, NSError * _Nullable error) {
-            if (pedometerData) {
-                handler(pedometerData, nil);
-            } else {
-                CMPedometerData *virtualData = [[objc_getClass("CMPedometerData") alloc] init];
-                handler(virtualData, nil);
-            }
-        });
-        return;
-    }
-    %orig(start, end, handler);
-}
-%end
-
 %hook CLHeading
 - (CLLocationDirection)trueHeading {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         double crs = -1.0;
         agReadSpoofStateFromKernel(NULL, NULL, NULL, NULL, NULL, NULL, &crs, NULL, NULL);
         if (crs >= 0.0) {
@@ -18110,7 +18032,7 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
     return %orig;
 }
 - (CLLocationDirection)magneticHeading {
-    if (agIsAntiDetectionShieldEnabled()) {
+    if (agIsAntiDetectionShieldActive()) {
         double crs = -1.0;
         agReadSpoofStateFromKernel(NULL, NULL, NULL, NULL, NULL, NULL, &crs, NULL, NULL);
         if (crs >= 0.0) {
@@ -18121,59 +18043,16 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 }
 %end
 
-%hook NSTimeZone
-+ (NSTimeZone *)localTimeZone {
-    if (agIsAntiDetectionShieldEnabled()) {
-        double lat = 0.0, lon = 0.0;
-        if (agReadSpoofStateFromKernel(NULL, NULL, NULL, NULL, &lat, &lon, NULL, NULL, NULL) &&
-            (fabs(lat) > 0.01 || fabs(lon) > 0.01) && agIsOutOfChina(lat, lon)) {
-            NSInteger offsetHours = (NSInteger)round(lon / 15.0);
-            NSTimeZone *tz = [NSTimeZone timeZoneForSecondsFromGMT:offsetHours * 3600];
-            if (tz) return tz;
-        }
-    }
-    return %orig;
-}
-+ (NSTimeZone *)systemTimeZone {
-    if (agIsAntiDetectionShieldEnabled()) {
-        return [self localTimeZone];
-    }
-    return %orig;
-}
-+ (NSTimeZone *)defaultTimeZone {
-    if (agIsAntiDetectionShieldEnabled()) {
-        return [self localTimeZone];
-    }
-    return %orig;
-}
-%end
-
 %hook NEHotspotNetwork
 
 + (void)fetchCurrentWithCompletionHandler:(void (^)(NEHotspotNetwork * _Nullable currentNetwork))completionHandler {
-    if (agIsCurrentProcessTargetedForLocSpoof()) {
-        NSDictionary *fakeWiFi = agBuildConsistentVirtualWiFiDict();
-        if (fakeWiFi) {
-            %orig(^(NEHotspotNetwork *net) {
-                if (completionHandler) {
-                    NSInteger kWiFiMode = 0;
-                    agReadSpoofStateFromKernel(NULL, NULL, NULL, &kWiFiMode, NULL, NULL, NULL, NULL, NULL);
-                    if (net != nil || kWiFiMode == 2) {
-                        NEHotspotNetwork *targetNet = net ?: [[objc_getClass("NEHotspotNetwork") alloc] init];
-                        completionHandler(targetNet);
-                    } else {
-                        completionHandler(nil);
-                    }
-                }
-            });
-            return;
-        }
-    }
+    // 关键修复：不再构造 [[NEHotspotNetwork alloc] init] 空壳未初始化对象！
+    // 直接透传系统原生回调；若设备当前已连接 Wi-Fi，则由下方 -SSID / -BSSID 实例方法自动完成无损替换；若处于 5G/4G 流量则原样返回 nil，彻底根除断网 Bug！
     %orig(completionHandler);
 }
 
 - (NSString *)SSID {
-    if (agIsCurrentProcessTargetedForLocSpoof()) {
+    if (agIsAntiDetectionShieldActive()) {
         NSDictionary *fakeWiFi = agBuildConsistentVirtualWiFiDict();
         if (fakeWiFi[@"SSID"]) return fakeWiFi[@"SSID"];
     }
@@ -18181,7 +18060,7 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 }
 
 - (NSString *)BSSID {
-    if (agIsCurrentProcessTargetedForLocSpoof()) {
+    if (agIsAntiDetectionShieldActive()) {
         NSDictionary *fakeWiFi = agBuildConsistentVirtualWiFiDict();
         if (fakeWiFi[@"BSSID"]) return fakeWiFi[@"BSSID"];
     }
@@ -18192,7 +18071,7 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 
 %end // end group StealthLocationClientHooks
 
-// ==================== 5. 仅限 SpringBoard 生效的系统级权限与 Info.plist Hook ====================
+// ==================== 4. 仅限 SpringBoard 生效的系统级权限与 Info.plist Hook ====================
 %group SpringBoardOnlyHooks
 
 %hook NSBundle
@@ -18259,25 +18138,73 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 
 %end // end group SpringBoardOnlyHooks
 
-// ==================== 6. 构造函数 %ctor：严格进程隔离 + 反插件检测护盾按需挂载 ====================
+// ==================== 5. 精准 dladdr 指针溯源隐身（兼容 Dopamine /var/jb 与 Relaxin .jbroot-） ====================
+static int (*orig_ag_dladdr)(const void *addr, Dl_info *info) = NULL;
+static uintptr_t sAGImageSlideStart = 0;
+static uintptr_t sAGImageSlideEnd   = 0;
+
+static int hooked_ag_dladdr(const void *addr, Dl_info *info) {
+    int ret = orig_ag_dladdr ? orig_ag_dladdr(addr, info) : 0;
+    if (ret != 0 && info && addr) {
+        uintptr_t uAddr = (uintptr_t)addr;
+        // 仅当被查询地址位于本插件自身镜像段（或越狱注入目录），且当前开启了防检测保护时，才伪装为系统 CoreLocation
+        if ((sAGImageSlideStart != 0 && uAddr >= sAGImageSlideStart && uAddr < sAGImageSlideEnd) ||
+            (info->dli_fname && (strstr(info->dli_fname, "TimeGuardian") != NULL ||
+                                 strstr(info->dli_fname, "AngelGuardian") != NULL ||
+                                 strstr(info->dli_fname, "GeminiSiriOverlay") != NULL ||
+                                 strstr(info->dli_fname, "/var/jb/") != NULL ||
+                                 strstr(info->dli_fname, ".jbroot") != NULL))) {
+            if (agIsAntiDetectionShieldActive()) {
+                void *sysSym = dlsym(RTLD_DEFAULT, "CLLocationCoordinate2DIsValid");
+                if (sysSym && orig_ag_dladdr) {
+                    orig_ag_dladdr(sysSym, info);
+                } else {
+                    info->dli_fname = "/System/Library/Frameworks/CoreLocation.framework/CoreLocation";
+                    info->dli_sname = "CLClientGetLocation";
+                }
+            }
+        }
+    }
+    return ret;
+}
+
+static void agInstallDladdrStealthHookIfNeeded(void) {
+    if (agIsSpringBoardProcess()) return;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Dl_info selfInfo;
+        if (dladdr((const void *)&agInstallDladdrStealthHookIfNeeded, &selfInfo) && selfInfo.dli_fbase) {
+            sAGImageSlideStart = (uintptr_t)selfInfo.dli_fbase;
+            sAGImageSlideEnd   = sAGImageSlideStart + 0x400000;
+        }
+        MSHookFunction((void *)dladdr, (void *)hooked_ag_dladdr, (void **)&orig_ag_dladdr);
+    });
+}
+
+// ==================== 6. 构造函数 %ctor：严格进程隔离 + 零闪退纯净挂载 ====================
 %ctor {
     @autoreleasepool {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
+        NSBundle *mainBundle = [NSBundle mainBundle];
+        NSString *bundleID = [mainBundle bundleIdentifier] ?: @"";
+        NSString *execPath = [[mainBundle executablePath] lowercaseString] ?: @"";
+
+        // 1. 第一道防线：严格过滤所有 App Extension (.appex 输入法/小组件/分享面板)、WebKit 渲染进程与无 BundleID 守护进程
+        if (bundleID.length == 0 ||
+            [execPath containsString:@".appex/"] ||
+            [bundleID hasPrefix:@"com.apple.WebKit"] ||
+            [bundleID hasPrefix:@"com.apple.SafariViewService"]) {
+            return;
+        }
+
         BOOL isSpringBoard = [bundleID isEqualToString:@"com.apple.springboard"];
         BOOL isPreferences = [bundleID isEqualToString:@"com.apple.Preferences"];
 
-        reloadGeminiPrefsCache();
-        %init(_ungrouped);
-
-        Dl_info clInfo;
-        void *clSym = dlsym(RTLD_DEFAULT, "CLLocationCoordinate2DMake");
-        if (clSym && dladdr(clSym, &clInfo) != 0) {
-            gCoreLocationBase = clInfo.dli_fbase;
-            if (clInfo.dli_fname) gCoreLocationPath = clInfo.dli_fname;
-        }
-
+        // 2. SpringBoard 主桌面进程：初始化语音/视频 AI 主控、定位守护服务与系统权限钩子
         if (isSpringBoard) {
+            reloadGeminiPrefsCache();
             ensureSpringBoardTCCGranted();
+            %init(SpringBoardCoreHooks);
+            %init(SpringBoardOverlayExtHooks);
             %init(SpringBoardOnlyHooks);
 
             void *tccHandle = dlopen("/System/Library/PrivateFrameworks/TCC.framework/TCC", RTLD_NOW);
@@ -18288,35 +18215,36 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
                 }
             }
 
+            // 立即初始化一次 AGLocationSpoofManager 以确保内核 0xA5A5 状态寄存器在开机第 0 秒即写入就绪
+            [AGLocationSpoofManager sharedSpoofer];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [AGLocationSpoofManager sharedSpoofer];
                 [GeminiAssistantManager sharedManager];
             });
             return;
         }
 
+        // 3. 系统《设置》进程：仅挂载导航栏设置入口
         if (isPreferences) {
+            reloadGeminiPrefsCache();
+            %init(PreferencesOnlyHooks);
             return;
         }
 
-        // 第三方 App 进程：挂载定位与受控反检测护盾（所有反检测钩子内部均受 agIsAntiDetectionShieldEnabled() 实时开关控制）
-        %init(StealthLocationClientHooks);
+        // 4. 排除其余无需定位的 com.apple.* 系统内部进程
+        if ([bundleID hasPrefix:@"com.apple."] &&
+            ![bundleID isEqualToString:@"com.apple.Maps"] &&
+            ![bundleID isEqualToString:@"com.apple.weather"] &&
+            ![bundleID isEqualToString:@"com.apple.camera"] &&
+            ![bundleID isEqualToString:@"com.apple.findmy"]) {
+            return;
+        }
 
+        // 5. 第三方主 App 进程：挂载零开销定位组 + 受控 Wi-Fi 与 dladdr 护盾（绝不执行 reloadGeminiPrefsCache 或 stat/access/dyld 破坏性钩子）
+        %init(StealthLocationClientHooks);
         agInstallDladdrStealthHookIfNeeded();
-        MSHookFunction((void *)_dyld_get_image_name, (void *)hooked_dyld_get_image_name, (void **)&orig_dyld_get_image_name);
-        MSHookFunction((void *)access, (void *)hooked_access, (void **)&orig_access);
-        MSHookFunction((void *)stat, (void *)hooked_stat, (void **)&orig_stat);
-        MSHookFunction((void *)lstat, (void *)hooked_lstat, (void **)&orig_lstat);
-        MSHookFunction((void *)fopen, (void *)hooked_fopen, (void **)&orig_fopen);
-        MSHookFunction((void *)opendir, (void *)hooked_opendir, (void **)&orig_opendir);
-        MSHookFunction((void *)getenv, (void *)hooked_getenv, (void **)&orig_getenv);
 
         void *snHandle = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY);
         if (snHandle) {
-            void *cnSupSym = dlsym(snHandle, "CNCopySupportedInterfaces");
-            if (cnSupSym) {
-                MSHookFunction(cnSupSym, (void *)hooked_CNCopySupportedInterfaces, (void **)&orig_CNCopySupportedInterfaces);
-            }
             void *cnSym = dlsym(snHandle, "CNCopyCurrentNetworkInfo");
             if (cnSym) {
                 MSHookFunction(cnSym, (void *)hooked_CNCopyCurrentNetworkInfo, (void **)&orig_CNCopyCurrentNetworkInfo);
