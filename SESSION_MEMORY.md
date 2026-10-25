@@ -1,6 +1,6 @@
 # TimeGuardianSiri123 项目会话记忆文件 (SESSION_MEMORY.md)
 
-> **生成时间**：2026-10-25 22:50:00 (本地时间)  
+> **生成时间**：2026-10-25 22:52:00 (本地时间)  
 > **会话标识**：`02de72ea-60df-4738-8977-4a4ebaf78b2f`  
 > **用途说明**：供用户切换 Google Antigravity 账号或开启新会话后，直接读取本文件无缝继承当前项目的完整开发上下文。
 
@@ -43,14 +43,16 @@
 | **本地工作目录** | `C:\Users\57132\.gemini\antigravity\scratch\TimeGuardianSiri123` | 当前活跃的 Git 仓库根目录，包含完整源码与构建配置 |
 | **D盘归档目录** | `D:\天使siri测试版` | 完整备份目录，包含 `.git` 库、源码及最新双版本 `.deb` |
 | **远端 Git 仓库** | `https://github.com/jianchengw952-source/TimeGuardianSiri123.git` | GitHub 远程仓库（分支：`main`） |
+| **当前 Git Commit** | `4fc1f78` | `fix(loc): fix prefs cache overwrite, zero-recursion telemetry, associated object custom loc marking, and dladdr deadlock` |
+| **GitHub Actions 运行记录** | Run #77 (ID: `40204094811`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
 
 ---
 
-## 三、关键文件和路径
+## 三、当前会话中涉及的关键文件和路径
 
 ### 1. 核心工程源码文件
-* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,335 行)
-  - 核心修改已完全应用
+* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,335 行，971,061 字节)
+  - SHA256: `90D138B47442E953E4DBDBEA72F0B6116DDA17EBA39A2DC355CEE41B5C0EF9E0`
 * **[layout/DEBIAN/postinst](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/layout/DEBIAN/postinst)** (362 字节)
 * **[.github/workflows/build.yml](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/.github/workflows/build.yml)** (1,757 字节)
 * **[AngelCameraHelper.m](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/AngelCameraHelper.m)** (17,191 字节)
@@ -58,6 +60,34 @@
 
 ### 2. 外部镜像与归档文件（四向字节级完全对齐）
 * **[主修实时翻译.txt](file:///D:/主修实时翻译.txt)**
+  - SHA256: `90D138B47442E953E4DBDBEA72F0B6116DDA17EBA39A2DC355CEE41B5C0EF9E0`
 * **[主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt)**
+  - SHA256: `90D138B47442E953E4DBDBEA72F0B6116DDA17EBA39A2DC355CEE41B5C0EF9E0`
 * **[D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x)**
-* **[D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt)** (790 行，提取用于大模型调试)
+  - SHA256: `90D138B47442E953E4DBDBEA72F0B6116DDA17EBA39A2DC355CEE41B5C0EF9E0`
+* **[D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt)** (790 行，30,322 字节)
+
+### 3. 最新编译产出的两套安装包（Run #77）
+* **Dopamine 版 (Rootless / arm64)**：
+  - 本地路径 1：[D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - 本地路径 2：[D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - 文件大小：`407,912` 字节
+  - SHA256：`82AAEC960F4AE79C094F4FE24C616337F7372A0541BA8681CCEE1CC44520B71E`
+* **Relaxin 版 (RootHide / arm64e)**：
+  - 本地路径 1：[D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - 本地路径 2：[D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - 文件大小：`265,312` 字节
+  - SHA256：`37F2F287728E56125A656B91653A10C32595DBC5B2144AE683EA7D322CF241A4`
+
+---
+
+## 四、工作状态分类表
+
+| 状态 | 工作项 | 对应位置 / 备注 |
+| :---: | :--- | :--- |
+| **已完成** | 5 处底层稳定性与防穿帮核心代码替换 | `Tweak.x` 全部 5 处精确应用 |
+| **已完成** | 源码四向同步与校验和一致性核验 | `Tweak.x`（两处工程库 + 两处 D 盘备份）字节级完全一致 |
+| **已完成** | Git 提交与远程推送 | Commit `4fc1f78` 推送至 `origin/main` |
+| **已完成** | GitHub Actions 双矩阵云端构建 | Run #77 (ID: `40204094811`) 🟢 Rootless & Roothide 全部构建成功 |
+| **已完成** | 双格式安装包自动下载与归档 | 最新 Dopamine arm64 版与 Relaxin arm64e 版均已同步落盘至 D 盘根目录与 `D:\天使siri测试版` |
+| **待验证** | 越狱真机安装实测 | 用户在真机上验证钉钉/美团打卡测距、位置更新与稳定性 |
