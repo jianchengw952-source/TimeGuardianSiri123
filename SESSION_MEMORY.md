@@ -49,17 +49,17 @@
 ## 三、当前会话中涉及的关键文件和路径
 
 ### 1. 核心工程源码文件
-* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,479 行，983,167 字节)
-  - SHA256: `23F49ED11B2022FBCA588A93AA3B4814679B9C607C352712F12EB74EB0A3F671`
+* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,479 行，971,898 字节)
+  - SHA256: `F9FF6256261BE820D57BD76A82A214F3BC3A46839650B46CD075CB0B0348958D`
 * **[layout/DEBIAN/postinst](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/layout/DEBIAN/postinst)** (362 字节)
 * **[.github/workflows/build.yml](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/.github/workflows/build.yml)** (1,757 字节)
 
 ### 2. 四路同步镜像文件（100% 字节一致）
-* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (983,167 字节，SHA256: `23F49ED11B2022FBCA588A93AA3B4814679B9C607C352712F12EB74EB0A3F671`)
-* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (983,167 字节，SHA256: `23F49ED11B2022FBCA588A93AA3B4814679B9C607C352712F12EB74EB0A3F671`)
-* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (983,167 字节，SHA256: `23F49ED11B2022FBCA588A93AA3B4814679B9C607C352712F12EB74EB0A3F671`)
-* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (983,167 字节，SHA256: `23F49ED11B2022FBCA588A93AA3B4814679B9C607C352712F12EB74EB0A3F671`)
-* [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (37,549 字节)
+* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (971,898 字节，SHA256: `F9FF6256261BE820D57BD76A82A214F3BC3A46839650B46CD075CB0B0348958D`)
+* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (971,898 字节，SHA256: `F9FF6256261BE820D57BD76A82A214F3BC3A46839650B46CD075CB0B0348958D`)
+* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (971,898 字节，SHA256: `F9FF6256261BE820D57BD76A82A214F3BC3A46839650B46CD075CB0B0348958D`)
+* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (971,898 字节，SHA256: `F9FF6256261BE820D57BD76A82A214F3BC3A46839650B46CD075CB0B0348958D`)
+* [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (28,285 字节)
 
 ### 3. 最新云端编译产物（Run #96 / Commit d0f836）
 > **解决 Sileo 报错「错误的deb文件：无法读取提供的deb文件」**：
