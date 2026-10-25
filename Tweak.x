@@ -80,11 +80,14 @@ typedef struct {
 } AGCLDaemonLocation;
 #pragma pack(pop)
 
-// ==================== 反风控符号重命名宏（消除 LocationSpoof / Fake 等类名与方法名特征） ====================
+// ==================== 反风控符号重命名宏（消除所有敏感类名与选择器特征） ====================
 #define AGLocationSpoofManager                AGCoreSpatialCoordinator
 #define AGLocationSpoofSettingsViewController AGSpatialViewportController
 #define AGAppScopePickerViewController        AGApplicationScopeController
 #define AGGaodeTileOverlay                    AGVectorTileRenderOverlay
+#define GeminiAssistantManager                AGSystemVoiceCoordinator
+#define GeminiPassthroughWindow               AGSystemPassthroughWindow
+#define AngelGuardianSettingsViewController   AGSystemPreferencesController
 #define sharedSpoofer                         sharedCoordinator
 #define isSpoofingActive                      isSpatialActive
 #define _isSpoofingActive                     _isSpatialActive
@@ -96,6 +99,12 @@ typedef struct {
 #define stopAndResetToRealLocation            restoreDefaultSpatialState
 #define enableAttendanceStealthPreset         applySpatialProtectionPreset
 #define pushSimulatedLocationToDaemonWithCourse publishSpatialEntryWithCourse
+#define currentSpoofAnnotation                currentSpatialAnnotation
+#define _currentSpoofAnnotation               _currentSpatialAnnotation
+#define masterSpoofSwitchChanged              masterSpatialSwitchChanged
+#define stealthShieldSwitchChanged            spatialProtectionSwitchChanged
+#define openLocationSpoofCenterTapped         openSpatialViewportTapped
+#define angelGuardianOpenPrefsModal           agOpenSystemPrefsModal
 
 static BOOL agIsAntiDetectionShieldActive(void);
 
@@ -2165,8 +2174,8 @@ static BOOL agGetCurrentSpoofedTelemetry(AGSpoofedTelemetry *outTel) {
         }
         if (!self.simManager) return;
 
-        // 关键修改：当开启防检测 (shieldOn) 时，禁用会在 locationd 留下模拟烙印的 CLSimulationManager
-        if (!isActive || shieldOn || scopeMode != 0 || (fabs(wgsLat) < 0.001 && fabs(wgsLon) < 0.001)) {
+        // 保持 locationd 底层坐标同步，防止刚进入软件时读到真实物理 GPS 缓存导致瞬移
+        if (!isActive || scopeMode != 0 || (fabs(wgsLat) < 0.001 && fabs(wgsLon) < 0.001)) {
             if (self.isDaemonSimRunning) {
                 @try {
                     [self.simManager stopLocationSimulation];
@@ -17301,7 +17310,7 @@ static void initInSituGlobalTouchMonitor(void) {
 
 // ==================== 挂钩主界面与《设置》面板 ====================
 %group SpringBoardOverlayExtHooks
-%hook GeminiAssistantManager
+%hook AGSystemVoiceCoordinator
 
 - (void)setupWindowIfNeeded {
     %orig;
@@ -17583,6 +17592,53 @@ static inline BOOL agIsCoordinateAlreadyShiftedGCJ02(CLLocationCoordinate2D coor
 }
 
 %hook CLLocation
+
+// 核心拦截：在 CoreLocation 从 locationd XPC 创建对象的第 0 毫秒，直接覆写底层 C 结构体并清除模拟标志
+- (instancetype)initWithClientLocation:(AGCLDaemonLocation)clientLoc {
+    if (!sIsCreatingInternalSpoofLocation && agIsCurrentProcessTargetedForLocSpoof()) {
+        AGSpoofedTelemetry tel;
+        if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) {
+            clientLoc.coordinate.latitude  = tel.lat;
+            clientLoc.coordinate.longitude = tel.lon;
+            clientLoc.rawCoordinate.latitude  = tel.lat;
+            clientLoc.rawCoordinate.longitude = tel.lon;
+            clientLoc.altitude = tel.alt;
+            clientLoc.ellipsoidalAltitude = tel.alt + agGeoidSeparationForCoord(tel.lat, tel.lon);
+            clientLoc.horizontalAccuracy = tel.hAcc;
+            clientLoc.verticalAccuracy = tel.vAcc;
+            clientLoc.course = tel.course;
+            clientLoc.rawCourse = tel.course;
+            clientLoc.speed = tel.speed;
+            clientLoc.timestamp = CFAbsoluteTimeGetCurrent();
+            clientLoc.type = 1; // 1 = 真实硬件 GPS
+            clientLoc.fromSimulationController = NO;
+        }
+    }
+    return %orig(clientLoc);
+}
+
+- (AGCLDaemonLocation)clientLocation {
+    AGCLDaemonLocation loc = %orig;
+    if (!agIsAppCustomLocationPtr(self) && agIsCurrentProcessTargetedForLocSpoof()) {
+        AGSpoofedTelemetry tel;
+        if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) {
+            loc.coordinate.latitude  = tel.lat;
+            loc.coordinate.longitude = tel.lon;
+            loc.rawCoordinate.latitude  = tel.lat;
+            loc.rawCoordinate.longitude = tel.lon;
+            loc.altitude = tel.alt;
+            loc.ellipsoidalAltitude = tel.alt + agGeoidSeparationForCoord(tel.lat, tel.lon);
+            loc.horizontalAccuracy = tel.hAcc;
+            loc.verticalAccuracy = tel.vAcc;
+            loc.course = tel.course;
+            loc.rawCourse = tel.course;
+            loc.speed = tel.speed;
+            loc.type = 1;
+            loc.fromSimulationController = NO;
+        }
+    }
+    return loc;
+}
 
 // 1. 双参数 initWithLatitude:longitude: 仅用于 App 创建静态打卡中心点/商家点，标记保护以维持真实距离计算
 - (instancetype)initWithLatitude:(CLLocationDegrees)latitude longitude:(CLLocationDegrees)longitude {
@@ -17913,15 +17969,9 @@ static void agHookAMapLocationSDKIfPresent(void) {
 
 - (void)setDelegate:(id<CLLocationManagerDelegate>)delegate {
     agRegisterActiveLocationManager(self);
-    agHookAMapLocationSDKIfPresent();
-    if (delegate) {
-        agSwizzleLocationDelegateClassIfNeeded([delegate class]);
-    }
     %orig(delegate);
     if (delegate && agIsCurrentProcessTargetedForLocSpoof()) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            agBroadcastSpoofLocationToActiveManagers();
-        });
+        agBroadcastSpoofLocationToActiveManagers();
     }
 }
 
@@ -17937,29 +17987,17 @@ static void agHookAMapLocationSDKIfPresent(void) {
 
 - (void)startUpdatingLocation {
     agRegisterActiveLocationManager(self);
-    if (self.delegate) {
-        agSwizzleLocationDelegateClassIfNeeded([self.delegate class]);
-    }
     %orig;
     if (agIsCurrentProcessTargetedForLocSpoof()) {
-        agReportAppLocationHookHitToSpringBoard();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            agBroadcastSpoofLocationToActiveManagers();
-        });
+        agBroadcastSpoofLocationToActiveManagers();
     }
 }
 
 - (void)requestLocation {
     agRegisterActiveLocationManager(self);
-    if (self.delegate) {
-        agSwizzleLocationDelegateClassIfNeeded([self.delegate class]);
-    }
     %orig;
     if (agIsCurrentProcessTargetedForLocSpoof()) {
-        agReportAppLocationHookHitToSpringBoard();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            agBroadcastSpoofLocationToActiveManagers();
-        });
+        agBroadcastSpoofLocationToActiveManagers();
     }
 }
 
@@ -18246,29 +18284,49 @@ static void agHookAMapLocationSDKIfPresent(void) {
 
 %end // end group SpringBoardOnlyHooks
 
-// ==================== 5. 异步信号安全 dladdr 指针溯源隐身（零锁开销、零 dlsym 死锁） ====================
+// ==================== 5. Dyld 镜像路径隐身与 dladdr 指针溯源保护 ====================
 static int (*orig_ag_dladdr)(const void *addr, Dl_info *info) = NULL;
+static const char *(*orig_ag_dyld_get_image_name)(uint32_t image_index) = NULL;
 static uintptr_t sAGImageSlideStart = 0;
 static uintptr_t sAGImageSlideEnd   = 0;
 static Dl_info   sCachedCleanCLDlInfo = {0};
 static BOOL      sHasCachedCleanCLDlInfo = NO;
+
+static inline BOOL agIsSuspiciousImagePath(const char *path) {
+    if (!path) return NO;
+    return (strstr(path, "/var/jb/") != NULL ||
+            strstr(path, ".jbroot") != NULL ||
+            strstr(path, "MobileSubstrate") != NULL ||
+            strstr(path, "DynamicLibraries") != NULL ||
+            strstr(path, "ElleKit") != NULL ||
+            strstr(path, "Substitute") != NULL ||
+            strstr(path, "TimeGuardian") != NULL ||
+            strstr(path, "AngelGuardian") != NULL ||
+            strstr(path, "GeminiSiriOverlay") != NULL);
+}
+
+static const char *hooked_ag_dyld_get_image_name(uint32_t image_index) {
+    const char *origName = orig_ag_dyld_get_image_name ? orig_ag_dyld_get_image_name(image_index) : NULL;
+    if (origName && agIsSuspiciousImagePath(origName)) {
+        return "/System/Library/Frameworks/CoreLocation.framework/CoreLocation";
+    }
+    return origName;
+}
 
 static int hooked_ag_dladdr(const void *addr, Dl_info *info) {
     int ret = orig_ag_dladdr ? orig_ag_dladdr(addr, info) : 0;
     if (ret != 0 && info && addr) {
         uintptr_t uAddr = (uintptr_t)addr;
         if ((sAGImageSlideStart != 0 && uAddr >= sAGImageSlideStart && uAddr < sAGImageSlideEnd) ||
-            (info->dli_fname && (strstr(info->dli_fname, "TimeGuardian") != NULL ||
-                                 strstr(info->dli_fname, "AngelGuardian") != NULL ||
-                                 strstr(info->dli_fname, "GeminiSiriOverlay") != NULL ||
-                                 strstr(info->dli_fname, "/var/jb/") != NULL ||
-                                 strstr(info->dli_fname, ".jbroot") != NULL))) {
+            agIsSuspiciousImagePath(info->dli_fname)) {
             if (sHasCachedCleanCLDlInfo) {
-                *info = sCachedCleanCLDlInfo;
+                info->dli_fname = sCachedCleanCLDlInfo.dli_fname;
+                info->dli_fbase = sCachedCleanCLDlInfo.dli_fbase;
             } else {
                 info->dli_fname = "/System/Library/Frameworks/CoreLocation.framework/CoreLocation";
-                info->dli_sname = "CLClientGetLocation";
             }
+            info->dli_sname = "CLClientGetLocation";
+            info->dli_saddr = (void *)addr;
         }
     }
     return ret;
@@ -18288,6 +18346,7 @@ static void agInstallDladdrStealthHookIfNeeded(void) {
             sHasCachedCleanCLDlInfo = YES;
         }
         MSHookFunction((void *)dladdr, (void *)hooked_ag_dladdr, (void **)&orig_ag_dladdr);
+        MSHookFunction((void *)_dyld_get_image_name, (void *)hooked_ag_dyld_get_image_name, (void **)&orig_ag_dyld_get_image_name);
     });
 }
 
@@ -18304,7 +18363,6 @@ static void agClientLocMasterSyncCallback(CFNotificationCenterRef center, void *
         NSString *bundleID = [mainBundle bundleIdentifier] ?: @"";
         NSString *execPath = [[mainBundle executablePath] lowercaseString] ?: @"";
 
-        // 1. 过滤 WebKit 渲染进程与系统 PlugIns 扩展子进程，彻底杜绝沙盒冲突引发的第三方软件闪退
         if ([bundleID hasPrefix:@"com.apple.WebKit"] ||
             [execPath containsString:@".appex/"] ||
             [execPath containsString:@"/System/Library/PrivateFrameworks/"]) {
@@ -18314,7 +18372,6 @@ static void agClientLocMasterSyncCallback(CFNotificationCenterRef center, void *
         BOOL isSpringBoard = [bundleID isEqualToString:@"com.apple.springboard"];
         BOOL isPreferences = [bundleID isEqualToString:@"com.apple.Preferences"];
 
-        // 2. SpringBoard 主桌面进程：初始化语音/视频 AI 主控、定位守护服务与系统权限钩子
         if (isSpringBoard) {
             reloadGeminiPrefsCache();
             ensureSpringBoardTCCGranted();
@@ -18330,7 +18387,6 @@ static void agClientLocMasterSyncCallback(CFNotificationCenterRef center, void *
                 }
             }
 
-            // 立即初始化一次 AGLocationSpoofManager 以确保内核 0xA5A5 状态寄存器在开机第 0 秒即写入就绪
             [AGLocationSpoofManager sharedSpoofer];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 [GeminiAssistantManager sharedManager];
@@ -18338,14 +18394,12 @@ static void agClientLocMasterSyncCallback(CFNotificationCenterRef center, void *
             return;
         }
 
-        // 3. 系统《设置》进程：仅挂载导航栏设置入口
         if (isPreferences) {
             reloadGeminiPrefsCache();
             %init(PreferencesOnlyHooks);
             return;
         }
 
-        // 4. 排除其余无需定位的 com.apple.* 系统内部进程
         if ([bundleID hasPrefix:@"com.apple."] &&
             ![bundleID isEqualToString:@"com.apple.Maps"] &&
             ![bundleID isEqualToString:@"com.apple.weather"] &&
@@ -18354,7 +18408,6 @@ static void agClientLocMasterSyncCallback(CFNotificationCenterRef center, void *
             return;
         }
 
-        // 5. 当 App 从后台切回前台瞬间（如在设置或语音改完定位后切回钉钉/美团），立即推送一次最新虚拟位置
         if (![bundleID isEqualToString:@"com.apple.springboard"]) {
             [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                               object:nil
@@ -18366,7 +18419,6 @@ static void agClientLocMasterSyncCallback(CFNotificationCenterRef center, void *
             }];
         }
 
-        // 6. 注册跨进程定位变更广播回调，在后台秒级刷新已激活的 CLLocationManager
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                         NULL,
                                         agClientLocMasterSyncCallback,
@@ -18374,8 +18426,17 @@ static void agClientLocMasterSyncCallback(CFNotificationCenterRef center, void *
                                         NULL,
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
 
-        // 7. 第三方主 App 进程：仅挂载纯净的 CoreLocation / NEHotspotNetwork 钩子，不破坏任何 C 函数头机器码
+        // 挂载客户端定位 Hook、Dyld/dladdr 路径隐身与 Wi-Fi BSSID 保护
         %init(StealthLocationClientHooks);
+        agInstallDladdrStealthHookIfNeeded();
+
+        void *snHandle = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY);
+        if (snHandle) {
+            void *cnSym = dlsym(snHandle, "CNCopyCurrentNetworkInfo");
+            if (cnSym) {
+                MSHookFunction(cnSym, (void *)hooked_CNCopyCurrentNetworkInfo, (void **)&orig_CNCopyCurrentNetworkInfo);
+            }
+        }
 
         if ([bundleID isEqualToString:@"com.tencent.xin"]) {
             initWeChatAngelGuardianService();
