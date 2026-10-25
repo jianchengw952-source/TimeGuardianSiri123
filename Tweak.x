@@ -1695,7 +1695,7 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
     double targetLat = p[@"AG_LocSpoof_TargetLat"] ? [p[@"AG_LocSpoof_TargetLat"] doubleValue] : lat;
     double targetLon = p[@"AG_LocSpoof_TargetLon"] ? [p[@"AG_LocSpoof_TargetLon"] doubleValue] : lon;
     BOOL moving = [p[@"AG_LocSpoof_IsMoving"] boolValue];
-    NSInteger moveMode = [p[@"AG_LocSpoof_MoveMode"] integerValue];
+    moveMode = [p[@"AG_LocSpoof_MoveMode"] integerValue];
 
     self.currentPlaceName = p[@"AG_LocSpoof_Name"] ?: @"指定位置";
     self.baseWGS84Coord = CLLocationCoordinate2DMake(lat, lon);
