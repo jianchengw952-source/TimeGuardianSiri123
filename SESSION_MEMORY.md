@@ -49,17 +49,17 @@
 ## 三、当前会话中涉及的关键文件和路径
 
 ### 1. 核心工程源码文件
-* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,711 行，992,343 字节)
-  - SHA256: `4EE5ABA79528A09B76C50AEA53B07FCE65362E8802EBFE3A37D018CA500F81A1`
+* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,748 行，993,560 字节)
+  - SHA256: `34448B4531C6D7CD3AF0AA765DC82161ADBFF36315D48CA9B51A880E7CE252E9`
 * **[layout/DEBIAN/postinst](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/layout/DEBIAN/postinst)** (362 字节)
 * **[.github/workflows/build.yml](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/.github/workflows/build.yml)** (1,757 字节)
 
 ### 2. 四路同步镜像文件（100% 字节一致）
-* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (992,343 字节，SHA256: `4EE5ABA79528A09B76C50AEA53B07FCE65362E8802EBFE3A37D018CA500F81A1`)
-* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (992,343 字节，SHA256: `4EE5ABA79528A09B76C50AEA53B07FCE65362E8802EBFE3A37D018CA500F81A1`)
-* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (992,343 字节，SHA256: `4EE5ABA79528A09B76C50AEA53B07FCE65362E8802EBFE3A37D018CA500F81A1`)
-* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (992,343 字节，SHA256: `4EE5ABA79528A09B76C50AEA53B07FCE65362E8802EBFE3A37D018CA500F81A1`)
-* [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (45,250 字节，SHA256: `7894BACBBDDA61E9973FEA4F4E48525D5677EF96ABFE13D337E6DF2DFF1C13DB`)
+* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (993,560 字节，SHA256: `34448B4531C6D7CD3AF0AA765DC82161ADBFF36315D48CA9B51A880E7CE252E9`)
+* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (993,560 字节，SHA256: `34448B4531C6D7CD3AF0AA765DC82161ADBFF36315D48CA9B51A880E7CE252E9`)
+* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (993,560 字节，SHA256: `34448B4531C6D7CD3AF0AA765DC82161ADBFF36315D48CA9B51A880E7CE252E9`)
+* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (993,560 字节，SHA256: `34448B4531C6D7CD3AF0AA765DC82161ADBFF36315D48CA9B51A880E7CE252E9`)
+* [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (46,467 字节，SHA256: `FBF022DBD9EE82C46D3C5145F24EB421E0EA11C30638BB2090FD765D8CD67081`)
 
 ### 3. 最新云端编译产物（Run #114 / Commit `df47661`）
 > **本次更新（结构体对齐优化 + 属性/委托野指针根除 + dladdr 符号硬化）**：

@@ -17674,9 +17674,6 @@ static int my_TCCAccessPreflight(CFStringRef service, CFDictionaryRef options) {
     return 0;
 }
 
-查找原代码锚点：找到 // ====== 防闪退替换 2 开始（替换文件底部直至末尾 %ctor） ======，将其直到文件最末尾的全部代码替换为以下完整代码：
-code
-对象
 // ====== 防闪退替换 2 开始（替换文件底部直至末尾 %ctor） ======
 
 // ==================== 1. 安全反检测护盾（无信号劫持、无同名 Mach-O 冲突） ====================
@@ -17756,6 +17753,46 @@ static const char *hooked_dyld_get_image_name(uint32_t image_index) {
         }
     }
     return name;
+}
+
+static BOOL agIsAttendanceOrOfficeApp(void) {
+    static BOOL sIsAttendance = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *bid = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
+        NSString *lower = [bid lowercaseString];
+        NSArray<NSString *> *exactPresets = @[
+            @"com.laiwang.dingtalk",
+            @"com.tencent.wework",
+            @"com.electron.lark",
+            @"com.bytedance.ee.lark",
+            @"com.eyemore.todaycamera",
+            @"com.water.camera",
+            @"com.weaver.emobile7",
+            @"com.seeyon.cmp",
+            @"com.beisen.italent",
+            @"com.fxiaoke.fs",
+            @"com.yonyou.yonbip",
+            @"com.kingdee.cloudhub"
+        ];
+        if ([exactPresets containsObject:lower]) {
+            sIsAttendance = YES;
+            return;
+        }
+        if ([lower containsString:@"attendance"] ||
+            [lower containsString:@"checkin"] ||
+            [lower containsString:@"sign"] ||
+            [lower containsString:@"oa"] ||
+            [lower containsString:@"work"] ||
+            [lower containsString:@"office"] ||
+            [lower containsString:@"hr"] ||
+            [lower containsString:@"camera"] ||
+            [lower containsString:@"watermark"] ||
+            [lower containsString:@"clock"]) {
+            sIsAttendance = YES;
+        }
+    });
+    return sIsAttendance;
 }
 
 // ==================== 2. Wi-Fi 防护引擎（修正默认模式假 BSSID 穿帮问题） ====================
