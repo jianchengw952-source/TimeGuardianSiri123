@@ -87,6 +87,7 @@ typedef struct {
 #define AGGaodeTileOverlay                    AGVectorTileRenderOverlay
 #define sharedSpoofer                         sharedCoordinator
 #define isSpoofingActive                      isSpatialActive
+#define _isSpoofingActive                     _isSpatialActive
 #define constructRealisticSpoofedLocation     constructSpatialEntry
 #define pinLocationWithCoordinate             updateSpatialPinWithCoordinate
 #define teleportImmediatelyToCurrentTarget    syncSpatialTargetImmediately
@@ -95,6 +96,8 @@ typedef struct {
 #define stopAndResetToRealLocation            restoreDefaultSpatialState
 #define enableAttendanceStealthPreset         applySpatialProtectionPreset
 #define pushSimulatedLocationToDaemonWithCourse publishSpatialEntryWithCourse
+
+static BOOL agIsAntiDetectionShieldActive(void);
 
 extern char **environ;
 
