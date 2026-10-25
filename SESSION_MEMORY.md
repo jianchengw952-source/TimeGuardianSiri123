@@ -61,7 +61,7 @@
 * [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (1,000,706 字节，SHA256: `6B05BDBB2162B3570F1ED628756DE2D07C7E206FE051FE53585650CB140578F1`)
 * [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (49,830 字节)
 
-### 3. 最新云端编译产物（Run #105 / Commit `008a5e0`）
+### 3. 最新云端编译产物（Run #107 / Commit `d29848b`）
 > **本次更新（5 处反风控与动态过滤升级）**：
 > 1. 扩充顶部反风控宏：`cachedTickLocation`、`baseWGS84Coord`、`currentWGS84Coord`、`targetWalkWGS84Coord`、`wifiTextFieldEdited` 等敏感属性与选择器全面去敏重命名。
 > 2. 跨进程通知更名：改为系统级 `com.apple.coremedia.spatial.*` 风格；并在 `saveGeminiPrefs` 前增加 `agSyncDynamicTweakFilterPlist` 动态过滤更新引擎，实现关闭总开关时在第三方 App 中 100% 物理隐身。
@@ -72,8 +72,8 @@
 
 * **Dopamine (Rootless arm64)**：
   - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
-  - 文件大小：`407,660` 字节
-  - SHA256: `DE98D85B0123F7B8086B6E2DF9738AB79B7FF44E5F3112F4740A70DBBC7E7E67`
+  - 文件大小：`408,416` 字节
+  - SHA256: `3BB9151B2A1CD94E7C4621CD7ECA33EFC4568523FAAB75D84D455D03971AE99E`
   - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (406,920 字节)
   - 分发路径：
     - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
@@ -82,8 +82,8 @@
 
 * **Relaxin (RootHide arm64e)**：
   - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
-  - 文件大小：`267,200` 字节
-  - SHA256: `75410F560DB24BB93A261EB3C84D6B2DE714F9D62128D7EF27561A12606299DE`
+  - 文件大小：`268,100` 字节
+  - SHA256: `A019337DE7F23DABBA2FC4B0C324412A53804D4989F23A5082C5571CE6B998F0`
   - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (264,840 字节)
   - 分发路径：
     - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
