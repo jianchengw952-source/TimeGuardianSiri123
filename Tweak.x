@@ -554,18 +554,22 @@ static void reloadGeminiPrefsCache(void) {
             }
         }
     }
-    if (newestDict) {
-        [merged addEntriesFromDictionary:newestDict];
-    }
-
     if (agIsSpringBoardProcess() || [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.Preferences"]) {
         CFPropertyListRef globalShared = CFPreferencesCopyValue(CFSTR("AG_LocSpoof_GlobalSharedDict"), kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
         if (globalShared) {
             if (CFGetTypeID(globalShared) == CFDictionaryGetTypeID()) {
-                [merged addEntriesFromDictionary:(__bridge NSDictionary *)globalShared];
+                NSDictionary *sharedDict = (__bridge NSDictionary *)globalShared;
+                for (NSString *k in sharedDict) {
+                    if (merged[k] == nil) {
+                        merged[k] = sharedDict[k];
+                    }
+                }
             }
             CFRelease(globalShared);
         }
+    }
+    if (newestDict) {
+        [merged addEntriesFromDictionary:newestDict];
     }
 
     BOOL kActive = NO, kShield = NO;
@@ -1295,45 +1299,22 @@ static const void * const kAGAppCreatedCustomLocationKey = &kAGAppCreatedCustomL
 static const void * const kAGFixedTimestampKey = &kAGFixedTimestampKey;
 static __thread BOOL sIsCreatingInternalSpoofLocation = NO;
 
-// ==================== 线程安全自定义坐标指针表与干净指针环形表 ====================
-static NSMutableSet<NSValue *> *sCustomLocationPtrs = nil;
-static os_unfair_lock sCustomLocLock = OS_UNFAIR_LOCK_INIT;
-
-static void agMarkAppCustomLocationPtr(id obj) {
-    if (!obj) return;
-    os_unfair_lock_lock(&sCustomLocLock);
-    if (!sCustomLocationPtrs) {
-        sCustomLocationPtrs = [NSMutableSet set];
-    }
-    if (sCustomLocationPtrs.count > 4096) {
-        [sCustomLocationPtrs removeAllObjects];
-    }
-    [sCustomLocationPtrs addObject:[NSValue valueWithNonretainedObject:obj]];
-    os_unfair_lock_unlock(&sCustomLocLock);
+// ==================== 零崩溃 AssociatedObject 标记与纯 C 零递归定位状态源 ====================
+static inline void agMarkAppCustomLocationPtr(id obj) {
+    if (!obj || sIsCreatingInternalSpoofLocation) return;
+    objc_setAssociatedObject(obj, kAGAppCreatedCustomLocationKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
-static void agUnmarkAppCustomLocationPtr(id obj) {
-    if (!obj) return;
-    os_unfair_lock_lock(&sCustomLocLock);
-    if (sCustomLocationPtrs) {
-        [sCustomLocationPtrs removeObject:[NSValue valueWithNonretainedObject:obj]];
-    }
-    os_unfair_lock_unlock(&sCustomLocLock);
+static inline void agUnmarkAppCustomLocationPtr(id obj) {
+    // 由 Objective-C Runtime 在对象释放时自动安全清理，无需在 -dealloc 中手动加锁移除
 }
 
-static BOOL agIsAppCustomLocationPtr(id obj) {
+static inline BOOL agIsAppCustomLocationPtr(id obj) {
     if (!obj) return NO;
-    BOOL found = NO;
-    os_unfair_lock_lock(&sCustomLocLock);
-    if (sCustomLocationPtrs) {
-        found = [sCustomLocationPtrs containsObject:[NSValue valueWithNonretainedObject:obj]];
-    }
-    os_unfair_lock_unlock(&sCustomLocLock);
-    return found;
+    return [objc_getAssociatedObject(obj, kAGAppCreatedCustomLocationKey) boolValue];
 }
 
 static inline BOOL agIsInAppCustomConstructedLocation(CLLocation *loc) {
-    if (!loc) return NO;
     return agIsAppCustomLocationPtr(loc);
 }
 
@@ -1341,32 +1322,17 @@ static inline CLLocationCoordinate2D agConvertWGS84ForCurrentApp(double wgsLat, 
     return CLLocationCoordinate2DMake(wgsLat, wgsLon);
 }
 
-static os_unfair_lock sLocPtrRingLock = OS_UNFAIR_LOCK_INIT;
-static uintptr_t sCleanLocPtrRing[256] = {0};
-static uint32_t  sCleanLocRingIdx = 0;
-
 static inline void agMarkCleanLocationPtr(id loc) {
     if (!loc) return;
-    uintptr_t p = (uintptr_t)(__bridge void *)loc;
-    os_unfair_lock_lock(&sLocPtrRingLock);
-    sCleanLocPtrRing[sCleanLocRingIdx++ & 0xFF] = p;
-    os_unfair_lock_unlock(&sLocPtrRingLock);
+    objc_setAssociatedObject(loc, kAGHardwareCleanLocationKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 static inline BOOL agIsCleanLocationPtr(id loc) {
     if (!loc) return NO;
-    uintptr_t p = (uintptr_t)(__bridge void *)loc;
-    BOOL found = NO;
-    os_unfair_lock_lock(&sLocPtrRingLock);
-    for (int i = 0; i < 256; i++) {
-        if (sCleanLocPtrRing[i] == p) { found = YES; break; }
-    }
-    os_unfair_lock_unlock(&sLocPtrRingLock);
-    return found;
+    return [objc_getAssociatedObject(loc, kAGHardwareCleanLocationKey) boolValue];
 }
 
 static inline BOOL agIsCleanSpoofedLocation(CLLocation *loc) {
-    if (!loc) return NO;
     return agIsCleanLocationPtr(loc);
 }
 
@@ -1377,30 +1343,9 @@ static double agGeoidSeparationForCoord(double lat, double lon) {
     return -12.4 * sin(radLat * 1.8) + 9.6 * cos(radLon * 1.3) + 4.2 * sin(radLat + radLon);
 }
 
-// 净化 CLLocation 底层 _internal (AGCLDaemonLocation) 结构体
+// 禁用会导致 arm64/arm64e 内存错位踩坏指针的裸结构体强写，所有防检测字段均由 Hook 方法安全提供
 static void agSanitizeCLLocationInternalStruct(CLLocation *loc, double orthoAlt, double course, double speed) {
-    if (!loc) return;
-    @try {
-        Ivar internalIvar = class_getInstanceVariable([CLLocation class], "_internal");
-        if (!internalIvar) return;
-        id internalObj = object_getIvar(loc, internalIvar);
-        if (!internalObj) return;
-        uint8_t *rawBase = (uint8_t *)(__bridge void *)internalObj;
-        AGCLDaemonLocation *daemonLoc = (AGCLDaemonLocation *)(rawBase + sizeof(Class));
-        if (fabs(daemonLoc->coordinate.latitude) <= 90.0 && fabs(daemonLoc->coordinate.longitude) <= 180.0) {
-            daemonLoc->type = 1; // 1 = 真实硬件 GNSS 卫星源
-            daemonLoc->fromSimulationController = NO;
-            daemonLoc->confidence = 95;
-            daemonLoc->lifespan = 30.0;
-            daemonLoc->integrity = 100;
-            daemonLoc->signalEnvironmentType = 1;
-            daemonLoc->rawCoordinate.latitude = daemonLoc->coordinate.latitude;
-            daemonLoc->rawCoordinate.longitude = daemonLoc->coordinate.longitude;
-            daemonLoc->rawCourse = course;
-            double geoidN = agGeoidSeparationForCoord(daemonLoc->coordinate.latitude, daemonLoc->coordinate.longitude);
-            daemonLoc->ellipsoidalAltitude = orthoAlt + geoidN;
-        }
-    } @catch (NSException *e) {}
+    (void)loc; (void)orthoAlt; (void)course; (void)speed;
 }
 
 // 根据虚拟坐标智能匹配真实区域海拔基准（零磁盘 I/O）
@@ -1842,53 +1787,106 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
     };
 }
 
-- (CLLocation *)constructRealisticSpoofedLocation {
+typedef struct {
+    BOOL valid;
+    double lat;
+    double lon;
+    double alt;
+    double hAcc;
+    double vAcc;
+    double course;
+    double speed;
+} AGSpoofedTelemetry;
+
+static os_unfair_lock sTelemetryCacheLock = OS_UNFAIR_LOCK_INIT;
+static AGSpoofedTelemetry sLastTelemetry = {NO, 0, 0, 18.5, 5.0, 3.5, -1.0, 0.0};
+static NSTimeInterval sLastTelemetryTime = 0;
+
+static BOOL agGetCurrentSpoofedTelemetry(AGSpoofedTelemetry *outTel) {
+    if (!outTel) return NO;
     double lat = 0.0, lon = 0.0, kCourse = -1.0, kSpeed = 0.0;
     BOOL kActive = NO, kShield = NO;
     if (agReadSpoofStateFromKernel(&kActive, NULL, &kShield, NULL, &lat, &lon, &kCourse, &kSpeed, NULL) && kActive && (fabs(lat) > 0.001 || fabs(lon) > 0.001)) {
-        // 已从 notifyd 内核内存拿到最新实时坐标与防检测开关状态
+        // 已从 notifyd 内核内存拿到最新实时坐标与防检测状态
     } else if (agIsSpringBoardProcess()) {
+        AGLocationSpoofManager *mgr = [AGLocationSpoofManager sharedSpoofer];
         NSDictionary *p = agReadOnlyPrefs();
-        lat = self.currentWGS84Coord.latitude;
-        lon = self.currentWGS84Coord.longitude;
+        lat = mgr.currentWGS84Coord.latitude;
+        lon = mgr.currentWGS84Coord.longitude;
         if (fabs(lat) < 0.001 && fabs(lon) < 0.001) {
             lat = [p[@"AG_LocSpoof_Lat"] doubleValue];
             lon = [p[@"AG_LocSpoof_Lon"] doubleValue];
         }
-        kCourse = self.currentCourse;
-        kSpeed = self.isRouteMoving ? MAX(0.2, self.moveSpeedMetersPerSec) : 0.0;
+        kCourse = mgr.currentCourse;
+        kSpeed = mgr.isRouteMoving ? MAX(0.2, mgr.moveSpeedMetersPerSec) : 0.0;
         kShield = (p[@"AG_AntiDet_ShieldEnabled"] == nil) ? NO : [p[@"AG_AntiDet_ShieldEnabled"] boolValue];
     } else {
-        return nil;
+        outTel->valid = NO;
+        return NO;
     }
 
     if (fabs(lat) < 0.001 && fabs(lon) < 0.001) {
-        return nil;
+        outTel->valid = NO;
+        return NO;
     }
 
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    CLLocation *cached = self.cachedTickLocation;
-    // 对齐 iOS 硬件 GPS 芯片 1Hz (约 0.92s) 采样更新周期，防止高频读取 location 时暴露时间戳 0ms 重合破绽
-    if (cached && fabs(now - [cached.timestamp timeIntervalSince1970]) < 0.92) {
-        return cached;
+    NSTimeInterval now = CFAbsoluteTimeGetCurrent();
+    os_unfair_lock_lock(&sTelemetryCacheLock);
+    if (sLastTelemetry.valid && fabs(now - sLastTelemetryTime) < 0.90 &&
+        fabs(sLastTelemetry.lat - lat) < 0.0005 && fabs(sLastTelemetry.lon - lon) < 0.0005) {
+        *outTel = sLastTelemetry;
+        os_unfair_lock_unlock(&sTelemetryCacheLock);
+        return YES;
     }
 
     double alt = 18.5, hAcc = 5.0, vAcc = 3.5;
-    BOOL needLocalDrift = (kShield && kSpeed < 0.1 && !self.jitterTimer);
     double localLat = lat, localLon = lon;
-    agStepKalmanSmoothDrift(needLocalDrift, &localLat, &localLon, &alt, &hAcc, &vAcc);
+    agStepKalmanSmoothDrift((kShield && kSpeed < 0.1), &localLat, &localLon, &alt, &hAcc, &vAcc);
     if (!kShield) {
-        // 防检测关闭时：只做纯净的固定虚拟坐标定位，不叠加任何微漂移
         localLat = lat;
         localLon = lon;
     }
 
-    CLLocation *loc = agCreateHardwareGradeLocation(CLLocationCoordinate2DMake(localLat, localLon),
-                                                    alt,
-                                                    hAcc,
-                                                    vAcc,
-                                                    kCourse,
-                                                    kSpeed);
+    double validCourse = kCourse;
+    double validSpeed  = (kSpeed >= 0.0) ? kSpeed : 0.0;
+    if (kShield && validSpeed < 0.1 && validCourse < 0.0) {
+        if (fabs(sOUDriftLatM) > 0.08 || fabs(sOUDriftLonM) > 0.08) {
+            double rad = atan2(sOUDriftLonM, sOUDriftLatM);
+            validCourse = fmod((rad * 180.0 / M_PI) + 360.0, 360.0);
+            validSpeed = 0.02 + ((double)arc4random_uniform(5)) * 0.01;
+        }
+    }
+
+    sLastTelemetry.valid  = YES;
+    sLastTelemetry.lat    = localLat;
+    sLastTelemetry.lon    = localLon;
+    sLastTelemetry.alt    = alt;
+    sLastTelemetry.hAcc   = hAcc;
+    sLastTelemetry.vAcc   = vAcc;
+    sLastTelemetry.course = validCourse;
+    sLastTelemetry.speed  = validSpeed;
+    sLastTelemetryTime    = now;
+    *outTel = sLastTelemetry;
+    os_unfair_lock_unlock(&sTelemetryCacheLock);
+    return YES;
+}
+
+- (CLLocation *)constructRealisticSpoofedLocation {
+    AGSpoofedTelemetry tel;
+    if (!agGetCurrentSpoofedTelemetry(&tel) || !tel.valid) {
+        return nil;
+    }
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    CLLocation *cached = self.cachedTickLocation;
+    if (cached && fabs(now - [cached.timestamp timeIntervalSince1970]) < 0.90) {
+        return cached;
+    }
+    CLLocation *loc = agCreateHardwareGradeLocation(CLLocationCoordinate2DMake(tel.lat, tel.lon),
+                                                    tel.alt,
+                                                    tel.hAcc,
+                                                    tel.vAcc,
+                                                    tel.course,
+                                                    tel.speed);
     self.cachedTickLocation = loc;
     return loc;
 }
@@ -2303,6 +2301,7 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
 }
 
 - (void)enableAttendanceStealthPreset {
+    reloadGeminiPrefsCache();
     NSMutableDictionary *p = loadGeminiPrefs();
     p[@"AG_AntiDet_ShieldEnabled"] = @YES;
     p[@"AG_AntiDet_HideSimFlag"] = @YES;
@@ -2311,7 +2310,25 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
     p[@"AG_AntiDet_HideHookPtr"] = @YES;
     p[@"AG_LocSpoof_JitterEnabled"] = @YES;
     p[@"AG_LocSpoof_JitterRadius"] = @1.2;
+
+    // 若当前处于白名单模式(1)且尚未勾选任何软件，自动补齐钉钉、企业微信、微信、高德等常用软件，防止白名单为空导致定位不生效
+    NSInteger scopeMode = p[@"AG_LocSpoof_ScopeMode"] ? [p[@"AG_LocSpoof_ScopeMode"] integerValue] : 0;
+    NSArray *targetApps = [p[@"AG_LocSpoof_TargetApps"] isKindOfClass:[NSArray class]] ? p[@"AG_LocSpoof_TargetApps"] : @[];
+    if (scopeMode == 1 && targetApps.count == 0) {
+        p[@"AG_LocSpoof_TargetApps"] = @[
+            @"com.laiwang.DingTalk",
+            @"com.tencent.wework",
+            @"com.electron.lark",
+            @"com.tencent.xin",
+            @"com.meituan.imeituan",
+            @"com.autonavi.amap",
+            @"com.baidu.BaiduMobileMap"
+        ];
+    }
     saveGeminiPrefs(p);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         (__bridge CFStringRef)kAGLocMasterSyncNotification,
+                                         NULL, NULL, YES);
     agLiveDiagLog(@"LOC_STEALTH_PRESET", @"Enabled attendance stealth shield preset");
     [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🛡️ 已开启防检测保护护盾"];
 }
@@ -17539,7 +17556,11 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
     if (outRelAltM)     *outRelAltM     = microAlt;
 }
 
-// ==================== 3. 客户端定位与防检测 Hook 组（基础定位与防检测手段严格分级） ====================
+static CLLocation *agBuildAppMatchedSpoofLocation(void) {
+    return [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
+}
+
+// ==================== 3. 客户端定位与防检测 Hook 组（零递归、全链路防穿帮） ====================
 %group StealthLocationClientHooks
 
 %hook CLLocationSourceInformation
@@ -17558,76 +17579,94 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 
 %hook CLLocation
 
-// 仅对 App 手动创建的纯静态双参数坐标（如考勤打卡圆心、外卖商家坐标）打保护标记，不篡改其距离计算
+// 仅对 App 手动创建的纯静态双参数坐标（如考勤打卡圆心、外卖商家坐标）打保护标记
 - (instancetype)initWithLatitude:(CLLocationDegrees)latitude longitude:(CLLocationDegrees)longitude {
     CLLocation *loc = %orig(latitude, longitude);
-    if (loc) {
+    if (loc && !sIsCreatingInternalSpoofLocation) {
         agMarkAppCustomLocationPtr(loc);
     }
     return loc;
 }
 
-- (void)dealloc {
-    agUnmarkAppCustomLocationPtr(self);
-    %orig;
-}
-
 - (CLLocationSourceInformation *)sourceInformation {
     CLLocationSourceInformation *origInfo = %orig;
-    if (agIsCurrentProcessTargetedForLocSpoof() && origInfo) {
-        return origInfo; // 由 CLLocationSourceInformation Hook 强制返回 isSimulatedBySoftware = NO
+    if (agIsAntiDetectionShieldActive()) {
+        if (!origInfo) {
+            if (@available(iOS 15.0, *)) {
+                return [[CLLocationSourceInformation alloc] initWithSoftwareSimulationState:NO andExternalAccessoryState:NO];
+            }
+        }
     }
     return origInfo;
 }
 
 - (CLLocationCoordinate2D)coordinate {
-    CLLocationCoordinate2D orig = %orig;
-    if (agIsAppCustomLocationPtr(self)) {
-        return orig; // 保护商家与考勤中心点静态坐标，确保距离计算 100% 正常
+    // 1. 若是 App 自建静态坐标（如打卡点中心）或本插件已生成的干净虚拟坐标，直接返回 %orig，彻底杜绝无限递归！
+    if (agIsAppCustomLocationPtr(self) || agIsCleanLocationPtr(self)) {
+        return %orig;
     }
     if (agIsCurrentProcessTargetedForLocSpoof()) {
         agReportAppLocationHookHitToSpringBoard();
-        CLLocation *spoofed = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
-        CLLocationCoordinate2D sc = spoofed.coordinate;
-        if (fabs(sc.latitude) > 0.001 || fabs(sc.longitude) > 0.001) {
-            return agConvertWGS84ForCurrentApp(sc.latitude, sc.longitude);
+        AGSpoofedTelemetry tel;
+        if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) {
+            return agConvertWGS84ForCurrentApp(tel.lat, tel.lon);
         }
     }
-    return orig;
+    return %orig;
 }
 
 - (CLLocationAccuracy)horizontalAccuracy {
-    if (agIsAppCustomLocationPtr(self)) return %orig;
+    if (agIsAppCustomLocationPtr(self) || agIsCleanLocationPtr(self)) return %orig;
     if (agIsCurrentProcessTargetedForLocSpoof()) {
-        CLLocation *spoofed = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
-        return spoofed.horizontalAccuracy;
+        AGSpoofedTelemetry tel;
+        if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) return tel.hAcc;
+    }
+    return %orig;
+}
+
+- (CLLocationAccuracy)verticalAccuracy {
+    if (agIsAppCustomLocationPtr(self) || agIsCleanLocationPtr(self)) return %orig;
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        AGSpoofedTelemetry tel;
+        if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) return tel.vAcc;
     }
     return %orig;
 }
 
 - (CLLocationDistance)altitude {
+    if (agIsAppCustomLocationPtr(self) || agIsCleanLocationPtr(self)) return %orig;
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        AGSpoofedTelemetry tel;
+        if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) return tel.alt;
+    }
+    return %orig;
+}
+
+- (CLLocationDistance)ellipsoidalAltitude {
     if (agIsAppCustomLocationPtr(self)) return %orig;
     if (agIsCurrentProcessTargetedForLocSpoof()) {
-        CLLocation *spoofed = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
-        return spoofed.altitude;
+        AGSpoofedTelemetry tel;
+        if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) {
+            return tel.alt + agGeoidSeparationForCoord(tel.lat, tel.lon);
+        }
     }
     return %orig;
 }
 
 - (CLLocationDirection)course {
-    if (agIsAppCustomLocationPtr(self)) return %orig;
+    if (agIsAppCustomLocationPtr(self) || agIsCleanLocationPtr(self)) return %orig;
     if (agIsCurrentProcessTargetedForLocSpoof()) {
-        CLLocation *spoofed = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
-        return spoofed.course;
+        AGSpoofedTelemetry tel;
+        if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) return tel.course;
     }
     return %orig;
 }
 
 - (CLLocationSpeed)speed {
-    if (agIsAppCustomLocationPtr(self)) return %orig;
+    if (agIsAppCustomLocationPtr(self) || agIsCleanLocationPtr(self)) return %orig;
     if (agIsCurrentProcessTargetedForLocSpoof()) {
-        CLLocation *spoofed = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
-        return spoofed.speed;
+        AGSpoofedTelemetry tel;
+        if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) return tel.speed;
     }
     return %orig;
 }
@@ -17642,10 +17681,36 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 
 - (CLLocationDirectionAccuracy)courseAccuracy {
     CLLocationDirectionAccuracy orig = %orig;
-    if (agIsAntiDetectionShieldActive() && orig < 0.0 && [self course] >= 0.0) {
-        return 14.2;
+    if (agIsAntiDetectionShieldActive() && orig < 0.0) {
+        AGSpoofedTelemetry tel;
+        if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid && tel.course >= 0.0) {
+            return 14.2;
+        }
     }
     return orig;
+}
+
+// 拦截底层 C++ 距离计算（防止钉钉/美团直接读取原生 _internal 真实坐标计算考勤距离）
+- (CLLocationDistance)distanceFromLocation:(const CLLocation *)location {
+    if (location && agIsCurrentProcessTargetedForLocSpoof()) {
+        CLLocation *spoofLoc = agBuildAppMatchedSpoofLocation();
+        if (spoofLoc) {
+            BOOL selfIsUserLoc  = (!agIsAppCustomLocationPtr(self) && !agIsCleanLocationPtr(self));
+            BOOL otherIsUserLoc = (!agIsAppCustomLocationPtr((id)location) && !agIsCleanLocationPtr((id)location));
+            if (selfIsUserLoc && !otherIsUserLoc) {
+                return [spoofLoc distanceFromLocation:location];
+            } else if (!selfIsUserLoc && otherIsUserLoc) {
+                return %orig(spoofLoc);
+            } else if (selfIsUserLoc && otherIsUserLoc) {
+                return 0.0;
+            }
+        }
+    }
+    return %orig(location);
+}
+
+- (CLLocationDistance)getDistanceFrom:(const CLLocation *)location {
+    return [self distanceFromLocation:location];
 }
 
 - (BOOL)_isSimulated {
@@ -17660,8 +17725,31 @@ static void agComputeRealisticBarometer(double *outPressureKPa, double *outRelAl
 
 %end
 
+// 拦截内嵌原生 MKMapView 的用户定位蓝点（微信共享实时位置、部分打卡地图）
+%hook MKUserLocation
+
+- (CLLocation *)location {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        CLLocation *spoof = agBuildAppMatchedSpoofLocation();
+        if (spoof) return spoof;
+    }
+    return %orig;
+}
+
+- (CLLocationCoordinate2D)coordinate {
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        AGSpoofedTelemetry tel;
+        if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) {
+            return agWGS84ToGCJ02(tel.lat, tel.lon);
+        }
+    }
+    return %orig;
+}
+
+%end
+
 static NSHashTable<CLLocationManager *> *sActiveLocManagers = nil;
-static NSMutableSet<Class> *sSwizzledDelegateClasses = nil;
+static NSMutableSet<NSValue *> *sSwizzledMethodsSet = nil;
 static os_unfair_lock sLocMgrPoolLock = OS_UNFAIR_LOCK_INIT;
 
 static void agRegisterActiveLocationManager(CLLocationManager *mgr) {
@@ -17681,20 +17769,7 @@ static NSArray<CLLocationManager *> *agAllActiveLocationManagers(void) {
     return all;
 }
 
-static CLLocation *agBuildAppMatchedSpoofLocation(void) {
-    CLLocation *rawSpoof = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
-    if (!rawSpoof) return nil;
-    CLLocationCoordinate2D convCoord = agConvertWGS84ForCurrentApp(rawSpoof.coordinate.latitude, rawSpoof.coordinate.longitude);
-    return [[CLLocation alloc] initWithCoordinate:convCoord
-                                         altitude:rawSpoof.altitude
-                               horizontalAccuracy:rawSpoof.horizontalAccuracy
-                                 verticalAccuracy:rawSpoof.verticalAccuracy
-                                           course:rawSpoof.course
-                                            speed:rawSpoof.speed
-                                        timestamp:[NSDate date]];
-}
-
-// 立即向当前 App 内所有活跃的 CLLocationManager 推送最新虚拟坐标（无需杀后台重开 App）
+// 立即向当前 App 内所有活跃的 CLLocationManager 推送最新虚拟坐标
 static void agBroadcastSpoofLocationToActiveManagers(void) {
     if (!agIsCurrentProcessTargetedForLocSpoof()) return;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -17719,58 +17794,64 @@ static void agBroadcastSpoofLocationToActiveManagers(void) {
     });
 }
 
-// 安全动态 Hook 代理类的 didUpdateLocations:，防止真实硬件 GPS 覆盖虚拟位置
+// 按 Method 指针精确去重 Hook，防止父子类共用同一个 Method 时重复包装，并 100% 替换真实 GPS 数组
 static void agSwizzleLocationDelegateClassIfNeeded(Class delCls) {
     if (!delCls) return;
-    os_unfair_lock_lock(&sLocMgrPoolLock);
-    if (!sSwizzledDelegateClasses) {
-        sSwizzledDelegateClasses = [NSMutableSet set];
-    }
-    if ([sSwizzledDelegateClasses containsObject:delCls]) {
-        os_unfair_lock_unlock(&sLocMgrPoolLock);
-        return;
-    }
-    [sSwizzledDelegateClasses addObject:delCls];
-    os_unfair_lock_unlock(&sLocMgrPoolLock);
 
-    // 1. 拦截现代定位回调 -locationManager:didUpdateLocations:
     SEL selNew = @selector(locationManager:didUpdateLocations:);
     Method mNew = class_getInstanceMethod(delCls, selNew);
     if (mNew) {
-        typedef void (*DidUpdateLocsIMP)(id, SEL, CLLocationManager *, NSArray<CLLocation *> *);
-        __block DidUpdateLocsIMP origIMP = (DidUpdateLocsIMP)method_getImplementation(mNew);
-        IMP newIMP = imp_implementationWithBlock(^(id selfObj, CLLocationManager *manager, NSArray<CLLocation *> *locations) {
-            if (agIsCurrentProcessTargetedForLocSpoof()) {
-                agReportAppLocationHookHitToSpringBoard();
-                CLLocation *spoofLoc = agBuildAppMatchedSpoofLocation();
-                if (origIMP && spoofLoc) {
-                    origIMP(selfObj, selNew, manager, @[spoofLoc]);
-                    return;
+        NSValue *mKey = [NSValue valueWithPointer:mNew];
+        os_unfair_lock_lock(&sLocMgrPoolLock);
+        if (!sSwizzledMethodsSet) sSwizzledMethodsSet = [NSMutableSet set];
+        BOOL alreadySwizzled = [sSwizzledMethodsSet containsObject:mKey];
+        if (!alreadySwizzled) [sSwizzledMethodsSet addObject:mKey];
+        os_unfair_lock_unlock(&sLocMgrPoolLock);
+
+        if (!alreadySwizzled) {
+            typedef void (*DidUpdateLocsIMP)(id, SEL, CLLocationManager *, NSArray<CLLocation *> *);
+            __block DidUpdateLocsIMP origIMP = (DidUpdateLocsIMP)method_getImplementation(mNew);
+            IMP newIMP = imp_implementationWithBlock(^(id selfObj, CLLocationManager *manager, NSArray<CLLocation *> *locations) {
+                if (agIsCurrentProcessTargetedForLocSpoof()) {
+                    agReportAppLocationHookHitToSpringBoard();
+                    CLLocation *spoofLoc = agBuildAppMatchedSpoofLocation();
+                    if (origIMP && spoofLoc) {
+                        origIMP(selfObj, selNew, manager, @[spoofLoc]);
+                        return;
+                    }
                 }
-            }
-            if (origIMP) origIMP(selfObj, selNew, manager, locations);
-        });
-        method_setImplementation(mNew, newIMP);
+                if (origIMP) origIMP(selfObj, selNew, manager, locations);
+            });
+            method_setImplementation(mNew, newIMP);
+        }
     }
 
-    // 2. 拦截旧版定位回调 -locationManager:didUpdateToLocation:fromLocation:
     SEL selOld = @selector(locationManager:didUpdateToLocation:fromLocation:);
     Method mOld = class_getInstanceMethod(delCls, selOld);
     if (mOld) {
-        typedef void (*DidUpdateOldIMP)(id, SEL, CLLocationManager *, CLLocation *, CLLocation *);
-        __block DidUpdateOldIMP origOldIMP = (DidUpdateOldIMP)method_getImplementation(mOld);
-        IMP newOldIMP = imp_implementationWithBlock(^(id selfObj, CLLocationManager *manager, CLLocation *newLoc, CLLocation *oldLoc) {
-            if (agIsCurrentProcessTargetedForLocSpoof()) {
-                agReportAppLocationHookHitToSpringBoard();
-                CLLocation *spoofLoc = agBuildAppMatchedSpoofLocation();
-                if (origOldIMP && spoofLoc) {
-                    origOldIMP(selfObj, selOld, manager, spoofLoc, spoofLoc);
-                    return;
+        NSValue *mOldKey = [NSValue valueWithPointer:mOld];
+        os_unfair_lock_lock(&sLocMgrPoolLock);
+        if (!sSwizzledMethodsSet) sSwizzledMethodsSet = [NSMutableSet set];
+        BOOL alreadySwizzledOld = [sSwizzledMethodsSet containsObject:mOldKey];
+        if (!alreadySwizzledOld) [sSwizzledMethodsSet addObject:mOldKey];
+        os_unfair_lock_unlock(&sLocMgrPoolLock);
+
+        if (!alreadySwizzledOld) {
+            typedef void (*DidUpdateOldIMP)(id, SEL, CLLocationManager *, CLLocation *, CLLocation *);
+            __block DidUpdateOldIMP origOldIMP = (DidUpdateOldIMP)method_getImplementation(mOld);
+            IMP newOldIMP = imp_implementationWithBlock(^(id selfObj, CLLocationManager *manager, CLLocation *newLoc, CLLocation *oldLoc) {
+                if (agIsCurrentProcessTargetedForLocSpoof()) {
+                    agReportAppLocationHookHitToSpringBoard();
+                    CLLocation *spoofLoc = agBuildAppMatchedSpoofLocation();
+                    if (origOldIMP && spoofLoc) {
+                        origOldIMP(selfObj, selOld, manager, spoofLoc, spoofLoc);
+                        return;
+                    }
                 }
-            }
-            if (origOldIMP) origOldIMP(selfObj, selOld, manager, newLoc, oldLoc);
-        });
-        method_setImplementation(mOld, newOldIMP);
+                if (origOldIMP) origOldIMP(selfObj, selOld, manager, newLoc, oldLoc);
+            });
+            method_setImplementation(mOld, newOldIMP);
+        }
     }
 }
 
@@ -17782,13 +17863,17 @@ static void agSwizzleLocationDelegateClassIfNeeded(Class delCls) {
         agSwizzleLocationDelegateClassIfNeeded([delegate class]);
     }
     %orig(delegate);
+    if (delegate && agIsCurrentProcessTargetedForLocSpoof()) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            agBroadcastSpoofLocationToActiveManagers();
+        });
+    }
 }
 
 - (CLLocation *)location {
     agRegisterActiveLocationManager(self);
     if (agIsCurrentProcessTargetedForLocSpoof()) {
         agReportAppLocationHookHitToSpringBoard();
-        // 直接返回匹配当前 App 坐标系的虚拟定位对象，彻底移除错误的 if (origLoc) return origLoc;
         CLLocation *spoof = agBuildAppMatchedSpoofLocation();
         if (spoof) return spoof;
     }
@@ -17797,10 +17882,13 @@ static void agSwizzleLocationDelegateClassIfNeeded(Class delCls) {
 
 - (void)startUpdatingLocation {
     agRegisterActiveLocationManager(self);
+    if (self.delegate) {
+        agSwizzleLocationDelegateClassIfNeeded([self.delegate class]);
+    }
     %orig;
     if (agIsCurrentProcessTargetedForLocSpoof()) {
         agReportAppLocationHookHitToSpringBoard();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             agBroadcastSpoofLocationToActiveManagers();
         });
     }
@@ -17808,10 +17896,13 @@ static void agSwizzleLocationDelegateClassIfNeeded(Class delCls) {
 
 - (void)requestLocation {
     agRegisterActiveLocationManager(self);
+    if (self.delegate) {
+        agSwizzleLocationDelegateClassIfNeeded([self.delegate class]);
+    }
     %orig;
     if (agIsCurrentProcessTargetedForLocSpoof()) {
         agReportAppLocationHookHitToSpringBoard();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             agBroadcastSpoofLocationToActiveManagers();
         });
     }
@@ -18097,30 +18188,28 @@ static void agSwizzleLocationDelegateClassIfNeeded(Class delCls) {
 
 %end // end group SpringBoardOnlyHooks
 
-// ==================== 5. 精准 dladdr 指针溯源隐身（兼容 Dopamine /var/jb 与 Relaxin .jbroot-） ====================
+// ==================== 5. 异步信号安全 dladdr 指针溯源隐身（零锁开销、零 dlsym 死锁） ====================
 static int (*orig_ag_dladdr)(const void *addr, Dl_info *info) = NULL;
 static uintptr_t sAGImageSlideStart = 0;
 static uintptr_t sAGImageSlideEnd   = 0;
+static Dl_info   sCachedCleanCLDlInfo = {0};
+static BOOL      sHasCachedCleanCLDlInfo = NO;
 
 static int hooked_ag_dladdr(const void *addr, Dl_info *info) {
     int ret = orig_ag_dladdr ? orig_ag_dladdr(addr, info) : 0;
     if (ret != 0 && info && addr) {
         uintptr_t uAddr = (uintptr_t)addr;
-        // 仅当被查询地址位于本插件自身镜像段（或越狱注入目录），且当前开启了防检测保护时，才伪装为系统 CoreLocation
         if ((sAGImageSlideStart != 0 && uAddr >= sAGImageSlideStart && uAddr < sAGImageSlideEnd) ||
             (info->dli_fname && (strstr(info->dli_fname, "TimeGuardian") != NULL ||
                                  strstr(info->dli_fname, "AngelGuardian") != NULL ||
                                  strstr(info->dli_fname, "GeminiSiriOverlay") != NULL ||
                                  strstr(info->dli_fname, "/var/jb/") != NULL ||
                                  strstr(info->dli_fname, ".jbroot") != NULL))) {
-            if (agIsAntiDetectionShieldActive()) {
-                void *sysSym = dlsym(RTLD_DEFAULT, "CLLocationCoordinate2DIsValid");
-                if (sysSym && orig_ag_dladdr) {
-                    orig_ag_dladdr(sysSym, info);
-                } else {
-                    info->dli_fname = "/System/Library/Frameworks/CoreLocation.framework/CoreLocation";
-                    info->dli_sname = "CLClientGetLocation";
-                }
+            if (sHasCachedCleanCLDlInfo) {
+                *info = sCachedCleanCLDlInfo;
+            } else {
+                info->dli_fname = "/System/Library/Frameworks/CoreLocation.framework/CoreLocation";
+                info->dli_sname = "CLClientGetLocation";
             }
         }
     }
@@ -18135,6 +18224,10 @@ static void agInstallDladdrStealthHookIfNeeded(void) {
         if (dladdr((const void *)&agInstallDladdrStealthHookIfNeeded, &selfInfo) && selfInfo.dli_fbase) {
             sAGImageSlideStart = (uintptr_t)selfInfo.dli_fbase;
             sAGImageSlideEnd   = sAGImageSlideStart + 0x400000;
+        }
+        void *sysSym = dlsym(RTLD_DEFAULT, "CLLocationCoordinate2DIsValid");
+        if (sysSym && dladdr(sysSym, &sCachedCleanCLDlInfo)) {
+            sHasCachedCleanCLDlInfo = YES;
         }
         MSHookFunction((void *)dladdr, (void *)hooked_ag_dladdr, (void **)&orig_ag_dladdr);
     });
