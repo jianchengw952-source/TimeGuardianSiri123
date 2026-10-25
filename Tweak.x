@@ -1465,19 +1465,21 @@ static CLLocation *agCreateHardwareGradeLocation(CLLocationCoordinate2D coord, d
     NSDate *now = [NSDate date];
     sIsCreatingInternalSpoofLocation = YES;
     CLLocation *loc = nil;
-    if (shieldOn && @available(iOS 15.0, *)) {
-        CLLocationSourceInformation *cleanSource = [[CLLocationSourceInformation alloc] initWithSoftwareSimulationState:NO andExternalAccessoryState:NO];
-        if ([CLLocation instancesRespondToSelector:@selector(initWithCoordinate:altitude:horizontalAccuracy:verticalAccuracy:course:courseAccuracy:speed:speedAccuracy:timestamp:sourceInfo:)]) {
-            loc = [[CLLocation alloc] initWithCoordinate:coord
-                                                altitude:alt
-                                      horizontalAccuracy:hAcc
-                                        verticalAccuracy:vAcc
-                                                  course:validCourse
-                                          courseAccuracy:crsAcc
-                                                   speed:validSpeed
-                                           speedAccuracy:spdAcc
-                                               timestamp:now
-                                              sourceInfo:cleanSource];
+    if (shieldOn) {
+        if (@available(iOS 15.0, *)) {
+            CLLocationSourceInformation *cleanSource = [[CLLocationSourceInformation alloc] initWithSoftwareSimulationState:NO andExternalAccessoryState:NO];
+            if ([CLLocation instancesRespondToSelector:@selector(initWithCoordinate:altitude:horizontalAccuracy:verticalAccuracy:course:courseAccuracy:speed:speedAccuracy:timestamp:sourceInfo:)]) {
+                loc = [[CLLocation alloc] initWithCoordinate:coord
+                                                    altitude:alt
+                                          horizontalAccuracy:hAcc
+                                            verticalAccuracy:vAcc
+                                                      course:validCourse
+                                              courseAccuracy:crsAcc
+                                                       speed:validSpeed
+                                               speedAccuracy:spdAcc
+                                                   timestamp:now
+                                                  sourceInfo:cleanSource];
+            }
         }
     }
     if (!loc) {
