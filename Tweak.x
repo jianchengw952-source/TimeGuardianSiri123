@@ -18575,23 +18575,9 @@ static BOOL gHasInstalledCHooks = NO;
 static os_unfair_lock gHookSyncLock = OS_UNFAIR_LOCK_INIT;
 
 static void agInstallAntiDetectionCHooksIfNeeded(void) {
-    if (gHasInstalledCHooks) return;
+    // 铁律：在 arm64e + ElleKit 环境下严禁对 libdyld 12字节短桩函数使用 MSHookFunction 内联汇编覆写，
+    // 彻底根除踩坏相邻系统函数引发的 signal=5 (SIGTRAP) / signal=11 闪退！
     gHasInstalledCHooks = YES;
-
-    gCurrentClientStepID = AGDiagStep_CHookDladdr;
-    MSHookFunction((void *)dladdr, (void *)hooked_dladdr, (void **)&orig_dladdr);
-
-    gCurrentClientStepID = AGDiagStep_CHookDyldName;
-    MSHookFunction((void *)_dyld_get_image_name, (void *)hooked_dyld_get_image_name, (void **)&orig_dyld_get_image_name);
-
-    gCurrentClientStepID = AGDiagStep_CHookWiFi;
-    void *snHandle = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY);
-    if (snHandle) {
-        void *cnSym = dlsym(snHandle, "CNCopyCurrentNetworkInfo");
-        if (cnSym) {
-            MSHookFunction(cnSym, (void *)hooked_CNCopyCurrentNetworkInfo, (void **)&orig_CNCopyCurrentNetworkInfo);
-        }
-    }
 }
 
 static void agSyncClientHooksWithCurrentState(void) {
