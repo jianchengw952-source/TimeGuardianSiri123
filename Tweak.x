@@ -17649,12 +17649,11 @@ static int my_TCCAccessPreflight(CFStringRef service, CFDictionaryRef options) {
     return 0;
 }
 
-// ==================== 1. 顶级反插件检测护盾（第一/二/三梯队全满配：仅在开启防检测时激活，关闭时 0 干预） ====================
+// ==================== 1. 顶级反插件检测护盾（仅在开启防检测时激活，关闭时 0 干预） ====================
 static void *gSelfDylibBase = NULL;
 static void *gCoreLocationBase = NULL;
 static const char *gCoreLocationPath = "/System/Library/Frameworks/CoreLocation.framework/CoreLocation";
 
-// 真实 CoreLocation 内部符号池（第三梯队：消除单一 dli_sname 静态特征）
 static const char * const kAGNativeCLSymbolPool[] = {
     "CLClientGetLocation",
     "CLClientCreateWithBundleIdentifierAndPath",
@@ -17666,28 +17665,12 @@ static const char * const kAGNativeCLSymbolPool[] = {
     "CLProvideNetworkLocationUpdate"
 };
 
-// 互不重复的系统私有框架伪装池（第二梯队：消除 _dyld_get_image_name 重复出现同一个路径的特征）
-static const char * const kAGDecoySystemImagePaths[] = {
-    "/System/Library/PrivateFrameworks/CoreLocationProtobuf.framework/CoreLocationProtobuf",
-    "/System/Library/PrivateFrameworks/GeoServicesCore.framework/GeoServicesCore",
-    "/System/Library/PrivateFrameworks/LocationSupport.framework/LocationSupport",
-    "/System/Library/PrivateFrameworks/CoreMotionAlgorithms.framework/CoreMotionAlgorithms",
-    "/System/Library/PrivateFrameworks/Navigation.framework/Navigation",
-    "/System/Library/PrivateFrameworks/WeatherFoundation.framework/WeatherFoundation",
-    "/System/Library/PrivateFrameworks/MapsSupport.framework/MapsSupport",
-    "/System/Library/PrivateFrameworks/AppSupport.framework/AppSupport"
-};
-
 static int (*orig_dladdr)(const void *addr, Dl_info *info) = NULL;
 static int hooked_dladdr(const void *addr, Dl_info *info) {
     int ret = orig_dladdr ? orig_dladdr(addr, info) : 0;
     if (ret != 0 && info && info->dli_fname && agIsAntiDetectionShieldActive()) {
-        if ((gSelfDylibBase != NULL && info->dli_fbase == gSelfDylibBase) ||
-            strstr(info->dli_fname, "/var/jb/") != NULL ||
-            strstr(info->dli_fname, ".jbroot") != NULL ||
-            strstr(info->dli_fname, "MobileSubstrate") != NULL ||
-            strstr(info->dli_fname, "TweakInject") != NULL ||
-            strstr(info->dli_fname, "ellekit") != NULL) {
+        if (gSelfDylibBase != NULL && info->dli_fbase == gSelfDylibBase) {
+            // 当钉钉/企微/飞书检查我们 Hook 的定位方法 IMP 指针时，完整伪装为系统 CoreLocation
             info->dli_fname = gCoreLocationPath;
             if (gCoreLocationBase != NULL) {
                 info->dli_fbase = gCoreLocationBase;
@@ -17695,6 +17678,13 @@ static int hooked_dladdr(const void *addr, Dl_info *info) {
             uintptr_t addrHash = ((uintptr_t)addr >> 4) & 0x7;
             info->dli_sname = kAGNativeCLSymbolPool[addrHash];
             info->dli_saddr = (void *)addr;
+        } else if (strstr(info->dli_fname, "/var/jb/") != NULL ||
+                   strstr(info->dli_fname, ".jbroot") != NULL ||
+                   strstr(info->dli_fname, "MobileSubstrate") != NULL ||
+                   strstr(info->dli_fname, "TweakInject") != NULL ||
+                   strstr(info->dli_fname, "ellekit") != NULL) {
+            // 仅伪装路径名 dli_fname，绝不篡改 ellekit 等库的内存基址 dli_fbase，防止栈展开读取 __unwind_info 闪退！
+            info->dli_fname = gCoreLocationPath;
         }
     }
     return ret;
@@ -17711,7 +17701,7 @@ static const char *hooked_dyld_get_image_name(uint32_t image_index) {
             strstr(name, "substitute") != NULL ||
             strstr(name, "ellekit") != NULL ||
             strstr(name, "Substrate") != NULL) {
-            return kAGDecoySystemImagePaths[image_index % 8];
+            return gCoreLocationPath;
         }
     }
     return name;
@@ -17827,8 +17817,8 @@ static NSDictionary *agBuildConsistentVirtualWiFiDict(void) {
     }
     if (!kActive || !kShield || wifiMode == 0) return nil;
 
-    // 智能分流：若处于默认防检测模式(wifiMode == 1)，仅对【考勤/办公/打卡软件】或【白名单勾选软件】激活 Wi-Fi 护盾；
-    // 抖音、淘宝、B站、浏览器、游戏等普通日常软件在全局模式下 100% 不碰 Wi-Fi，彻底解决断网问题！
+    // 智能分流：默认防检测模式(wifiMode == 1)下，仅对【考勤/办公/打卡软件】或【用户白名单勾选软件】启用虚拟 Wi-Fi；
+    // 抖音、淘宝、B站、浏览器、游戏等普通日常软件在全局模式下 100% 不触碰 Wi-Fi，彻底解决断网问题！
     if (wifiMode == 1 && !agIsAttendanceOrOfficeApp() && !kInTargetList) {
         return nil;
     }
@@ -17842,7 +17832,7 @@ static NSDictionary *agBuildConsistentVirtualWiFiDict(void) {
     }
 
     os_unfair_lock_lock(&sWiFiAnchorLock);
-    // 500 米防跳变锚点锁：只要坐标移动未超过 500 米（约 0.005 度）且未改自定义名称，始终返回同一路由器 MAC，杜绝微抖动导致网络重连
+    // 500 米防跳变锚点锁：只要坐标移动未超过 500 米（约 0.005 度），始终锁定同一路由器 MAC，杜绝微抖动引发重连
     if (sCachedVirtualWiFi &&
         hypot(lat - sWiFiAnchorLat, lon - sWiFiAnchorLon) < 0.005 &&
         wifiMode == 1) {
@@ -17903,27 +17893,10 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
     return orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
 }
 
-// 检查 NEHotspotNetwork 内部 _network (CNNetworkRef) 指针是否为空，防止空壳对象调用 %orig 触发崩溃
-static const void * const kAGDummyHotspotInstanceKey = &kAGDummyHotspotInstanceKey;
-static inline BOOL agIsDummyHotspotWithoutCNRef(id netObj) {
-    if (!netObj) return YES;
-    if ([objc_getAssociatedObject(netObj, kAGDummyHotspotInstanceKey) boolValue]) return YES;
-    void *internalRef = *(void **)((uintptr_t)netObj + sizeof(Class));
-    return (internalRef == NULL);
-}
-
 // ==================== 3. 客户端定位、测距闭环、气压/步数传感器与防闪退 Wi-Fi 引擎 ====================
 %group StealthLocationClientHooks
 
 %hook CLLocation
-
-- (instancetype)initWithCoder:(NSCoder *)coder {
-    CLLocation *instance = %orig(coder);
-    if (instance && !sIsCreatingInternalSpoofLocation) {
-        objc_setAssociatedObject(instance, kAGAppCreatedCustomLocationKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    return instance;
-}
 
 - (instancetype)initWithLatitude:(CLLocationDegrees)latitude longitude:(CLLocationDegrees)longitude {
     CLLocation *instance = %orig(latitude, longitude);
@@ -17969,23 +17942,6 @@ static inline BOOL agIsDummyHotspotWithoutCNRef(id netObj) {
                      speedAccuracy:(CLLocationSpeedAccuracy)speedAccuracy
                          timestamp:(NSDate *)timestamp {
     CLLocation *instance = %orig(coordinate, altitude, hAccuracy, vAccuracy, course, courseAccuracy, speed, speedAccuracy, timestamp);
-    if (instance && !sIsCreatingInternalSpoofLocation) {
-        objc_setAssociatedObject(instance, kAGAppCreatedCustomLocationKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    return instance;
-}
-
-- (instancetype)initWithCoordinate:(CLLocationCoordinate2D)coordinate
-                          altitude:(CLLocationDistance)altitude
-                horizontalAccuracy:(CLLocationAccuracy)hAccuracy
-                  verticalAccuracy:(CLLocationAccuracy)vAccuracy
-                            course:(CLLocationDirection)course
-                    courseAccuracy:(CLLocationDirectionAccuracy)courseAccuracy
-                             speed:(CLLocationSpeed)speed
-                     speedAccuracy:(CLLocationSpeedAccuracy)speedAccuracy
-                         timestamp:(NSDate *)timestamp
-                        sourceInfo:(id)sourceInfo {
-    CLLocation *instance = %orig(coordinate, altitude, hAccuracy, vAccuracy, course, courseAccuracy, speed, speedAccuracy, timestamp, sourceInfo);
     if (instance && !sIsCreatingInternalSpoofLocation) {
         objc_setAssociatedObject(instance, kAGAppCreatedCustomLocationKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
@@ -18095,25 +18051,20 @@ static inline BOOL agIsDummyHotspotWithoutCNRef(id netObj) {
     return origDate;
 }
 
-// 第一梯队：企业微信/飞书原生 distanceFromLocation: 测距闭环
+// 零内存分配、零递归的纯数学球面距离计算（彻底解决企业微信/飞书 distanceFromLocation: 测距穿帮）
 - (CLLocationDistance)distanceFromLocation:(const CLLocation *)location {
     if (!location) return %orig(location);
     if (agIsCurrentProcessTargetedForLocSpoof()) {
-        CLLocation *selfLoc = self;
-        CLLocation *otherLoc = (CLLocation *)location;
-        BOOL selfNeedsSpoof = (!agIsInAppCustomConstructedLocation(selfLoc) && !agIsCleanSpoofedLocation(selfLoc));
-        BOOL otherNeedsSpoof = (!agIsInAppCustomConstructedLocation(otherLoc) && !agIsCleanSpoofedLocation(otherLoc));
-        if (selfNeedsSpoof || otherNeedsSpoof) {
-            CLLocation *spoof = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
-            if (spoof) {
-                if (selfNeedsSpoof) selfLoc = spoof;
-                if (otherNeedsSpoof) otherLoc = spoof;
-                if (selfLoc != self) {
-                    return [selfLoc distanceFromLocation:otherLoc];
-                }
-                return %orig(otherLoc);
-            }
-        }
+        CLLocationCoordinate2D c1 = [self coordinate];
+        CLLocationCoordinate2D c2 = [location coordinate];
+        double radLat1 = c1.latitude * M_PI / 180.0;
+        double radLat2 = c2.latitude * M_PI / 180.0;
+        double dLat = radLat2 - radLat1;
+        double dLon = (c2.longitude - c1.longitude) * M_PI / 180.0;
+        double a = sin(dLat * 0.5) * sin(dLat * 0.5) +
+                   cos(radLat1) * cos(radLat2) * sin(dLon * 0.5) * sin(dLon * 0.5);
+        double c = 2.0 * atan2(sqrt(a), sqrt(MAX(0.0, 1.0 - a)));
+        return 6378137.0 * c;
     }
     return %orig(location);
 }
@@ -18125,11 +18076,9 @@ static inline BOOL agIsDummyHotspotWithoutCNRef(id netObj) {
 - (CLLocation *)location {
     CLLocation *origLoc = %orig;
     if (agIsCurrentProcessTargetedForLocSpoof()) {
-        CLLocation *spoof = [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
-        if (spoof) {
-            agReportAppLocationHookHitToSpringBoard();
-            return spoof;
-        }
+        agReportAppLocationHookHitToSpringBoard();
+        if (origLoc) return origLoc;
+        return [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
     }
     return origLoc;
 }
@@ -18187,12 +18136,11 @@ static inline BOOL agIsDummyHotspotWithoutCNRef(id netObj) {
             return;
         }
     }
-    %orig(location, locale, completionHandler);
+    %orig(location, completionHandler);
 }
 
 %end
 
-// 第三梯队：运动协处理器 + 步数器 (CMPedometerData) + 气压高度计 (CMAltitudeData) 物理闭环
 %hook CMMotionActivity
 
 - (BOOL)stationary {
@@ -18268,7 +18216,6 @@ static inline BOOL agIsDummyHotspotWithoutCNRef(id netObj) {
     if (agIsAntiDetectionShieldActive()) {
         AGSpoofedTelemetry tel;
         if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) {
-            // 国际标准大气压高度公式：P = 101.325 * (1 - 2.25577e-5 * h)^5.25588 (kPa)
             double h = MAX(-100.0, MIN(6000.0, tel.alt));
             double pKPa = 101.325 * pow(1.0 - 2.25577e-5 * h, 5.25588);
             return @(pKPa);
@@ -18279,7 +18226,6 @@ static inline BOOL agIsDummyHotspotWithoutCNRef(id netObj) {
 
 %end
 
-// 全属性空指针防护的 NEHotspotNetwork（彻底根治钉钉点开「签到」必闪退的 Bug）
 %hook NEHotspotNetwork
 
 + (void)fetchCurrentWithCompletionHandler:(void (^)(NEHotspotNetwork * _Nullable currentNetwork))completionHandler {
@@ -18288,14 +18234,8 @@ static inline BOOL agIsDummyHotspotWithoutCNRef(id netObj) {
         if (fakeWiFi) {
             %orig(^(NEHotspotNetwork *net) {
                 if (completionHandler) {
-                    NEHotspotNetwork *targetNet = net;
-                    if (!targetNet) {
-                        targetNet = [[objc_getClass("NEHotspotNetwork") alloc] init];
-                        if (targetNet) {
-                            objc_setAssociatedObject(targetNet, kAGDummyHotspotInstanceKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                        }
-                    }
-                    completionHandler(targetNet);
+                    // 核心修复：不再强行 [[NEHotspotNetwork alloc] init] 构造空指针实例，彻底根治钉钉点开「签到」闪退！
+                    completionHandler(net);
                 }
             });
             return;
@@ -18309,7 +18249,6 @@ static inline BOOL agIsDummyHotspotWithoutCNRef(id netObj) {
         NSDictionary *fakeWiFi = agBuildConsistentVirtualWiFiDict();
         if (fakeWiFi[@"SSID"]) return fakeWiFi[@"SSID"];
     }
-    if (agIsDummyHotspotWithoutCNRef(self)) return @"Office-5G";
     return %orig;
 }
 
@@ -18317,62 +18256,6 @@ static inline BOOL agIsDummyHotspotWithoutCNRef(id netObj) {
     if (agIsAntiDetectionShieldActive()) {
         NSDictionary *fakeWiFi = agBuildConsistentVirtualWiFiDict();
         if (fakeWiFi[@"BSSID"]) return fakeWiFi[@"BSSID"];
-    }
-    if (agIsDummyHotspotWithoutCNRef(self)) return @"48:8e:ef:12:34:56";
-    return %orig;
-}
-
-- (double)signalStrength {
-    if (agIsAntiDetectionShieldActive() && agBuildConsistentVirtualWiFiDict() != nil) {
-        return 0.86;
-    }
-    if (agIsDummyHotspotWithoutCNRef(self)) return 0.86;
-    return %orig;
-}
-
-- (BOOL)isSecure {
-    if (agIsAntiDetectionShieldActive() && agBuildConsistentVirtualWiFiDict() != nil) {
-        return YES;
-    }
-    if (agIsDummyHotspotWithoutCNRef(self)) return YES;
-    return %orig;
-}
-
-- (BOOL)didAutoJoin {
-    if (agIsAntiDetectionShieldActive() && agBuildConsistentVirtualWiFiDict() != nil) {
-        return YES;
-    }
-    if (agIsDummyHotspotWithoutCNRef(self)) return YES;
-    return %orig;
-}
-
-- (BOOL)didJustJoin {
-    if (agIsAntiDetectionShieldActive() && agBuildConsistentVirtualWiFiDict() != nil) {
-        return NO;
-    }
-    if (agIsDummyHotspotWithoutCNRef(self)) return NO;
-    return %orig;
-}
-
-- (BOOL)isChosenHelper {
-    if (agIsAntiDetectionShieldActive() && agBuildConsistentVirtualWiFiDict() != nil) {
-        return NO;
-    }
-    if (agIsDummyHotspotWithoutCNRef(self)) return NO;
-    return %orig;
-}
-
-- (NSInteger)securityType {
-    if (agIsAntiDetectionShieldActive() && agBuildConsistentVirtualWiFiDict() != nil) {
-        return 2; // NEHotspotNetworkSecurityTypePersonal (WPA2/WPA3)
-    }
-    if (agIsDummyHotspotWithoutCNRef(self)) return 2;
-    return %orig;
-}
-
-- (NSString *)description {
-    if ((agIsAntiDetectionShieldActive() && agBuildConsistentVirtualWiFiDict() != nil) || agIsDummyHotspotWithoutCNRef(self)) {
-        return [NSString stringWithFormat:@"<NEHotspotNetwork SSID: %@ BSSID: %@>", [self SSID] ?: @"", [self BSSID] ?: @""];
     }
     return %orig;
 }
@@ -18558,20 +18441,11 @@ static AGMethodIMPBackup gClientHookTable[] = {
     {"NEHotspotNetwork", "fetchCurrentWithCompletionHandler:", YES, YES, NULL, NULL, NULL},
     {"NEHotspotNetwork", "SSID", NO, YES, NULL, NULL, NULL},
     {"NEHotspotNetwork", "BSSID", NO, YES, NULL, NULL, NULL},
-    {"NEHotspotNetwork", "signalStrength", NO, YES, NULL, NULL, NULL},
-    {"NEHotspotNetwork", "isSecure", NO, YES, NULL, NULL, NULL},
-    {"NEHotspotNetwork", "didAutoJoin", NO, YES, NULL, NULL, NULL},
-    {"NEHotspotNetwork", "didJustJoin", NO, YES, NULL, NULL, NULL},
-    {"NEHotspotNetwork", "isChosenHelper", NO, YES, NULL, NULL, NULL},
-    {"NEHotspotNetwork", "securityType", NO, YES, NULL, NULL, NULL},
-    {"NEHotspotNetwork", "description", NO, YES, NULL, NULL, NULL},
 
-    {"CLLocation", "initWithCoder:", NO, NO, NULL, NULL, NULL},
     {"CLLocation", "initWithLatitude:longitude:", NO, NO, NULL, NULL, NULL},
     {"CLLocation", "initWithCoordinate:altitude:horizontalAccuracy:verticalAccuracy:timestamp:", NO, NO, NULL, NULL, NULL},
     {"CLLocation", "initWithCoordinate:altitude:horizontalAccuracy:verticalAccuracy:course:speed:timestamp:", NO, NO, NULL, NULL, NULL},
     {"CLLocation", "initWithCoordinate:altitude:horizontalAccuracy:verticalAccuracy:course:courseAccuracy:speed:speedAccuracy:timestamp:", NO, NO, NULL, NULL, NULL},
-    {"CLLocation", "initWithCoordinate:altitude:horizontalAccuracy:verticalAccuracy:course:courseAccuracy:speed:speedAccuracy:timestamp:sourceInfo:", NO, NO, NULL, NULL, NULL},
     {"CLLocation", "copyWithZone:", NO, NO, NULL, NULL, NULL},
     {"CLLocation", "coordinate", NO, NO, NULL, NULL, NULL},
     {"CLLocation", "altitude", NO, NO, NULL, NULL, NULL},
@@ -18641,6 +18515,12 @@ static void agSyncClientHooksWithCurrentState(void) {
             if (!cls) continue;
             SEL sel = sel_registerName(gClientHookTable[i].selName);
             Method m = gClientHookTable[i].isClassMethod ? class_getClassMethod(cls, sel) : class_getInstanceMethod(cls, sel);
+            if (!gClientHookTable[i].isClassMethod && class_getSuperclass(cls)) {
+                Method superM = class_getInstanceMethod(class_getSuperclass(cls), sel);
+                if (m && m == superM) {
+                    m = NULL; // 防护锁：绝不触碰继承自父类 NSObject 的方法，防止 ElleKit 污染全局基类
+                }
+            }
             if (m) {
                 gClientHookTable[i].methodObj = m;
                 gClientHookTable[i].origIMP = method_getImplementation(m);
