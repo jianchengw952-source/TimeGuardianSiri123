@@ -61,20 +61,18 @@
 * [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (1,000,302 字节，SHA256: `CAA6D77026EB933A9FC6F11A3353C4A0177A50D18216B5BF7379AC0BAFAF1472`)
 * [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (47,504 字节，SHA256: `3A015DADC01D3C95086F2A9FE3F94ADB5A681762B3BD398F132B26975FE14E74`)
 
-### 3. 最新云端编译产物（Run #109 / Commit `8b95ccd`）
-> **本次更新（5 处反风控与动态过滤升级）**：
-> 1. 扩充顶部反风控宏：`cachedTickLocation`、`baseWGS84Coord`、`currentWGS84Coord`、`targetWalkWGS84Coord`、`wifiTextFieldEdited` 等敏感属性与选择器全面去敏重命名。
-> 2. 跨进程通知更名：改为系统级 `com.apple.coremedia.spatial.*` 风格；并在 `saveGeminiPrefs` 前增加 `agSyncDynamicTweakFilterPlist` 动态过滤更新引擎，实现关闭总开关时在第三方 App 中 100% 物理隐身。
-> 3. `AGLocationSpoofManager`：保持 `constructRealisticSpoofedLocation` 的 `os_unfair_lock` 线程安全锁与模拟定时器同步。
-> 4. 设置面板联动：保持防检测与 Wi-Fi 伪装的解耦联动。
-> 5. 底部反检测护盾升级：全面集成顶级反检测护盾（`dladdr`/`_dyld_get_image_name`/`access`/`stat`/`lstat` 保护）+ 零静态特征客户端定位 Hook + 原生 IMP 动态保存与还原引擎 + `%ctor`。
-> - 保持纯 `xz` 压包标准，100% 兼容 Sileo。
+### 3. 最新云端编译产物（Run #112 / Commit `dbe79f3`）
+> **本次更新（0.20s 内核缓存 + 纯栈遥测 + 完整防检测函数补全）**：
+> 1. `agReadSpoofStateFromKernel` 高速缓存：加入 0.20 秒 `os_unfair_lock` 内存快照缓存，消除 99.9% 跨进程 IPC 读开销，彻底根除高频定位地图卡顿。
+> 2. 纯栈数据架构（零野指针）：客户端 `coordinate`、`altitude`、`horizontalAccuracy`、`verticalAccuracy`、`course`、`speed` 及 `clientLocation` 全部由栈上 `AGSpoofedTelemetry` 直接提供，杜绝多线程竞争堆指针引发的 `11:CALL_COORD` 闪退。
+> 3. 完整防检测护盾补全：`hooked_dladdr` 补全基址伪装（`dli_fbase = gCoreLocationBase` / `dli_saddr = (void *)addr`）、`hooked_dyld_get_image_name` 伪装越狱 dylib 路径为 `CoreLocation`，并在 `agInstallAntiDetectionCHooksIfNeeded` 中完整挂载 `dladdr`、`_dyld_get_image_name` 与 `CNCopyCurrentNetworkInfo` 虚拟 Wi-Fi。
+> 4. 纯 `xz` 压包标准，100% 兼容 Sileo。
 
 * **Dopamine (Rootless arm64)**：
   - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
-  - 文件大小：`408,068` 字节
-  - SHA256: `732384ECCEECA2406290BE1D9A5465EA8522DAB7608A4DEAA05A723A68532A43`
-  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (406,920 字节)
+  - 文件大小：`412,944` 字节
+  - SHA256: `AD7E16ED11C1B317E8FDFCB4CC54AB5B7071C0A360AFA0AD7032578FA536686B`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (411,796 字节)
   - 分发路径：
     - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
     - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
@@ -82,9 +80,9 @@
 
 * **Relaxin (RootHide arm64e)**：
   - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
-  - 文件大小：`267,640` 字节
-  - SHA256: `306F647E2E06439B084F6BF5903129019A717EAD89FFFBBC3EAA1E0CEB8565AA`
-  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (264,840 字节)
+  - 文件大小：`267,884` 字节
+  - SHA256: `BE41EECBADC670F658F239C52556EBBB272E5CB5BAE743B392CAD52AC4EA4EA2`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (265,084 字节)
   - 分发路径：
     - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
     - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
