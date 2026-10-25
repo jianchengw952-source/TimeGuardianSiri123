@@ -7,6 +7,7 @@
 // ==============================================================================
 
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <dlfcn.h>
 #import <spawn.h>
 #import <signal.h>
@@ -576,12 +577,15 @@ static void reloadGeminiPrefsCache(void) {
     NSInteger kScope = 0, kWiFi = 0;
     double kLat = 0.0, kLon = 0.0;
     if (agReadSpoofStateFromKernel(&kActive, &kScope, &kShield, &kWiFi, &kLat, &kLon, NULL, NULL, NULL)) {
-        merged[@"AG_LocSpoof_Active"] = @(kActive);
-        merged[@"AG_LocSpoof_ScopeMode"] = @(kScope);
-        merged[@"AG_AntiDet_ShieldEnabled"] = @(kShield);
-        merged[@"AG_AntiDet_HideSimFlag"] = @(kShield);
-        merged[@"AG_AntiDet_WiFiMode"] = @(kWiFi);
-        if (fabs(kLat) > 0.001 || fabs(kLon) > 0.001) {
+        if (merged[@"AG_LocSpoof_Active"] == nil) merged[@"AG_LocSpoof_Active"] = @(kActive);
+        if (merged[@"AG_LocSpoof_ScopeMode"] == nil) merged[@"AG_LocSpoof_ScopeMode"] = @(kScope);
+        if (merged[@"AG_AntiDet_ShieldEnabled"] == nil) {
+            merged[@"AG_AntiDet_ShieldEnabled"] = @(kShield);
+            merged[@"AG_AntiDet_HideSimFlag"] = @(kShield);
+        }
+        if (merged[@"AG_AntiDet_WiFiMode"] == nil) merged[@"AG_AntiDet_WiFiMode"] = @(kWiFi);
+        if ((fabs([merged[@"AG_LocSpoof_Lat"] doubleValue]) < 0.001 && fabs([merged[@"AG_LocSpoof_Lon"] doubleValue]) < 0.001) &&
+            (fabs(kLat) > 0.001 || fabs(kLon) > 0.001)) {
             merged[@"AG_LocSpoof_Lat"] = @(kLat);
             merged[@"AG_LocSpoof_Lon"] = @(kLon);
         }
@@ -1832,35 +1836,18 @@ static BOOL agGetCurrentSpoofedTelemetry(AGSpoofedTelemetry *outTel) {
 
     NSTimeInterval now = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_lock(&sTelemetryCacheLock);
-    if (sLastTelemetry.valid && fabs(now - sLastTelemetryTime) < 0.90 &&
-        fabs(sLastTelemetry.lat - lat) < 0.0005 && fabs(sLastTelemetry.lon - lon) < 0.0005) {
-        *outTel = sLastTelemetry;
-        os_unfair_lock_unlock(&sTelemetryCacheLock);
-        return YES;
-    }
-
-    double alt = 18.5, hAcc = 5.0, vAcc = 3.5;
-    double localLat = lat, localLon = lon;
-    agStepKalmanSmoothDrift((kShield && kSpeed < 0.1), &localLat, &localLon, &alt, &hAcc, &vAcc);
-    if (!kShield) {
-        localLat = lat;
-        localLon = lon;
-    }
+    // SpringBoard 主控端已经以 1Hz 频率计算好平滑微漂移并写入内核，客户端直接使用内核坐标，严禁二次叠加漂移导致偏位！
+    double baseAlt = agEstimatedBaseAltitudeForCoord(lat, lon);
+    double hAcc = kShield ? (4.2 + ((double)arc4random_uniform(12)) * 0.1) : 4.5;
+    double vAcc = kShield ? (3.2 + ((double)arc4random_uniform(10)) * 0.1) : 3.5;
 
     double validCourse = kCourse;
     double validSpeed  = (kSpeed >= 0.0) ? kSpeed : 0.0;
-    if (kShield && validSpeed < 0.1 && validCourse < 0.0) {
-        if (fabs(sOUDriftLatM) > 0.08 || fabs(sOUDriftLonM) > 0.08) {
-            double rad = atan2(sOUDriftLonM, sOUDriftLatM);
-            validCourse = fmod((rad * 180.0 / M_PI) + 360.0, 360.0);
-            validSpeed = 0.02 + ((double)arc4random_uniform(5)) * 0.01;
-        }
-    }
 
     sLastTelemetry.valid  = YES;
-    sLastTelemetry.lat    = localLat;
-    sLastTelemetry.lon    = localLon;
-    sLastTelemetry.alt    = alt;
+    sLastTelemetry.lat    = lat;
+    sLastTelemetry.lon    = lon;
+    sLastTelemetry.alt    = baseAlt;
     sLastTelemetry.hAcc   = hAcc;
     sLastTelemetry.vAcc   = vAcc;
     sLastTelemetry.course = validCourse;
@@ -2976,7 +2963,8 @@ static void agSettingsPanelTickDarwinCallback(CFNotificationCenterRef center, vo
     } completion:nil];
 
     [self.reverseGeocoder cancelGeocode];
-    CLLocation *loc = [[CLLocation alloc] initWithLatitude:center.latitude longitude:center.longitude];
+    CLLocationCoordinate2D wgsCenter = agGCJ02ToWGS84Exact(center.latitude, center.longitude);
+    CLLocation *loc = [[CLLocation alloc] initWithLatitude:wgsCenter.latitude longitude:wgsCenter.longitude];
     [self.reverseGeocoder reverseGeocodeLocation:loc completionHandler:^(NSArray<CLPlacemark *> * _Nullable placemarks, NSError * _Nullable error) {
         CLPlacemark *pm = placemarks.firstObject;
         if (pm) {
@@ -17560,7 +17548,7 @@ static CLLocation *agBuildAppMatchedSpoofLocation(void) {
     return [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
 }
 
-// ==================== 3. 客户端定位与防检测 Hook 组（零递归、全链路防穿帮） ====================
+// ==================== 3. 客户端定位与防检测 Hook 组（零递归、防二次纠偏、全代理穿透） ====================
 %group StealthLocationClientHooks
 
 %hook CLLocationSourceInformation
@@ -17579,9 +17567,68 @@ static CLLocation *agBuildAppMatchedSpoofLocation(void) {
 
 %hook CLLocation
 
-// 仅对 App 手动创建的纯静态双参数坐标（如考勤打卡圆心、外卖商家坐标）打保护标记
+// 保护所有由 App 或高德/腾讯/MapKit 纠偏器通过公开方法手动创建的 CLLocation（如已纠偏完的 GCJ-02 坐标、考勤中心点），严禁把已纠偏的 GCJ-02 再覆盖回 WGS-84！
 - (instancetype)initWithLatitude:(CLLocationDegrees)latitude longitude:(CLLocationDegrees)longitude {
     CLLocation *loc = %orig(latitude, longitude);
+    if (loc && !sIsCreatingInternalSpoofLocation) {
+        agMarkAppCustomLocationPtr(loc);
+    }
+    return loc;
+}
+
+- (instancetype)initWithCoordinate:(CLLocationCoordinate2D)coordinate
+                          altitude:(CLLocationDistance)altitude
+                horizontalAccuracy:(CLLocationAccuracy)hAccuracy
+                  verticalAccuracy:(CLLocationAccuracy)vAccuracy
+                         timestamp:(NSDate *)timestamp {
+    CLLocation *loc = %orig(coordinate, altitude, hAccuracy, vAccuracy, timestamp);
+    if (loc && !sIsCreatingInternalSpoofLocation) {
+        agMarkAppCustomLocationPtr(loc);
+    }
+    return loc;
+}
+
+- (instancetype)initWithCoordinate:(CLLocationCoordinate2D)coordinate
+                          altitude:(CLLocationDistance)altitude
+                horizontalAccuracy:(CLLocationAccuracy)hAccuracy
+                  verticalAccuracy:(CLLocationAccuracy)vAccuracy
+                            course:(CLLocationDirection)course
+                             speed:(CLLocationSpeed)speed
+                         timestamp:(NSDate *)timestamp {
+    CLLocation *loc = %orig(coordinate, altitude, hAccuracy, vAccuracy, course, speed, timestamp);
+    if (loc && !sIsCreatingInternalSpoofLocation) {
+        agMarkAppCustomLocationPtr(loc);
+    }
+    return loc;
+}
+
+- (instancetype)initWithCoordinate:(CLLocationCoordinate2D)coordinate
+                          altitude:(CLLocationDistance)altitude
+                horizontalAccuracy:(CLLocationAccuracy)hAccuracy
+                  verticalAccuracy:(CLLocationAccuracy)vAccuracy
+                            course:(CLLocationDirection)course
+                    courseAccuracy:(CLLocationDirectionAccuracy)courseAccuracy
+                             speed:(CLLocationSpeed)speed
+                     speedAccuracy:(CLLocationSpeedAccuracy)speedAccuracy
+                         timestamp:(NSDate *)timestamp {
+    CLLocation *loc = %orig(coordinate, altitude, hAccuracy, vAccuracy, course, courseAccuracy, speed, speedAccuracy, timestamp);
+    if (loc && !sIsCreatingInternalSpoofLocation) {
+        agMarkAppCustomLocationPtr(loc);
+    }
+    return loc;
+}
+
+- (instancetype)initWithCoordinate:(CLLocationCoordinate2D)coordinate
+                          altitude:(CLLocationDistance)altitude
+                horizontalAccuracy:(CLLocationAccuracy)hAccuracy
+                  verticalAccuracy:(CLLocationAccuracy)vAccuracy
+                            course:(CLLocationDirection)course
+                    courseAccuracy:(CLLocationDirectionAccuracy)courseAccuracy
+                             speed:(CLLocationSpeed)speed
+                     speedAccuracy:(CLLocationSpeedAccuracy)speedAccuracy
+                         timestamp:(NSDate *)timestamp
+                        sourceInfo:(CLLocationSourceInformation *)sourceInfo {
+    CLLocation *loc = %orig(coordinate, altitude, hAccuracy, vAccuracy, course, courseAccuracy, speed, speedAccuracy, timestamp, sourceInfo);
     if (loc && !sIsCreatingInternalSpoofLocation) {
         agMarkAppCustomLocationPtr(loc);
     }
@@ -17601,7 +17648,6 @@ static CLLocation *agBuildAppMatchedSpoofLocation(void) {
 }
 
 - (CLLocationCoordinate2D)coordinate {
-    // 1. 若是 App 自建静态坐标（如打卡点中心）或本插件已生成的干净虚拟坐标，直接返回 %orig，彻底杜绝无限递归！
     if (agIsAppCustomLocationPtr(self) || agIsCleanLocationPtr(self)) {
         return %orig;
     }
@@ -17611,6 +17657,29 @@ static CLLocation *agBuildAppMatchedSpoofLocation(void) {
         if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) {
             return agConvertWGS84ForCurrentApp(tel.lat, tel.lon);
         }
+    }
+    return %orig;
+}
+
+// 拦截高德/钉钉/腾讯定位 SDK 常读的底层 rawCoordinate 属性（防止读到 (0,0) 或真实硬件 GPS）
+- (CLLocationCoordinate2D)rawCoordinate {
+    if (agIsAppCustomLocationPtr(self)) {
+        return %orig;
+    }
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        AGSpoofedTelemetry tel;
+        if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) {
+            return CLLocationCoordinate2DMake(tel.lat, tel.lon);
+        }
+    }
+    return %orig;
+}
+
+- (CLLocationDirection)rawCourse {
+    if (agIsAppCustomLocationPtr(self)) return %orig;
+    if (agIsCurrentProcessTargetedForLocSpoof()) {
+        AGSpoofedTelemetry tel;
+        if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) return tel.course;
     }
     return %orig;
 }
@@ -17690,7 +17759,7 @@ static CLLocation *agBuildAppMatchedSpoofLocation(void) {
     return orig;
 }
 
-// 拦截底层 C++ 距离计算（防止钉钉/美团直接读取原生 _internal 真实坐标计算考勤距离）
+// 拦截底层 C++ 距离计算
 - (CLLocationDistance)distanceFromLocation:(const CLLocation *)location {
     if (location && agIsCurrentProcessTargetedForLocSpoof()) {
         CLLocation *spoofLoc = agBuildAppMatchedSpoofLocation();
@@ -17725,13 +17794,20 @@ static CLLocation *agBuildAppMatchedSpoofLocation(void) {
 
 %end
 
-// 拦截内嵌原生 MKMapView 的用户定位蓝点（微信共享实时位置、部分打卡地图）
+// 拦截内嵌原生 MKMapView 的用户定位蓝点（在境内 MKUserLocation.location 与 coordinate 均使用 GCJ-02 火星坐标，彻底消除 500 米偏差）
 %hook MKUserLocation
 
 - (CLLocation *)location {
     if (agIsCurrentProcessTargetedForLocSpoof()) {
-        CLLocation *spoof = agBuildAppMatchedSpoofLocation();
-        if (spoof) return spoof;
+        AGSpoofedTelemetry tel;
+        if (agGetCurrentSpoofedTelemetry(&tel) && tel.valid) {
+            CLLocationCoordinate2D gcj = agWGS84ToGCJ02(tel.lat, tel.lon);
+            CLLocation *gcjLoc = agCreateHardwareGradeLocation(gcj, tel.alt, tel.hAcc, tel.vAcc, tel.course, tel.speed);
+            if (gcjLoc) {
+                agMarkAppCustomLocationPtr(gcjLoc);
+                return gcjLoc;
+            }
+        }
     }
     return %orig;
 }
@@ -17769,7 +17845,6 @@ static NSArray<CLLocationManager *> *agAllActiveLocationManagers(void) {
     return all;
 }
 
-// 立即向当前 App 内所有活跃的 CLLocationManager 推送最新虚拟坐标
 static void agBroadcastSpoofLocationToActiveManagers(void) {
     if (!agIsCurrentProcessTargetedForLocSpoof()) return;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -17794,13 +17869,13 @@ static void agBroadcastSpoofLocationToActiveManagers(void) {
     });
 }
 
-// 按 Method 指针精确去重 Hook，防止父子类共用同一个 Method 时重复包装，并 100% 替换真实 GPS 数组
+// 支持常规类 + NSProxy 消息转发代理（forwardInvocation:）全覆盖拦截
 static void agSwizzleLocationDelegateClassIfNeeded(Class delCls) {
     if (!delCls) return;
 
     SEL selNew = @selector(locationManager:didUpdateLocations:);
     Method mNew = class_getInstanceMethod(delCls, selNew);
-    if (mNew) {
+    if (mNew && method_getImplementation(mNew) != _objc_msgForward) {
         NSValue *mKey = [NSValue valueWithPointer:mNew];
         os_unfair_lock_lock(&sLocMgrPoolLock);
         if (!sSwizzledMethodsSet) sSwizzledMethodsSet = [NSMutableSet set];
@@ -17824,11 +17899,50 @@ static void agSwizzleLocationDelegateClassIfNeeded(Class delCls) {
             });
             method_setImplementation(mNew, newIMP);
         }
+    } else {
+        // 针对使用 NSProxy 或动态消息转发（forwardInvocation:）的定位代理（如钉钉、微信、高德、Flutter/RxSwift）
+        SEL selFwd = @selector(forwardInvocation:);
+        Method mFwd = class_getInstanceMethod(delCls, selFwd);
+        if (mFwd) {
+            NSValue *fKey = [NSValue valueWithPointer:mFwd];
+            os_unfair_lock_lock(&sLocMgrPoolLock);
+            if (!sSwizzledMethodsSet) sSwizzledMethodsSet = [NSMutableSet set];
+            BOOL alreadySwizzledFwd = [sSwizzledMethodsSet containsObject:fKey];
+            if (!alreadySwizzledFwd) [sSwizzledMethodsSet addObject:fKey];
+            os_unfair_lock_unlock(&sLocMgrPoolLock);
+
+            if (!alreadySwizzledFwd) {
+                typedef void (*ForwardInvIMP)(id, SEL, NSInvocation *);
+                __block ForwardInvIMP origFwdIMP = (ForwardInvIMP)method_getImplementation(mFwd);
+                IMP newFwdIMP = imp_implementationWithBlock(^(id selfObj, NSInvocation *invocation) {
+                    if (invocation && agIsCurrentProcessTargetedForLocSpoof()) {
+                        SEL invSel = invocation.selector;
+                        if (invSel == @selector(locationManager:didUpdateLocations:)) {
+                            CLLocation *spoofLoc = agBuildAppMatchedSpoofLocation();
+                            if (spoofLoc) {
+                                NSArray<CLLocation *> *spoofArr = @[spoofLoc];
+                                [invocation setArgument:&spoofArr atIndex:3];
+                                [invocation retainArguments];
+                            }
+                        } else if (invSel == @selector(locationManager:didUpdateToLocation:fromLocation:)) {
+                            CLLocation *spoofLoc = agBuildAppMatchedSpoofLocation();
+                            if (spoofLoc) {
+                                [invocation setArgument:&spoofLoc atIndex:3];
+                                [invocation setArgument:&spoofLoc atIndex:4];
+                                [invocation retainArguments];
+                            }
+                        }
+                    }
+                    if (origFwdIMP) origFwdIMP(selfObj, selFwd, invocation);
+                });
+                method_setImplementation(mFwd, newFwdIMP);
+            }
+        }
     }
 
     SEL selOld = @selector(locationManager:didUpdateToLocation:fromLocation:);
     Method mOld = class_getInstanceMethod(delCls, selOld);
-    if (mOld) {
+    if (mOld && method_getImplementation(mOld) != _objc_msgForward) {
         NSValue *mOldKey = [NSValue valueWithPointer:mOld];
         os_unfair_lock_lock(&sLocMgrPoolLock);
         if (!sSwizzledMethodsSet) sSwizzledMethodsSet = [NSMutableSet set];
