@@ -17831,11 +17831,32 @@ static int hooked_dladdr(const void *addr, Dl_info *info) {
             strstr(info->dli_fname, "TweakInject") != NULL ||
             strstr(info->dli_fname, "ellekit") != NULL) {
             info->dli_fname = gCoreLocationPath;
+            if (gSelfDylibBase != NULL && info->dli_fbase == gSelfDylibBase && gCoreLocationBase != NULL) {
+                info->dli_fbase = gCoreLocationBase;
+            }
             uintptr_t addrHash = ((uintptr_t)addr >> 4) & 0x7;
             info->dli_sname = kAGNativeCLSymbolPool[addrHash];
+            info->dli_saddr = (void *)addr;
         }
     }
     return ret;
+}
+
+static const char *(*orig_dyld_get_image_name)(uint32_t image_index) = NULL;
+static const char *hooked_dyld_get_image_name(uint32_t image_index) {
+    const char *name = orig_dyld_get_image_name ? orig_dyld_get_image_name(image_index) : NULL;
+    if (name && agIsAntiDetectionShieldActive()) {
+        if (strstr(name, "/var/jb/") != NULL ||
+            strstr(name, ".jbroot") != NULL ||
+            strstr(name, "MobileSubstrate") != NULL ||
+            strstr(name, "TweakInject") != NULL ||
+            strstr(name, "substitute") != NULL ||
+            strstr(name, "ellekit") != NULL ||
+            strstr(name, "Substrate") != NULL) {
+            return gCoreLocationPath;
+        }
+    }
+    return name;
 }
 
 static BOOL agIsSuspiciousJailbreakPath(const char *path) {
@@ -17947,6 +17968,18 @@ static NSDictionary *agBuildConsistentVirtualWiFiDict(void) {
     freshDict[@"BSSID"] = [bssid copy];
     freshDict[@"SSIDDATA"] = [ssidData copy];
     return freshDict;
+}
+
+static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName) = NULL;
+static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
+    if (!interfaceName || CFStringGetLength(interfaceName) == 0) return NULL;
+    if (agIsAntiDetectionShieldActive()) {
+        NSDictionary *fakeWiFi = agBuildConsistentVirtualWiFiDict();
+        if (fakeWiFi) {
+            return (__bridge_retained CFDictionaryRef)fakeWiFi;
+        }
+    }
+    return orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
 }
 
 // ==================== 3. 零内存分配、零野指针的客户端定位与传感器引擎 ====================
@@ -18540,8 +18573,17 @@ static os_unfair_lock gHookSyncLock = OS_UNFAIR_LOCK_INIT;
 static void agInstallAntiDetectionCHooksIfNeeded(void) {
     if (gHasInstalledCHooks) return;
     gHasInstalledCHooks = YES;
-    // 仅挂载 dladdr 路径伪装（不改 dli_fbase，不挂 12字节短桩 _dyld_get_image_name），既过钉钉防检测又绝不触发 signal=5 崩溃
+
     MSHookFunction((void *)dladdr, (void *)hooked_dladdr, (void **)&orig_dladdr);
+    MSHookFunction((void *)_dyld_get_image_name, (void *)hooked_dyld_get_image_name, (void **)&orig_dyld_get_image_name);
+
+    void *snHandle = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY);
+    if (snHandle) {
+        void *cnSym = dlsym(snHandle, "CNCopyCurrentNetworkInfo");
+        if (cnSym) {
+            MSHookFunction(cnSym, (void *)hooked_CNCopyCurrentNetworkInfo, (void **)&orig_CNCopyCurrentNetworkInfo);
+        }
+    }
 }
 
 static void agSyncClientHooksWithCurrentState(void) {

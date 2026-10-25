@@ -49,17 +49,17 @@
 ## 三、当前会话中涉及的关键文件和路径
 
 ### 1. 核心工程源码文件
-* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,847 行，998,474 字节)
-  - SHA256: `C8D1F53B4D858F30C3C818B11338A032E45703499328317E639117B42B93BAF3`
+* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,889 行，1,000,302 字节)
+  - SHA256: `CAA6D77026EB933A9FC6F11A3353C4A0177A50D18216B5BF7379AC0BAFAF1472`
 * **[layout/DEBIAN/postinst](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/layout/DEBIAN/postinst)** (362 字节)
 * **[.github/workflows/build.yml](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/.github/workflows/build.yml)** (1,757 字节)
 
 ### 2. 四路同步镜像文件（100% 字节一致）
-* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (998,474 字节，SHA256: `C8D1F53B4D858F30C3C818B11338A032E45703499328317E639117B42B93BAF3`)
-* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (998,474 字节，SHA256: `C8D1F53B4D858F30C3C818B11338A032E45703499328317E639117B42B93BAF3`)
-* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (998,474 字节，SHA256: `C8D1F53B4D858F30C3C818B11338A032E45703499328317E639117B42B93BAF3`)
-* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (998,474 字节，SHA256: `C8D1F53B4D858F30C3C818B11338A032E45703499328317E639117B42B93BAF3`)
-* [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (45,676 字节，SHA256: `BC45710B3D5A217C1881987F184062D163F1E34FBA84399C21966E8B464211EC`)
+* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (1,000,302 字节，SHA256: `CAA6D77026EB933A9FC6F11A3353C4A0177A50D18216B5BF7379AC0BAFAF1472`)
+* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (1,000,302 字节，SHA256: `CAA6D77026EB933A9FC6F11A3353C4A0177A50D18216B5BF7379AC0BAFAF1472`)
+* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (1,000,302 字节，SHA256: `CAA6D77026EB933A9FC6F11A3353C4A0177A50D18216B5BF7379AC0BAFAF1472`)
+* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (1,000,302 字节，SHA256: `CAA6D77026EB933A9FC6F11A3353C4A0177A50D18216B5BF7379AC0BAFAF1472`)
+* [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (47,504 字节，SHA256: `3A015DADC01D3C95086F2A9FE3F94ADB5A681762B3BD398F132B26975FE14E74`)
 
 ### 3. 最新云端编译产物（Run #109 / Commit `8b95ccd`）
 > **本次更新（5 处反风控与动态过滤升级）**：
