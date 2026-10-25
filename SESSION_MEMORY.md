@@ -1,6 +1,6 @@
 # TimeGuardianSiri123 项目会话记忆文件 (SESSION_MEMORY.md)
 
-> **生成时间**：2026-10-25 22:52:00 (本地时间)  
+> **生成时间**：2026-10-25 23:18:00 (本地时间)  
 > **会话标识**：`02de72ea-60df-4738-8977-4a4ebaf78b2f`  
 > **用途说明**：供用户切换 Google Antigravity 账号或开启新会话后，直接读取本文件无缝继承当前项目的完整开发上下文。
 
@@ -17,22 +17,19 @@
      3. **天使守护 Siri 悬浮工作台**：全局浮动交互 UI、多主题液态镜面玻璃渲染、双麦克风语音监听与 Edge TTS 语音合成。
      4. **独立相机辅助工具**：`AngelCameraHelper` 独立守护进程与虚拟视频流注入。
 
-2. **最新应用的 5 大核心底层稳定性与逻辑修复**：
-   - **【修改点 1】修复跨进程配置缓存覆盖 Bug**：
-     - 在 `reloadGeminiPrefsCache(void)` 中，调整 `globalShared` 遍历逻辑，仅对未定义键进行兜底赋值，且将 `newestDict`（最新磁盘文件）作为最终最高优先级覆盖，杜绝白名单与坐标被旧缓存冲刷掉。
-   - **【修改点 2】消除 `_internal` 裸结构体内存强写风险与关联对象安全标记**：
-     - 废除无锁/有锁集合维护指针地址，改为基于 `objc_setAssociatedObject` 的零递归、生命周期自动清理的打标机制（`kAGAppCreatedCustomLocationKey` 与 `kAGHardwareCleanLocationKey`）。
-     - 禁用 arm64/arm64e 内存对齐敏感的裸结构体强写（`agSanitizeCLLocationInternalStruct` 变更为无害占位，所有防检测指标改由安全 Hook 提供）。
-   - **【修改点 3】纯 C 零递归定位状态源 `AGSpoofedTelemetry` 与考勤隐蔽预设兜底**：
-     - 引入 `AGSpoofedTelemetry` 纳秒级轻量结构体与 0.90s 状态缓存（`sTelemetryCacheLock`），解除 `constructRealisticSpoofedLocation` 重复调用引发的递归与计算开销。
-     - `enableAttendanceStealthPreset` 增加白名单自动补全（若白名单模式未配置应用，自动填充钉钉、企微、飞书、微信、美团、高德、百度等）。
-   - **【修改点 4】重写 `%group StealthLocationClientHooks` 杜绝 CLLocation 递归与完善距离/地图拦截**：
-     - `CLLocation` 内部所有属性 Hook 检测 `agIsAppCustomLocationPtr` 与 `agIsCleanLocationPtr`，直接返回 `%orig`，杜绝调用栈无限循环爆栈。
-     - 新增底层 `-distanceFromLocation:` 与 `-getDistanceFrom:` 拦截，根除钉钉/美团直接读取私有结构体计算考勤打卡距离的穿帮破绽。
-     - 新增 `%hook MKUserLocation` 拦截系统地图原生定位蓝点。
-     - 使用 `Method` 指针集合 `sSwizzledMethodsSet` 精确去重，杜绝继承链多次包装代理回调。
-   - **【修改点 5】修复 `hooked_ag_dladdr` 死锁闪退**：
-     - 移除在 `dladdr` 内部调用 `dlsym` 的高危锁死逻辑；改为在 `agInstallDladdrStealthHookIfNeeded` 的 `dispatch_once` 中一次性预缓存 `sCachedCleanCLDlInfo`，Hook 内仅做原子级结构体值拷贝，零锁开销、零死锁风险。
+2. **最新应用的 4 大核心定位与防纠偏精度修复**：
+   - **【修改点 1】防止内核旧坐标覆盖 `.plist` 新坐标**：
+     - 在 `reloadGeminiPrefsCache(void)` 尾部内核读取时，仅当 merged 中对应键为 nil 时才做兜底赋值，且仅当本地配置经纬度为 0（未设置）且内核坐标非 0 时才赋值，彻底解决设置面板修改新坐标被内核旧缓存冲掉导致不生效的问题。
+   - **【修改点 2】消除客户端二次叠加漂移，确保米级精准**：
+     - 在 `agGetCurrentSpoofedTelemetry` 中，移除客户端独立的卡尔曼微漂移叠加（SpringBoard 主控端已以 1Hz 频率计算好平滑微漂移并写入内核），客户端直接读取并使用内核坐标，严禁二次叠加漂移导致偏位。
+   - **【修改点 3】校准设置面板高德地图选点准星的逆地理编码偏差**：
+     - 在 `AGLocationSelectViewController` 的 `mapView:regionDidChangeAnimated:` 中，MapKit 内部 `centerCoordinate` 为火星坐标（GCJ-02），在送入系统逆地理编码 `reverseGeocodeLocation:` 前先经由 `agGCJ02ToWGS84` 转回 WGS-84 真实地理坐标，彻底消除 500 米偏差。
+   - **【修改点 4】升级 `%group StealthLocationClientHooks` 根除二次纠偏与增强代理拦截**：
+     - 拦截多参数 `initWithCoordinate:...`（5/7/9/10 参数），对第三方地图 SDK（高德、腾讯、MapKit）生成的坐标打标为 `kAGAppCreatedCustomLocationKey`，`-coordinate` 遇到打标对象直接返回 `%orig`，根除 300~600m 二次纠偏偏差。
+     - 新增底层 `-rawCoordinate` 与 `-rawCourse` 拦截，杜绝私有属性穿帮。
+     - 拦截 `MKUserLocation.location` 与 `MKUserLocation.coordinate`，国内返回 GCJ-02 火星坐标，系统地图蓝点完美对齐。
+     - 代理 Swizzle 支持标准类与 `NSProxy` 动态消息转发（`forwardInvocation:`），完美拦截钉钉、企微、RxSwift、Flutter 代理转发。
+     - 引入 `#import <objc/message.h>` 安全引用 `_objc_msgForward`。
 
 ---
 
@@ -43,16 +40,16 @@
 | **本地工作目录** | `C:\Users\57132\.gemini\antigravity\scratch\TimeGuardianSiri123` | 当前活跃的 Git 仓库根目录，包含完整源码与构建配置 |
 | **D盘归档目录** | `D:\天使siri测试版` | 完整备份目录，包含 `.git` 库、源码及最新双版本 `.deb` |
 | **远端 Git 仓库** | `https://github.com/jianchengw952-source/TimeGuardianSiri123.git` | GitHub 远程仓库（分支：`main`） |
-| **当前 Git Commit** | `4fc1f78` | `fix(loc): fix prefs cache overwrite, zero-recursion telemetry, associated object custom loc marking, and dladdr deadlock` |
-| **GitHub Actions 运行记录** | Run #77 (ID: `40204094811`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
+| **当前 Git Commit** | `1b48cb4` | `fix(loc): prevent kernel coords from overwriting plist, eliminate client secondary drift, calibrate mapView geocode, and support NSProxy forwardInvocation` |
+| **GitHub Actions 运行记录** | Run #79 (ID: `40206049255`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
 
 ---
 
 ## 三、当前会话中涉及的关键文件和路径
 
 ### 1. 核心工程源码文件
-* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,335 行，971,061 字节)
-  - SHA256: `90D138B47442E953E4DBDBEA72F0B6116DDA17EBA39A2DC355CEE41B5C0EF9E0`
+* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (18,449 行，975,364 字节)
+  - SHA256: `78D828EC4144A1C091BCA981EB89CE695346AC8EBB7F5EDDADA6F96938F786CA`
 * **[layout/DEBIAN/postinst](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/layout/DEBIAN/postinst)** (362 字节)
 * **[.github/workflows/build.yml](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/.github/workflows/build.yml)** (1,757 字节)
 * **[AngelCameraHelper.m](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/AngelCameraHelper.m)** (17,191 字节)
@@ -60,24 +57,26 @@
 
 ### 2. 外部镜像与归档文件（四向字节级完全对齐）
 * **[主修实时翻译.txt](file:///D:/主修实时翻译.txt)**
-  - SHA256: `90D138B47442E953E4DBDBEA72F0B6116DDA17EBA39A2DC355CEE41B5C0EF9E0`
+  - SHA256: `78D828EC4144A1C091BCA981EB89CE695346AC8EBB7F5EDDADA6F96938F786CA`
 * **[主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt)**
-  - SHA256: `90D138B47442E953E4DBDBEA72F0B6116DDA17EBA39A2DC355CEE41B5C0EF9E0`
+  - SHA256: `78D828EC4144A1C091BCA981EB89CE695346AC8EBB7F5EDDADA6F96938F786CA`
 * **[D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x)**
-  - SHA256: `90D138B47442E953E4DBDBEA72F0B6116DDA17EBA39A2DC355CEE41B5C0EF9E0`
-* **[D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt)** (790 行，30,322 字节)
+  - SHA256: `78D828EC4144A1C091BCA981EB89CE695346AC8EBB7F5EDDADA6F96938F786CA`
+* **[D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt)** (923 行，36,603 字节)
 
-### 3. 最新编译产出的两套安装包（Run #77）
+### 3. 最新编译产出的两套安装包（Run #79）
 * **Dopamine 版 (Rootless / arm64)**：
   - 本地路径 1：[D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
   - 本地路径 2：[D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
-  - 文件大小：`407,912` 字节
-  - SHA256：`82AAEC960F4AE79C094F4FE24C616337F7372A0541BA8681CCEE1CC44520B71E`
+  - 本地路径 3：[C:\Users\57132\.gemini\antigravity\scratch\TimeGuardianSiri123\packages\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/packages/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - 文件大小：`407,658` 字节
+  - SHA256：`7BB141E492EDFB74405AF65EFE7550848070253554C9A2A05AEC90E90DCF433A`
 * **Relaxin 版 (RootHide / arm64e)**：
   - 本地路径 1：[D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
   - 本地路径 2：[D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
-  - 文件大小：`265,312` 字节
-  - SHA256：`37F2F287728E56125A656B91653A10C32595DBC5B2144AE683EA7D322CF241A4`
+  - 本地路径 3：[C:\Users\57132\.gemini\antigravity\scratch\TimeGuardianSiri123\packages\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/packages/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - 文件大小：`266,028` 字节
+  - SHA256：`DB240405770C7F8E794158F0FCBD02DED62D8FC5463454650DCE13890818E53C`
 
 ---
 
@@ -85,9 +84,9 @@
 
 | 状态 | 工作项 | 对应位置 / 备注 |
 | :---: | :--- | :--- |
-| **已完成** | 5 处底层稳定性与防穿帮核心代码替换 | `Tweak.x` 全部 5 处精确应用 |
-| **已完成** | 源码四向同步与校验和一致性核验 | `Tweak.x`（两处工程库 + 两处 D 盘备份）字节级完全一致 |
-| **已完成** | Git 提交与远程推送 | Commit `4fc1f78` 推送至 `origin/main` |
-| **已完成** | GitHub Actions 双矩阵云端构建 | Run #77 (ID: `40204094811`) 🟢 Rootless & Roothide 全部构建成功 |
-| **已完成** | 双格式安装包自动下载与归档 | 最新 Dopamine arm64 版与 Relaxin arm64e 版均已同步落盘至 D 盘根目录与 `D:\天使siri测试版` |
-| **待验证** | 越狱真机安装实测 | 用户在真机上验证钉钉/美团打卡测距、位置更新与稳定性 |
+| **已完成** | 4 处底层定位与防二次纠偏核心代码替换 | `Tweak.x` 全部 4 处精确应用 |
+| **已完成** | 源码四向同步与校验和一致性核验 | `Tweak.x`（两处工程库 + 两处 D 盘备份）SHA256 完全对齐 |
+| **已完成** | Git 提交与远程推送 | Commit `1b48cb4` 推送至 `origin/main` |
+| **已完成** | GitHub Actions 双矩阵云端构建 | Run #79 (ID: `40206049255`) 🟢 Rootless & Roothide 全部成功构建 |
+| **已完成** | 双格式安装包自动下载与多端归档 | Dopamine arm64 版与 Relaxin arm64e 版已同步落盘至 D 盘根目录、`D:\天使siri测试版` 及 packages |
+| **待验证** | 越狱真机安装实测 | 用户在真机上验证选点精准度、二次纠偏根除及 NSProxy 消息拦截稳定性 |
