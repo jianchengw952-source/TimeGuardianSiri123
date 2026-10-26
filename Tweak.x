@@ -16810,7 +16810,7 @@ static dispatch_queue_t agTransAudioProcessQueue(void) {
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
     os_unfair_lock_lock(&_lock);
-    AGStreamTranslateDelegate *del = self.taskMap[@(dataTask.taskIdentifier)];
+    AGStreamTranslateDelegate *del = self.taskMap[@(task.taskIdentifier)];
     [self.taskMap removeObjectForKey:@(task.taskIdentifier)];
     os_unfair_lock_unlock(&_lock);
     if (del) {
