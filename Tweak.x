@@ -4808,6 +4808,24 @@ static void agDrawRadialGradient(CGContextRef ctx, CGPoint startCenter, CGFloat 
 - (void)setNeedsDisplay {}
 @end
 
+@interface CALayer (AGHitTestPassthrough)
+- (void)setAllowsHitTesting:(BOOL)allows;
+- (void)setHitTestsAsOpaque:(BOOL)opaque;
+@end
+
+static void agDisableLayerHitTestingRecursively(CALayer *layer) {
+    if (!layer) return;
+    if ([layer respondsToSelector:@selector(setAllowsHitTesting:)]) {
+        [layer setAllowsHitTesting:NO];
+    }
+    if ([layer respondsToSelector:@selector(setHitTestsAsOpaque:)]) {
+        [layer setHitTestsAsOpaque:NO];
+    }
+    for (CALayer *sub in layer.sublayers) {
+        agDisableLayerHitTestingRecursively(sub);
+    }
+}
+
 // ==================== 3B. 四大殿堂级唤出形态配置读取与纯 GPU 渲染引擎 ====================
 // 返回值：1=①4D水晶胶囊(默认), 2=②灵动岛极光水滴, 3=③无界北极光天际线, 4=④3D全息丝绸, 0=传统直接弹主界面
 static NSInteger agMiniSummonStyle(void) {
@@ -5021,6 +5039,12 @@ static BOOL agMiniSummonIsTop(void) {
 
         UITapGestureRecognizer *expandTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleExpandTap:)];
         [self addGestureRecognizer:expandTap];
+
+        if ([self.layer respondsToSelector:@selector(setHitTestsAsOpaque:)]) {
+            [self.layer setHitTestsAsOpaque:NO];
+        }
+        agDisableLayerHitTestingRecursively(_s3HorizonContainer.layer);
+        agDisableLayerHitTestingRecursively(_s4SilkContainer.layer);
     }
     return self;
 }
@@ -8514,6 +8538,16 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     [self applyMarqueeThemeColors:agCurrentVisualTheme()];
     [self stepMarqueeAnimationWithPhase:0.0 voiceAmp:0.0];
 
+    // 关键修复：向 backboardd (CAWindowServer) 声明窗口底板、毛玻璃层与 1000x1000 跑马灯渐变层完全不参与跨进程触摸命中！
+    if ([self.overlayWindow.layer respondsToSelector:@selector(setHitTestsAsOpaque:)]) {
+        [self.overlayWindow.layer setHitTestsAsOpaque:NO];
+    }
+    if ([rootVC.view.layer respondsToSelector:@selector(setHitTestsAsOpaque:)]) {
+        [rootVC.view.layer setHitTestsAsOpaque:NO];
+    }
+    agDisableLayerHitTestingRecursively(self.screenDimBlurView.layer);
+    agDisableLayerHitTestingRecursively(self.edgeGlowContainer.layer);
+
     // 3. 主悬浮卡片容器 (带青蓝+紫粉底部外发光阴影)
     AGDeviceMetrics m = agComputeDeviceMetrics();
     CGFloat capsuleHeight = m.defaultCapsuleH;
@@ -8913,6 +8947,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         [self.overlayWindow makeKeyWindow];
     }];
 
+    self.screenDimBlurView.hidden = NO;
+    self.screenDimBlurView.alpha = 0.0;
     self.overlayWindow.capsuleWrapper.hidden = NO;
     self.overlayWindow.capsuleWrapper.alpha = 0.0;
     self.overlayWindow.capsuleWrapper.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(0.92, 0.92), CGAffineTransformMakeTranslation(0, 28));
@@ -14672,6 +14708,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
             self.overlayWindow.capsuleWrapper.hidden = YES;
             self.screenDimBlurView.alpha = 0.0;
+            self.screenDimBlurView.hidden = YES;
 
             [UIView animateWithDuration:0.38 delay:0 usingSpringWithDamping:0.78 initialSpringVelocity:0.9 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction animations:^{
                 self.overlayWindow.alpha = 1.0;
@@ -14685,6 +14722,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             [self.overlayWindow makeKeyWindow];
             self.overlayWindow.capsuleWrapper.hidden = NO;
             self.overlayWindow.capsuleWrapper.alpha = 1.0;
+            self.screenDimBlurView.hidden = NO;
             self.screenDimBlurView.alpha = 0.0;
             self.overlayWindow.capsuleWrapper.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(0.92, 0.92), CGAffineTransformMakeTranslation(0, 36));
             [UIView animateWithDuration:0.38 delay:0 usingSpringWithDamping:0.80 initialSpringVelocity:0.9 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction animations:^{
