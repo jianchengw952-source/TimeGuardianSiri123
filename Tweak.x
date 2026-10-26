@@ -483,6 +483,97 @@ static void agPublishSpoofStateToKernel(BOOL isActive, NSInteger scopeMode, NSIn
     }
 }
 
+// 将用户填写的伪装 Wi-Fi (SSID 与 BSSID) 加密写入 notifyd 内核寄存器，100% 穿透钉钉/企微/飞书沙盒限制
+static void agPublishCustomWiFiToKernel(NSString *ssid, NSString *bssid) {
+    static int sTokSSID[4] = {0};
+    static int sTokBSSID[3] = {0};
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        for (int i = 0; i < 4; i++) {
+            char buf[48];
+            snprintf(buf, sizeof(buf), "com.apple.coremedia.spatial.w%d", i);
+            notify_register_check(buf, &sTokSSID[i]);
+        }
+        for (int i = 0; i < 3; i++) {
+            char buf[48];
+            snprintf(buf, sizeof(buf), "com.apple.coremedia.spatial.b%d", i);
+            notify_register_check(buf, &sTokBSSID[i]);
+        }
+    });
+
+    uint8_t ssidBytes[32];
+    memset(ssidBytes, 0, sizeof(ssidBytes));
+    NSString *cleanSSID = [ssid stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (cleanSSID.length > 0) {
+        const char *cStr = [cleanSSID UTF8String];
+        if (cStr) strncpy((char *)ssidBytes, cStr, 31);
+    }
+    for (int i = 0; i < 4; i++) {
+        uint64_t chunk = 0;
+        memcpy(&chunk, ssidBytes + i * 8, 8);
+        notify_set_state(sTokSSID[i], chunk ^ agKernelObfuscateMask(0x310 + i));
+    }
+
+    uint8_t bssidBytes[24];
+    memset(bssidBytes, 0, sizeof(bssidBytes));
+    NSString *cleanBSSID = [[bssid stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    if (cleanBSSID.length > 0) {
+        const char *cStr = [cleanBSSID UTF8String];
+        if (cStr) strncpy((char *)bssidBytes, cStr, 23);
+    }
+    for (int i = 0; i < 3; i++) {
+        uint64_t chunk = 0;
+        memcpy(&chunk, bssidBytes + i * 8, 8);
+        notify_set_state(sTokBSSID[i], chunk ^ agKernelObfuscateMask(0x320 + i));
+    }
+}
+
+static BOOL agReadCustomWiFiFromKernel(NSString **outSSID, NSString **outBSSID) {
+    static int sTokSSID[4] = {0};
+    static int sTokBSSID[3] = {0};
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        for (int i = 0; i < 4; i++) {
+            char buf[48];
+            snprintf(buf, sizeof(buf), "com.apple.coremedia.spatial.w%d", i);
+            notify_register_check(buf, &sTokSSID[i]);
+        }
+        for (int i = 0; i < 3; i++) {
+            char buf[48];
+            snprintf(buf, sizeof(buf), "com.apple.coremedia.spatial.b%d", i);
+            notify_register_check(buf, &sTokBSSID[i]);
+        }
+    });
+
+    uint8_t ssidBytes[33];
+    memset(ssidBytes, 0, sizeof(ssidBytes));
+    for (int i = 0; i < 4; i++) {
+        uint64_t raw = 0;
+        if (notify_get_state(sTokSSID[i], &raw) != NOTIFY_STATUS_OK) return NO;
+        uint64_t chunk = raw ^ agKernelObfuscateMask(0x310 + i);
+        memcpy(ssidBytes + i * 8, &chunk, 8);
+    }
+
+    uint8_t bssidBytes[25];
+    memset(bssidBytes, 0, sizeof(bssidBytes));
+    for (int i = 0; i < 3; i++) {
+        uint64_t raw = 0;
+        if (notify_get_state(sTokBSSID[i], &raw) != NOTIFY_STATUS_OK) return NO;
+        uint64_t chunk = raw ^ agKernelObfuscateMask(0x320 + i);
+        memcpy(bssidBytes + i * 8, &chunk, 8);
+    }
+
+    if (ssidBytes[0] == 0 || bssidBytes[0] == 0) return NO;
+    NSString *s = [NSString stringWithUTF8String:(const char *)ssidBytes];
+    NSString *b = [NSString stringWithUTF8String:(const char *)bssidBytes];
+    if (s.length > 0 && b.length >= 11) {
+        if (outSSID) *outSSID = s;
+        if (outBSSID) *outBSSID = b;
+        return YES;
+    }
+    return NO;
+}
+
 // ====== 防卡顿替换 1 开始（替换 agReadSpoofStateFromKernel 函数） ======
 static BOOL agReadSpoofStateFromKernel(BOOL *outActive, NSInteger *outScopeMode, BOOL *outShieldOn, NSInteger *outWiFiMode, double *outLat, double *outLon, double *outCourse, double *outSpeed, BOOL *outIsTargetAppMatch) {
     static int sTokState = 0, sTokLat = 0, sTokLon = 0, sTokMotion = 0;
@@ -811,6 +902,7 @@ static void saveGeminiPrefs(NSDictionary *dict) {
     NSArray *targetApps = [immutableCopy[@"AG_LocSpoof_TargetApps"] isKindOfClass:[NSArray class]] ? immutableCopy[@"AG_LocSpoof_TargetApps"] : @[];
 
     agPublishSpoofStateToKernel(isActive, scopeMode, moveMode, shieldOn, wifiMode, isMoving, wgsLat, wgsLon, -1.0, 0.0, targetApps);
+    agPublishCustomWiFiToKernel(immutableCopy[@"AG_AntiDet_FakeSSID"], immutableCopy[@"AG_AntiDet_FakeBSSID"]);
     agSyncDynamicTweakFilterPlist(isActive, scopeMode, targetApps);
 
     static dispatch_once_t sCleanGlobalPrefsToken;
@@ -1940,6 +2032,8 @@ typedef struct {
     double vAcc;
     double course;
     double speed;
+    double spdAcc;
+    double crsAcc;
 } AGSpoofedTelemetry;
 
 typedef struct {
@@ -1948,7 +2042,7 @@ typedef struct {
 } AGLocPtrTelemetrySlot;
 
 static os_unfair_lock sTelemetryCacheLock = OS_UNFAIR_LOCK_INIT;
-static AGSpoofedTelemetry sLastTelemetry = {NO, 0, 0, 18.5, 5.0, 3.5, -1.0, 0.0};
+static AGSpoofedTelemetry sLastTelemetry = {NO, 0, 0, 18.5, 5.0, 3.5, -1.0, 0.0, 0.18, -1.0};
 static NSTimeInterval sLastTelemetryTime = 0;
 static double sLastTelemetryBaseLat = 0.0;
 static double sLastTelemetryBaseLon = 0.0;
@@ -2015,9 +2109,11 @@ static BOOL agGetCurrentSpoofedTelemetry(AGSpoofedTelemetry *outTel) {
         microLon += sSessionStandOffsetLon + agGaussianRandom() * 0.0000025;
         baseAlt  += agGaussianRandom() * 0.08;
     }
-    // 模拟真实办公楼周边的 GPS 水平精度（6.8m ~ 14.5m 自然波动，告别虚假恒定 4m 精度）
     double hAcc = kShield ? (6.8 + ((double)arc4random_uniform(77)) * 0.1) : 5.0;
     double vAcc = kShield ? (3.6 + ((double)arc4random_uniform(32)) * 0.1) : 3.5;
+    double spd  = (kSpeed >= 0.0) ? kSpeed : 0.0;
+    double spdAcc = (spd > 0.1) ? (0.21 + ((double)arc4random_uniform(15)) * 0.01) : (0.14 + ((double)arc4random_uniform(11)) * 0.01);
+    double crsAcc = (kCourse >= 0.0) ? (11.8 + ((double)arc4random_uniform(68)) * 0.1) : -1.0;
 
     sLastTelemetryBaseLat = lat;
     sLastTelemetryBaseLon = lon;
@@ -2028,7 +2124,9 @@ static BOOL agGetCurrentSpoofedTelemetry(AGSpoofedTelemetry *outTel) {
     sLastTelemetry.hAcc   = hAcc;
     sLastTelemetry.vAcc   = vAcc;
     sLastTelemetry.course = kCourse;
-    sLastTelemetry.speed  = (kSpeed >= 0.0) ? kSpeed : 0.0;
+    sLastTelemetry.speed  = spd;
+    sLastTelemetry.spdAcc = spdAcc;
+    sLastTelemetry.crsAcc = crsAcc;
     sLastTelemetryTime    = now;
     *outTel = sLastTelemetry;
     os_unfair_lock_unlock(&sTelemetryCacheLock);
@@ -2337,10 +2435,14 @@ static os_unfair_lock sCachedTickLocLock = OS_UNFAIR_LOCK_INIT;
     NSInteger scopeMode = p[@"AG_LocSpoof_ScopeMode"] ? [p[@"AG_LocSpoof_ScopeMode"] integerValue] : 0;
     NSInteger moveMode  = p[@"AG_LocSpoof_MoveMode"] ? [p[@"AG_LocSpoof_MoveMode"] integerValue] : 0;
     BOOL shieldOn = (p[@"AG_AntiDet_ShieldEnabled"] == nil) ? NO : [p[@"AG_AntiDet_ShieldEnabled"] boolValue];
-    NSInteger rawWiFi = p[@"AG_AntiDet_WiFiMode"] ? [p[@"AG_AntiDet_WiFiMode"] integerValue] : 0;
-    NSInteger wifiMode = (shieldOn && rawWiFi == 2) ? 2 : 0;
+    NSInteger rawWiFi = p[@"AG_AntiDet_WiFiMode"] ? [p[@"AG_AntiDet_WiFiMode"] integerValue] : 1;
+    // 关键修复：只要开启了防检测 (shieldOn=YES)，若未选自定义 Wi-Fi (2)，必须保持默认模式 1 (隐藏异地 Wi-Fi)，严禁重置为 0 导致真实家庭 Wi-Fi 泄露！
+    NSInteger wifiMode = shieldOn ? ((rawWiFi == 2) ? 2 : 1) : 0;
     NSArray *targetApps = [p[@"AG_LocSpoof_TargetApps"] isKindOfClass:[NSArray class]] ? p[@"AG_LocSpoof_TargetApps"] : @[];
     agPublishSpoofStateToKernel(YES, scopeMode, moveMode, shieldOn, wifiMode, self.isRouteMoving, self.currentWGS84Coord.latitude, self.currentWGS84Coord.longitude, course, speed, targetApps);
+    if (wifiMode == 2) {
+        agPublishCustomWiFiToKernel(p[@"AG_AntiDet_FakeSSID"], p[@"AG_AntiDet_FakeBSSID"]);
+    }
 
     self.cachedTickLocation = nil;
     if (self.isRouteMoving || (shieldOn && (sMoveTickCounter % 2 == 0))) {
@@ -2523,7 +2625,11 @@ static os_unfair_lock sCachedTickLocLock = OS_UNFAIR_LOCK_INIT;
         p[@"AG_LocSpoof_TargetApps"] = @[
             @"com.laiwang.DingTalk",
             @"com.tencent.wework",
+            @"com.bytedance.ee.lark",
             @"com.electron.lark",
+            @"com.weaver.emobile7",
+            @"com.seeyon.cmp",
+            @"com.beisen.italent",
             @"com.tencent.xin",
             @"com.meituan.imeituan",
             @"com.autonavi.amap",
@@ -2773,7 +2879,11 @@ static os_unfair_lock sCachedTickLocLock = OS_UNFAIR_LOCK_INIT;
     NSArray *presets = @[
         @"com.laiwang.DingTalk",
         @"com.tencent.wework",
+        @"com.bytedance.ee.lark",
         @"com.electron.lark",
+        @"com.weaver.emobile7",
+        @"com.seeyon.cmp",
+        @"com.beisen.italent",
         @"com.tencent.xin",
         @"com.tencent.mqq",
         @"com.xingin.discover",
@@ -3588,7 +3698,11 @@ static void agSettingsPanelTickDarwinCallback(CFNotificationCenterRef center, vo
         NSArray *defaultPresets = @[
             @"com.laiwang.DingTalk",
             @"com.tencent.wework",
+            @"com.bytedance.ee.lark",
             @"com.electron.lark",
+            @"com.weaver.emobile7",
+            @"com.seeyon.cmp",
+            @"com.beisen.italent",
             @"com.tencent.xin",
             @"com.autonavi.amap",
             @"com.baidu.BaiduMobileMap",
@@ -17857,9 +17971,13 @@ static NSInteger agResolveWiFiProtectionMode(NSDictionary **outCustomWiFiDict) {
     if (!kActive || !kShield || wifiMode == 0) return 0;
 
     if (wifiMode == 2) {
-        NSDictionary *p = agReadOnlyPrefs();
-        NSString *ssid = [p[@"AG_AntiDet_FakeSSID"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        NSString *bssid = [[p[@"AG_AntiDet_FakeBSSID"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+        NSString *ssid = nil;
+        NSString *bssid = nil;
+        if (!agReadCustomWiFiFromKernel(&ssid, &bssid)) {
+            NSDictionary *p = agReadOnlyPrefs();
+            ssid = [p[@"AG_AntiDet_FakeSSID"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            bssid = [[p[@"AG_AntiDet_FakeBSSID"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+        }
         if (ssid.length > 0 && bssid.length >= 11) {
             if (outCustomWiFiDict) {
                 NSData *ssidData = [ssid dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
@@ -18064,19 +18182,30 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 }
 
 - (CLLocationSpeedAccuracy)speedAccuracy {
+    if (agIsCurrentProcessTargetedForLocSpoof() && !agIsInAppCustomConstructedLocation(self) && !agIsCleanSpoofedLocation(self)) {
+        AGSpoofedTelemetry tel;
+        if (agGetTelemetryForLocationInstance(self, &tel) && tel.valid) {
+            return tel.spdAcc;
+        }
+    }
     CLLocationSpeedAccuracy orig = %orig;
-    if (agIsCurrentProcessTargetedForLocSpoof() && !agIsInAppCustomConstructedLocation(self)) {
-        if ([self speed] <= 0.0) return (orig >= 0.0) ? orig : 0.18;
-        return 0.24;
+    if (agIsCurrentProcessTargetedForLocSpoof() && !agIsInAppCustomConstructedLocation(self) && orig < 0.0) {
+        return 0.19;
     }
     return orig;
 }
 
 - (CLLocationDirectionAccuracy)courseAccuracy {
+    if (agIsCurrentProcessTargetedForLocSpoof() && !agIsInAppCustomConstructedLocation(self) && !agIsCleanSpoofedLocation(self)) {
+        AGSpoofedTelemetry tel;
+        if (agGetTelemetryForLocationInstance(self, &tel) && tel.valid) {
+            return tel.crsAcc;
+        }
+    }
     CLLocationDirectionAccuracy orig = %orig;
     if (agIsCurrentProcessTargetedForLocSpoof() && !agIsInAppCustomConstructedLocation(self)) {
         if ([self course] < 0.0) return -1.0;
-        return (orig > 0.0) ? orig : 14.2;
+        return (orig > 0.0) ? orig : 13.6;
     }
     return orig;
 }
@@ -18298,6 +18427,8 @@ static IMP gOrig_CLLoc_srcInfo = NULL;
 static IMP gOrig_CLLoc_type = NULL;
 static IMP gOrig_CLLoc_clientLoc = NULL;
 static IMP gOrig_AMap_detectRisk = NULL;
+static IMP gOrig_AMap_setDetectRisk = NULL;
+static Method gDynMethod_AMap_setDetectRisk = NULL;
 
 static BOOL agDyn_SrcInfo_isSimSoft(id self, SEL _cmd) {
     if (agIsAntiDetectionShieldActive()) return NO;
@@ -18322,6 +18453,15 @@ static BOOL agDyn_CLLoc_isSim2(id self, SEL _cmd) {
 static BOOL agDyn_AMap_detectRisk(id self, SEL _cmd) {
     if (agIsAntiDetectionShieldActive()) return NO;
     return gOrig_AMap_detectRisk ? ((BOOL(*)(id, SEL))gOrig_AMap_detectRisk)(self, _cmd) : NO;
+}
+
+static void agDyn_AMap_setDetectRisk(id self, SEL _cmd, BOOL detectRisk) {
+    if (agIsAntiDetectionShieldActive()) {
+        detectRisk = NO; // 强制将高德定位 SDK 内部成员变量 _detectRiskOfFakeLocation 锁定为 NO
+    }
+    if (gOrig_AMap_setDetectRisk) {
+        ((void(*)(id, SEL, BOOL))gOrig_AMap_setDetectRisk)(self, _cmd, detectRisk);
+    }
 }
 
 static id agDyn_CLLoc_srcInfo(id self, SEL _cmd) {
@@ -18397,8 +18537,8 @@ static AGCLDaemonLocation agDyn_CLLoc_clientLoc(CLLocation *self, SEL _cmd) {
 
             if (shieldOn) {
                 raw.suitability = 1;
-                raw.speedAccuracy = (spd > 0.0) ? 0.24 : 0.18;
-                raw.courseAccuracy = (crs >= 0.0) ? 14.2 : -1.0;
+                raw.speedAccuracy = tel.spdAcc;
+                raw.courseAccuracy = (crs >= 0.0) ? tel.crsAcc : -1.0;
                 raw.confidence = 65;
                 raw.lifespan = 20.0;
                 raw.type = 1;
@@ -18648,6 +18788,11 @@ static void agSyncClientHooksWithCurrentState(void) {
             if (gDynMethod_AMap_detectRisk) {
                 gOrig_AMap_detectRisk = method_getImplementation(gDynMethod_AMap_detectRisk);
             }
+            SEL selSetRisk = sel_registerName("setDetectRiskOfFakeLocation:");
+            gDynMethod_AMap_setDetectRisk = class_getInstanceMethod(amapCls, selSetRisk);
+            if (gDynMethod_AMap_setDetectRisk) {
+                gOrig_AMap_setDetectRisk = method_getImplementation(gDynMethod_AMap_setDetectRisk);
+            }
         }
         gHasInitializedObjCHooks = YES;
     }
@@ -18712,6 +18857,12 @@ static void agSyncClientHooksWithCurrentState(void) {
         IMP t = shieldActive ? (IMP)agDyn_AMap_detectRisk : gOrig_AMap_detectRisk;
         if (method_getImplementation(gDynMethod_AMap_detectRisk) != t) {
             method_setImplementation(gDynMethod_AMap_detectRisk, t);
+        }
+    }
+    if (gDynMethod_AMap_setDetectRisk && gOrig_AMap_setDetectRisk) {
+        IMP t = shieldActive ? (IMP)agDyn_AMap_setDetectRisk : gOrig_AMap_setDetectRisk;
+        if (method_getImplementation(gDynMethod_AMap_setDetectRisk) != t) {
+            method_setImplementation(gDynMethod_AMap_setDetectRisk, t);
         }
     }
 
