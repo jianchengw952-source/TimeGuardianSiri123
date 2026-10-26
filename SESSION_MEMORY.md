@@ -42,7 +42,7 @@
 | **E盘单文件归档** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调.txt` | 钉钉可打卡版本完整代码备份 |
 | **远端 Git 仓库** | `https://github.com/jianchengw952-source/TimeGuardianSiri123.git` | GitHub 远程仓库（分支：`main`） |
 | **当前 Git Commit** | `1b0135e` | `feat(stealth): eliminate CLSimulationManager and CLLocationSourceInformation static metadata, dynamically register sensitive anti-detection hooks` |
-| **GitHub Actions 运行记录** | Run #136 (ID: `40378966269`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
+| **GitHub Actions 运行记录** | Run #138 (ID: `40382937117`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
 
 ---
 
@@ -153,6 +153,32 @@
   - Rootless (arm64): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb` (420,356 字节, SHA256: `618BB0F5F4D99A3D7968E62E583DA47F1B4F35D71005B47455A0D2105D28A284`)
   - RootHide (arm64e): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb` (274,956 字节, SHA256: `10FCEB86D563222498C033C8540CAD65DE9756DADC25D5D25A6CA4942132D858`)
 
+
+
+### Run #138 验证与交付记录 (2026-10-27 03:04)
+- **GitHub Actions Run ID**: `40382937117` (Run #138, 双架构 build 成功)
+- **Commit**: `8601c5f` (`fix(touch): refine mini summon pointInside, passthrough hitTest, and keyWindow management`)
+- **核心升级特性**：
+  1. **精准触控区定义**：在 `AGMiniSummonCanvasView` 中新增 `pointInside:withEvent:`，在款式 ③（极光天际线）与款式 ④（全息丝绸）下，仅允许中央字幕条/晶核铭牌与关闭按钮响应点击，外围大面积极光海浪与丝绸光晕区域 100% 穿透，彻底消除滑动遮挡；
+  2. **`GeminiPassthroughWindow` 深度穿透**：重写 `hitTest:withEvent:`，小胶囊形态下除小胶囊本身响应外全屏返回 `nil`，将滑动手势与点击事件 100% 毫无保留交还底层 App 与系统桌面；
+  3. **KeyWindow 智能避让**：重写 `_canBecomeKeyWindow`，小胶囊悬浮态下严格返回 `NO` 绝不抢占系统 KeyWindow；
+  4. **形态化 KeyWindow 激活管理**：移除唤起时的无条件激活，仅在展开为主界面时执行 `[self.overlayWindow makeKeyWindow]`；在小胶囊形态下主动调用 `[self.overlayWindow resignKeyWindow]`，确保底层软件顺畅滑动与打字。
+- **产物文件校验**：
+  - **Rootless (arm64)**: `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
+    - 大小: **427,556 字节**
+    - SHA256: `0FD7A90BB13D7C279726B1D3FB10D8DDDA0B6B96F3DA232A21B6A86B341D8DBE`
+    - 内部归档: 纯 `xz` (`debian-binary`, `control.tar.xz`, `data.tar.xz`)
+  - **RootHide (arm64e)**: `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
+    - 大小: **275,932 字节**
+    - SHA256: `49F6CA5CF1B767F2FFE26E89DA6C558570095886C88379D0D4DAB68D1B0F45FF`
+    - 内部归档: 纯 `xz` (`debian-binary`, `control.tar.xz`, `data.tar.xz`)
+- **全镜像源与分发路径同步**：
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
 
 ### Run #136 验证与交付记录 (2026-10-27 02:37)
 - **GitHub Actions Run ID**: `40378966269` (Run #136, 双架构 build 成功)
