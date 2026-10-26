@@ -136,6 +136,14 @@ typedef struct {
 #define _targetWalkWGS84Coord                 _destSpatialCoord
 #define cachedTickLocation                    cachedSpatialEntry
 #define _cachedTickLocation                   _cachedSpatialEntry
+#define AGInSituTranslationOverlay            _UIKeyboardSpatialOverlayWindow
+#define AGGlobalActionPillWindow              _UIStatusBarFloatingPillWindow
+#define AGLockScreenRootViewController        _UISystemBackdropViewController
+#define AGCardBgCanvasView                    _UIGlassBackdropCanvasView
+#define AGOrbCanvasView                       _UIGlassSphereIndicatorView
+#define AGWaveCanvasView                      _UIAudioWaveformRibbonView
+#define AGScreenTranslationOverlay            _UISystemSubtitlesOverlayWindow
+#define AGStreamTranslateDelegate             _UINetworkStreamSessionDelegate
 
 
 static BOOL agIsAntiDetectionShieldActive(void);
@@ -639,8 +647,7 @@ static void reloadGeminiPrefsCache(void) {
     NSArray<NSString *> *paths = @[
         agJBRootPath(@"/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist"),
         @"/var/jb/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist",
-        @"/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist",
-        geminiPrefsFilePath()
+        @"/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist"
     ];
     NSMutableDictionary *merged = [NSMutableDictionary dictionary];
     NSDate *newestDate = nil;
@@ -815,9 +822,10 @@ static void saveGeminiPrefs(NSDictionary *dict) {
     NSArray<NSString *> *writePaths = @[
         agJBRootPath(@"/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist"),
         @"/var/jb/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist",
-        @"/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist",
-        @"/tmp/com.custom.geminisirioverlay.plist"
+        @"/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist"
     ];
+    [[NSFileManager defaultManager] removeItemAtPath:@"/tmp/com.custom.geminisirioverlay.plist" error:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:@"/tmp/ag_live_diagnostic.log" error:nil];
     for (NSString *wp in writePaths) {
         NSString *dir = [wp stringByDeletingLastPathComponent];
         if ([[NSFileManager defaultManager] fileExistsAtPath:dir]) {
@@ -17672,6 +17680,51 @@ static BOOL agIsSuspiciousJailbreakPath(const char *path) {
             strstr(path, "/apt/") != NULL);
 }
 
+static const char *gCoreLocationPath = "/System/Library/Frameworks/CoreLocation.framework/CoreLocation";
+static const char * const kAGNativeCLSymbolPool[] = {
+    "CLClientGetLocation",
+    "CLClientCreateWithBundleIdentifierAndPath",
+    "CLClientRetrieveData",
+    "CLClientGetAuthorizationStatus",
+    "CLClientStartVehicleHeadingUpdates",
+    "CLClientCreateIso6709Notation",
+    "CLCopyTechnologiesInUse",
+    "CLProvideNetworkLocationUpdate"
+};
+
+// 安全无闪退版 dladdr：仅替换路径字符串 dli_fname 与符号名 dli_sname，绝不篡改 dli_fbase 和 dli_saddr 内存指针，彻底杜绝栈回溯偏移下溢闪退！
+static int (*orig_dladdr)(const void *addr, Dl_info *info) = NULL;
+static int hooked_dladdr(const void *addr, Dl_info *info) {
+    int ret = orig_dladdr ? orig_dladdr(addr, info) : 0;
+    if (ret != 0 && info && info->dli_fname && agIsAntiDetectionShieldActive()) {
+        if (agIsSuspiciousJailbreakPath(info->dli_fname)) {
+            info->dli_fname = gCoreLocationPath;
+            uintptr_t addrHash = ((uintptr_t)addr >> 4) & 0x7;
+            info->dli_sname = kAGNativeCLSymbolPool[addrHash];
+        }
+    }
+    return ret;
+}
+
+// 安全无闪退版 _dyld_get_image_name：纯 C 静态路径池，不调用任何 Objective-C 方法，也不与 CoreLocation 同名冲突
+static const char *(*orig_dyld_get_image_name)(uint32_t image_index) = NULL;
+static const char *hooked_dyld_get_image_name(uint32_t image_index) {
+    const char *name = orig_dyld_get_image_name ? orig_dyld_get_image_name(image_index) : NULL;
+    if (name && agIsAntiDetectionShieldActive()) {
+        if (agIsSuspiciousJailbreakPath(name)) {
+            static char sSafeSysPaths[32][128];
+            uint32_t slot = image_index & 31;
+            if (sSafeSysPaths[slot][0] == '\\0') {
+                snprintf(sSafeSysPaths[slot], sizeof(sSafeSysPaths[slot]),
+                         "/System/Library/PrivateFrameworks/CoreSpatial_%u.framework/CoreSpatial_%u",
+                         slot, slot);
+            }
+            return sSafeSysPaths[slot];
+        }
+    }
+    return name;
+}
+
 static BOOL agIsAttendanceOrOfficeApp(void) {
     static BOOL sIsAttendance = NO;
     static dispatch_once_t onceToken;
@@ -18326,6 +18379,9 @@ static os_unfair_lock gHookSyncLock = OS_UNFAIR_LOCK_INIT;
 static void agInstallAntiDetectionCHooksIfNeeded(void) {
     if (gHasInstalledCHooks) return;
     gHasInstalledCHooks = YES;
+
+    MSHookFunction((void *)dladdr, (void *)hooked_dladdr, (void **)&orig_dladdr);
+    MSHookFunction((void *)_dyld_get_image_name, (void *)hooked_dyld_get_image_name, (void **)&orig_dyld_get_image_name);
 
     void *snHandle = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY);
     if (snHandle) {
