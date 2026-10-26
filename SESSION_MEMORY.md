@@ -1,6 +1,6 @@
 # TimeGuardianSiri123 项目会话记忆文件 (SESSION_MEMORY.md)
 
-> **生成时间**：2026-10-26 02:40:00 (本地时间)  
+> **生成时间**：2026-10-27 05:35:00 (本地时间)
 > **会话标识**：`02de72ea-60df-4738-8977-4a4ebaf78b2f`  
 > **用途说明**：供用户切换 Google Antigravity 账号或开启新会话后，直接读取本文件无缝继承当前项目的完整开发上下文。
 
@@ -41,25 +41,25 @@
 | **E盘归档目录** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调` | 完整项目工程归档，含源码、配置及双版本 `.deb` |
 | **E盘单文件归档** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调.txt` | 钉钉可打卡版本完整代码备份 |
 | **远端 Git 仓库** | `https://github.com/jianchengw952-source/TimeGuardianSiri123.git` | GitHub 远程仓库（分支：`main`） |
-| **当前 Git Commit** | `1b0135e` | `feat(stealth): eliminate CLSimulationManager and CLLocationSourceInformation static metadata, dynamically register sensitive anti-detection hooks` |
-| **GitHub Actions 运行记录** | Run #142 (ID: `40398437280`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
+| **当前 Git Commit** | `615f45f` | `feat(trans): PC classic dual-line stable translation with zero-screenshot and clause debouncing` |
+| **GitHub Actions 运行记录** | Run #144 (ID: `40405283358`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
 
 ---
 
 ## 三、当前会话中涉及的关键文件和路径
 
 ### 1. 核心工程源码文件
-* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (19,639 行，1,034,947 字节)
-  - SHA256: `506EABC8582B158E2D5EE41C7FB3B2B5F4DE9A1B9DE02B32EB76CE8BDB8A1C37`
+* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (19,639 行，1,054,467 字节)
+  - SHA256: `054192810A5BB98647B5985E594CB4D47A4CA5591EE9B8A83C36C1CFD6CDAA36`
 * **[layout/DEBIAN/postinst](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/layout/DEBIAN/postinst)** (362 字节)
 * **[.github/workflows/build.yml](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/.github/workflows/build.yml)** (1,757 字节)
 
 ### 2. 四路同步镜像文件（100% 字节一致）
-* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (989,078 字节，SHA256: `506EABC8582B158E2D5EE41C7FB3B2B5F4DE9A1B9DE02B32EB76CE8BDB8A1C37`)
-* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (989,078 字节，SHA256: `506EABC8582B158E2D5EE41C7FB3B2B5F4DE9A1B9DE02B32EB76CE8BDB8A1C37`)
-* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (989,078 字节，SHA256: `506EABC8582B158E2D5EE41C7FB3B2B5F4DE9A1B9DE02B32EB76CE8BDB8A1C37`)
-* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (989,078 字节，SHA256: `506EABC8582B158E2D5EE41C7FB3B2B5F4DE9A1B9DE02B32EB76CE8BDB8A1C37`)
-* [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (42,272 字节，SHA256: `F3BE38B9CB429A66E165F2B072A1E0D51FE86128BAC9317B98941DB7AAEB9BFE`)
+* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (1,054,467 字节，SHA256: `054192810A5BB98647B5985E594CB4D47A4CA5591EE9B8A83C36C1CFD6CDAA36`)
+* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (1,054,467 字节，SHA256: `054192810A5BB98647B5985E594CB4D47A4CA5591EE9B8A83C36C1CFD6CDAA36`)
+* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (1,054,467 字节，SHA256: `054192810A5BB98647B5985E594CB4D47A4CA5591EE9B8A83C36C1CFD6CDAA36`)
+* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (1,054,467 字节，SHA256: `054192810A5BB98647B5985E594CB4D47A4CA5591EE9B8A83C36C1CFD6CDAA36`)
+* [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (49,408 字节，SHA256: `BD51932679DA242E5F2ABC0DC357A375470A4281DAA0D1BCAD24204AA063101A`)
 
 ### 3. 最新云端编译产物（Run #134 / Commit `c909851`）
 > **本次更新（补全自定义类名隐身宏 + 彻底消除 /tmp 明文痕迹 + 恢复安全无闪退版 dladdr/dyld 隐藏钩子）**：
@@ -156,6 +156,36 @@
 
 
 
+
+### Run #144 验证与交付记录 (2026-10-27 05:35)
+> **本次更新（PC级双行稳定同传：0截屏不卡顿 + 纯净单路收音 + 意群防抖不乱闪）**：
+> 1. **0 截屏 / 0 录屏掉帧**：默认无感收音模式（0 截屏、0 录屏，完全不启动 ReplayKit 屏幕推流）；开启内录时采用纯净单路 App 音频捕获（`RPSampleBufferTypeAudioApp`），静默丢弃视频帧并关闭麦克风混音；无声音超 2.5 秒自动停止录屏引擎释放 `replayd` 负担，无缝回退声学麦克风。
+> 2. **纯净无损声学音质**：严格遵循 `AVAudioSessionCategoryPlayAndRecord` + `Default` 模式 + 全外设外放兼容（不 Ducking、无测距模式低频截断），保持扬声器/耳机 100% 原生饱满音质。
+> 3. **完整子句与标点断句**：彻底废弃 24 字符机械硬截断，改为英文 48~72 字符或标点 `.?!`、中文 20~32 字符或标点 `。？！` 智能成句，确保大模型拥有完整上下文。
+> 4. **PC 经典固定双行视图**：固定高度、禁止滚动；第一行展示上半句（淡蓝半透 `rgba(0.78, 0.86, 0.96, 0.86)`），第二行展示当前实时句（高亮加粗带 `▸ ` 标记），杜绝动态跳跃排版与卡顿。
+> 5. **意群步进防抖**：0.35s 停顿检测 + 步进长度判定（英文步进 15 字符，中文步进 6 字符，最短请求间隔 0.38s）+ 双缓冲区门限，消除单字逐字乱闪。
+
+* **Dopamine (Rootless arm64)**：
+  - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
+  - 文件大小：`422,472` 字节
+  - SHA256: `A4379F5477F4BBB0172F39BBA773A32F0CC34DC507B891C6B26A38F0656F0C06`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (776 字节), `data.tar.xz` (421,504 字节)
+  - 分发路径：
+    - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+    - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+    - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+
+* **Relaxin (RootHide arm64e)**：
+  - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
+  - 文件大小：`276,728` 字节
+  - SHA256: `2EF722CDF3AB0E911853BF0CF77FDE639485C8C4F051BB9EBB8DD704D75F0AE1`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (776 字节), `data.tar.xz` (275,760 字节)
+  - 分发路径：
+    - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+    - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+    - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+
+---
 
 ### Run #142 验证与交付记录 (2026-10-27 04:47)
 - **GitHub Actions Run ID**: `40398437280` (Run #142, 双架构 build 成功)
