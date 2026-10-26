@@ -142,6 +142,7 @@ typedef struct {
 #define AGCardBgCanvasView                    _UIGlassBackdropCanvasView
 #define AGOrbCanvasView                       _UIGlassSphereIndicatorView
 #define AGWaveCanvasView                      _UIAudioWaveformRibbonView
+#define AGMiniSummonCanvasView                _UISystemApertureFluidPortalView
 #define AGScreenTranslationOverlay            _UISystemSubtitlesOverlayWindow
 #define AGStreamTranslateDelegate             _UINetworkStreamSessionDelegate
 
@@ -3944,11 +3945,12 @@ static AGDeviceMetrics agComputeDeviceMetrics(void) {
         cachedMetrics.screenH = MAX(b.size.width, b.size.height);
         cachedMetrics.scale = scr.scale;
 
-        // 1. 识别灵动岛机型：iPhone 14 Pro(15,2)、14 Pro Max(15,3)、15(15,4)、15 Plus(15,5)、15 Pro(16,1)、15 Pro Max(16,2)
+        // 1. 全自动识别灵动岛机型 (iPhone 14 Pro/Max, 15 全系, 16 全系及后续机型) 与无灵动岛刘海机型
         BOOL isIslandHW = ([machine isEqualToString:@"iPhone15,2"] || [machine isEqualToString:@"iPhone15,3"] ||
                            [machine isEqualToString:@"iPhone15,4"] || [machine isEqualToString:@"iPhone15,5"] ||
-                           [machine isEqualToString:@"iPhone16,1"] || [machine isEqualToString:@"iPhone16,2"] ||
+                           [machine hasPrefix:@"iPhone16,"] || [machine hasPrefix:@"iPhone17,"] || [machine hasPrefix:@"iPhone18,"] ||
                            cachedMetrics.screenW == 393.0 || cachedMetrics.screenW == 430.0 ||
+                           cachedMetrics.screenW == 402.0 || cachedMetrics.screenW == 440.0 ||
                            cachedMetrics.screenH == 852.0 || cachedMetrics.screenH == 932.0);
 
         // 2. 识别 mini 机型 (iPhone 12 mini / 13 mini) 与 iPhone 11 系列
@@ -4804,6 +4806,502 @@ static void agDrawRadialGradient(CGContextRef ctx, CGPoint startCenter, CGFloat 
 }
 
 - (void)setNeedsDisplay {}
+@end
+
+// ==================== 3B. 四大殿堂级唤出形态配置读取与纯 GPU 渲染引擎 ====================
+// 返回值：1=①4D水晶胶囊(默认), 2=②灵动岛极光水滴, 3=③无界北极光天际线, 4=④3D全息丝绸, 0=传统直接弹主界面
+static NSInteger agMiniSummonStyle(void) {
+    if (!gCachedPrefs) reloadGeminiPrefsCache();
+    NSNumber *val = gCachedPrefs[@"AG_MiniSummon_Style"];
+    if (!val) return 1;
+    NSInteger s = [val integerValue];
+    if (s < 0 || s > 4) return 1;
+    return s;
+}
+
+// 返回值：NO=底部悬浮(默认), YES=顶部灵动岛/刘海自适应
+static BOOL agMiniSummonIsTop(void) {
+    if (!gCachedPrefs) reloadGeminiPrefsCache();
+    NSNumber *val = gCachedPrefs[@"AG_MiniSummon_Position"];
+    return val ? ([val integerValue] == 1) : NO;
+}
+
+@interface AGMiniSummonCanvasView : UIView
+@property (nonatomic, assign) NSInteger styleIndex;
+@property (nonatomic, assign) BOOL isTopPosition;
+@property (nonatomic, assign) BOOL hasDynamicIsland;
+@property (nonatomic, assign) AGVisualTheme currentTheme;
+@property (nonatomic, strong) UILabel *captionLabel;
+@property (nonatomic, strong) UIButton *closeButton;
+@property (nonatomic, copy) void (^onTapExpand)(void);
+@property (nonatomic, copy) void (^onTapClose)(void);
+- (void)refreshStyleAndThemeLayout;
+- (void)stepAnimationWithPhase:(CGFloat)phase amplitude:(CGFloat)amp;
+@end
+
+@implementation AGMiniSummonCanvasView {
+    // 款式 ① & ② 共用组件
+    UIView          *_pillContainer;
+    AGCardBgCanvasView *_s1CrystalBg;
+    UIView          *_s2DropBlackBg;
+    CAGradientLayer *_s2ConicSpinner;
+    CAShapeLayer    *_s2ConicMask;
+    CAGradientLayer *_s2BottomBloom;
+    AGOrbCanvasView *_miniOrbView;
+    AGWaveCanvasView *_miniWaveView;
+
+    // 款式 ③：无界北极光海浪天际线 (自适应顶部/底部 & 灵动岛/刘海) + 飘落星尘微粒
+    UIView          *_s3HorizonContainer;
+    CAGradientLayer *_s3IslandHaloLayer;
+    CAGradientLayer *_s3AuroraCurtainLayer;
+    CAShapeLayer    *_s3WaveStrokes[3];
+    CAShapeLayer    *_s3WaveFills[3];
+    CALayer         *_s3StarLayers[18];
+    CGPoint         _s3StarPos[18];
+    CGFloat         _s3StarSpeed[18];
+    UIView          *_s3CaptionPillBg;
+
+    // 款式 ④：3D 全息丝绸莫比乌斯光带 + 晶核浮窗
+    UIView          *_s4SilkContainer;
+    CAGradientLayer *_s4AmbientBloomLayer;
+    CAShapeLayer    *_s4SilkLayers[4];
+    UIView          *_s4JewelBadgeView;
+    UIView          *_s4JewelDot;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if (self = [super initWithFrame:frame]) {
+        self.backgroundColor = [UIColor clearColor];
+        self.clipsToBounds = NO;
+        AGDeviceMetrics m = agComputeDeviceMetrics();
+        _hasDynamicIsland = m.hasDynamicIsland;
+
+        // 1. 款式 ① & ② 胶囊容器
+        _pillContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 252, 48)];
+        _pillContainer.backgroundColor = [UIColor clearColor];
+        _pillContainer.clipsToBounds = YES;
+        [self addSubview:_pillContainer];
+
+        _s1CrystalBg = [[AGCardBgCanvasView alloc] initWithFrame:_pillContainer.bounds];
+        _s1CrystalBg.cornerRadius = 24.0;
+        [_pillContainer addSubview:_s1CrystalBg];
+
+        _s2DropBlackBg = [[UIView alloc] initWithFrame:_pillContainer.bounds];
+        _s2DropBlackBg.backgroundColor = [UIColor blackColor];
+        _s2DropBlackBg.userInteractionEnabled = NO;
+        [_pillContainer addSubview:_s2DropBlackBg];
+
+        _s2BottomBloom = [CAGradientLayer layer];
+        _s2BottomBloom.startPoint = CGPointMake(0.0, 0.5);
+        _s2BottomBloom.endPoint = CGPointMake(1.0, 0.5);
+        [_s2DropBlackBg.layer addSublayer:_s2BottomBloom];
+
+        CALayer *conicWrap = [CALayer layer];
+        conicWrap.frame = CGRectMake(0, 0, 252, 54);
+        _s2ConicSpinner = [CAGradientLayer layer];
+        _s2ConicSpinner.type = kCAGradientLayerConic;
+        _s2ConicSpinner.bounds = CGRectMake(0, 0, 300, 300);
+        _s2ConicSpinner.position = CGPointMake(126, 25);
+        _s2ConicSpinner.startPoint = CGPointMake(0.5, 0.5);
+        _s2ConicSpinner.endPoint = CGPointMake(1.0, 0.5);
+        [conicWrap addSublayer:_s2ConicSpinner];
+        _s2ConicMask = [CAShapeLayer layer];
+        _s2ConicMask.fillRule = kCAFillRuleEvenOdd;
+        conicWrap.mask = _s2ConicMask;
+        [_s2DropBlackBg.layer addSublayer:conicWrap];
+
+        _miniWaveView = [[AGWaveCanvasView alloc] initWithFrame:CGRectMake(40, 4, 168, 44)];
+        _miniWaveView.alpha = 0.86;
+        [_pillContainer addSubview:_miniWaveView];
+
+        _miniOrbView = [[AGOrbCanvasView alloc] initWithFrame:CGRectMake(8, 8, 32, 32)];
+        [_pillContainer addSubview:_miniOrbView];
+
+        // 2. 款式 ③ 无界北极光海浪天际线容器
+        _s3HorizonContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, m.screenW, 110)];
+        _s3HorizonContainer.backgroundColor = [UIColor clearColor];
+        _s3HorizonContainer.clipsToBounds = NO;
+        [self addSubview:_s3HorizonContainer];
+
+        _s3IslandHaloLayer = [CAGradientLayer layer];
+        _s3IslandHaloLayer.type = kCAGradientLayerRadial;
+        _s3IslandHaloLayer.startPoint = CGPointMake(0.5, 0.5);
+        _s3IslandHaloLayer.endPoint = CGPointMake(1.0, 1.0);
+        [_s3HorizonContainer.layer addSublayer:_s3IslandHaloLayer];
+
+        _s3AuroraCurtainLayer = [CAGradientLayer layer];
+        _s3AuroraCurtainLayer.type = kCAGradientLayerRadial;
+        _s3AuroraCurtainLayer.startPoint = CGPointMake(0.5, 0.5);
+        _s3AuroraCurtainLayer.endPoint = CGPointMake(1.0, 1.0);
+        [_s3HorizonContainer.layer addSublayer:_s3AuroraCurtainLayer];
+
+        for (int i = 0; i < 3; i++) {
+            _s3WaveFills[i] = [CAShapeLayer layer];
+            _s3WaveFills[i].strokeColor = [UIColor clearColor].CGColor;
+            [_s3HorizonContainer.layer addSublayer:_s3WaveFills[i]];
+
+            _s3WaveStrokes[i] = [CAShapeLayer layer];
+            _s3WaveStrokes[i].fillColor = [UIColor clearColor].CGColor;
+            _s3WaveStrokes[i].lineWidth = 2.2;
+            _s3WaveStrokes[i].lineCap = kCALineCapRound;
+            [_s3HorizonContainer.layer addSublayer:_s3WaveStrokes[i]];
+        }
+
+        for (int i = 0; i < 18; i++) {
+            _s3StarLayers[i] = [CALayer layer];
+            CGFloat r = 1.2 + (arc4random_uniform(14) * 0.1);
+            _s3StarLayers[i].bounds = CGRectMake(0, 0, r * 2.0, r * 2.0);
+            _s3StarLayers[i].cornerRadius = r;
+            _s3StarLayers[i].backgroundColor = [UIColor whiteColor].CGColor;
+            _s3StarPos[i] = CGPointMake(24.0 + arc4random_uniform((uint32_t)MAX(100, m.screenW - 48)), arc4random_uniform(90));
+            _s3StarSpeed[i] = 0.35 + (arc4random_uniform(60) * 0.01);
+            [_s3HorizonContainer.layer addSublayer:_s3StarLayers[i]];
+        }
+
+        _s3CaptionPillBg = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 230, 28)];
+        _s3CaptionPillBg.backgroundColor = [UIColor colorWithRed:0.03 green:0.05 blue:0.14 alpha:0.58];
+        _s3CaptionPillBg.layer.cornerRadius = 14.0;
+        _s3CaptionPillBg.userInteractionEnabled = NO;
+        [_s3HorizonContainer addSubview:_s3CaptionPillBg];
+
+        // 3. 款式 ④ 3D 全息丝绸莫比乌斯光带容器
+        _s4SilkContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 288, 76)];
+        _s4SilkContainer.backgroundColor = [UIColor clearColor];
+        _s4SilkContainer.clipsToBounds = NO;
+        [self addSubview:_s4SilkContainer];
+
+        _s4AmbientBloomLayer = [CAGradientLayer layer];
+        _s4AmbientBloomLayer.type = kCAGradientLayerRadial;
+        _s4AmbientBloomLayer.startPoint = CGPointMake(0.5, 0.5);
+        _s4AmbientBloomLayer.endPoint = CGPointMake(1.0, 1.0);
+        _s4AmbientBloomLayer.frame = CGRectMake(24, 14, 240, 48);
+        [_s4SilkContainer.layer addSublayer:_s4AmbientBloomLayer];
+
+        for (int i = 0; i < 4; i++) {
+            _s4SilkLayers[i] = [CAShapeLayer layer];
+            _s4SilkLayers[i].lineWidth = 1.35;
+            _s4SilkLayers[i].lineCap = kCALineCapRound;
+            [_s4SilkContainer.layer addSublayer:_s4SilkLayers[i]];
+        }
+
+        _s4JewelBadgeView = [[UIView alloc] initWithFrame:CGRectMake(24, 21, 240, 34)];
+        _s4JewelBadgeView.layer.cornerRadius = 17.0;
+        _s4JewelBadgeView.layer.borderWidth = 1.1;
+        _s4JewelBadgeView.userInteractionEnabled = NO;
+        [_s4SilkContainer addSubview:_s4JewelBadgeView];
+
+        _s4JewelDot = [[UIView alloc] initWithFrame:CGRectMake(12, 13, 8, 8)];
+        _s4JewelDot.layer.cornerRadius = 4.0;
+        _s4JewelDot.backgroundColor = [UIColor whiteColor];
+        [_s4JewelBadgeView addSubview:_s4JewelDot];
+
+        // 共用前景动态字幕与关闭按钮
+        _captionLabel = [[UILabel alloc] init];
+        _captionLabel.textColor = [UIColor whiteColor];
+        _captionLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightBold];
+        _captionLabel.textAlignment = NSTextAlignmentLeft;
+        _captionLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        _captionLabel.layer.shadowColor = [UIColor blackColor].CGColor;
+        _captionLabel.layer.shadowRadius = 4.0;
+        _captionLabel.layer.shadowOpacity = 0.85;
+        _captionLabel.layer.shadowOffset = CGSizeMake(0, 1);
+        _captionLabel.text = @"🎙️ 直接开口说话，轻点展开...";
+        [self addSubview:_captionLabel];
+
+        _closeButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        _closeButton.frame = CGRectMake(0, 0, 24, 24);
+        _closeButton.backgroundColor = [UIColor colorWithRed:0.06 green:0.09 blue:0.22 alpha:0.68];
+        _closeButton.layer.cornerRadius = 12.0;
+        _closeButton.layer.borderWidth = 1.1;
+        [_closeButton setTitle:@"✕" forState:UIControlStateNormal];
+        [_closeButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        _closeButton.titleLabel.font = [UIFont systemFontOfSize:10.5 weight:UIFontWeightHeavy];
+        [_closeButton addTarget:self action:@selector(handleCloseBtnTapped) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:_closeButton];
+
+        UITapGestureRecognizer *expandTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleExpandTap:)];
+        [self addGestureRecognizer:expandTap];
+    }
+    return self;
+}
+
+- (void)handleCloseBtnTapped {
+    if (self.onTapClose) self.onTapClose();
+}
+
+- (void)handleExpandTap:(UITapGestureRecognizer *)tap {
+    CGPoint pt = [tap locationInView:self];
+    if (CGRectContainsPoint(CGRectInset(self.closeButton.frame, -8, -8), pt)) {
+        [self handleCloseBtnTapped];
+        return;
+    }
+    if (self.onTapExpand) self.onTapExpand();
+}
+
+- (void) obtainThemeColors:(UIColor **)outC1 c2:(UIColor **)outC2 c3:(UIColor **)outC3 c4:(UIColor **)outC4 rim:(UIColor **)outRim pillBg:(UIColor **)outPillBg {
+    AGVisualTheme th = self.currentTheme;
+    if (th == AGVisualThemeLightLuxury) {
+        *outC1 = [UIColor colorWithRed:1.00 green:0.90 blue:0.64 alpha:1.0];
+        *outC2 = [UIColor colorWithRed:0.90 green:0.56 blue:0.22 alpha:1.0];
+        *outC3 = [UIColor colorWithRed:0.72 green:0.38 blue:0.11 alpha:1.0];
+        *outC4 = [UIColor whiteColor];
+        *outRim = [UIColor colorWithRed:0.99 green:0.86 blue:0.62 alpha:0.92];
+        *outPillBg = [UIColor colorWithRed:0.12 green:0.08 blue:0.06 alpha:0.78];
+    } else if (th == AGVisualThemeMinimalist) {
+        *outC1 = [UIColor colorWithRed:0.88 green:0.96 blue:1.00 alpha:1.0];
+        *outC2 = [UIColor colorWithRed:0.22 green:0.66 blue:1.00 alpha:1.0];
+        *outC3 = [UIColor colorWithRed:0.55 green:0.38 blue:0.96 alpha:1.0];
+        *outC4 = [UIColor whiteColor];
+        *outRim = [UIColor colorWithRed:0.82 green:0.94 blue:1.00 alpha:0.95];
+        *outPillBg = [UIColor colorWithRed:0.08 green:0.14 blue:0.34 alpha:0.72];
+    } else if (th == AGVisualThemeSakura) {
+        *outC1 = [UIColor colorWithRed:1.00 green:0.86 blue:0.93 alpha:1.0];
+        *outC2 = [UIColor colorWithRed:1.00 green:0.32 blue:0.65 alpha:1.0];
+        *outC3 = [UIColor colorWithRed:0.78 green:0.42 blue:0.98 alpha:1.0];
+        *outC4 = [UIColor whiteColor];
+        *outRim = [UIColor colorWithRed:1.00 green:0.78 blue:0.89 alpha:0.95];
+        *outPillBg = [UIColor colorWithRed:0.18 green:0.07 blue:0.14 alpha:0.76];
+    } else {
+        *outC1 = [UIColor colorWithRed:0.00 green:0.96 blue:1.00 alpha:1.0];
+        *outC2 = [UIColor colorWithRed:1.00 green:0.16 blue:0.52 alpha:1.0];
+        *outC3 = [UIColor colorWithRed:0.54 green:0.25 blue:0.98 alpha:1.0];
+        *outC4 = [UIColor colorWithRed:1.00 green:0.91 blue:0.52 alpha:1.0];
+        *outRim = [UIColor colorWithRed:0.00 green:0.96 blue:1.00 alpha:0.92];
+        *outPillBg = [UIColor colorWithRed:0.05 green:0.09 blue:0.26 alpha:0.76];
+    }
+}
+
+- (void)refreshStyleAndThemeLayout {
+    AGDeviceMetrics m = agComputeDeviceMetrics();
+    self.styleIndex = agMiniSummonStyle();
+    self.isTopPosition = agMiniSummonIsTop();
+    self.currentTheme = agCurrentVisualTheme();
+    self.hasDynamicIsland = m.hasDynamicIsland;
+
+    UIColor *c1, *c2, *c3, *c4, *rimCol, *pillBgCol;
+    [self obtainThemeColors:&c1 c2:&c2 c3:&c3 c4:&c4 rim:&rimCol pillBg:&pillBgCol];
+
+    [_s1CrystalBg applyTheme:self.currentTheme];
+    [_miniOrbView applyTheme:self.currentTheme];
+    [_miniWaveView applyTheme:self.currentTheme];
+    _closeButton.layer.borderColor = rimCol.CGColor;
+
+    _pillContainer.hidden = !(self.styleIndex == 1 || self.styleIndex == 2);
+    _s3HorizonContainer.hidden = (self.styleIndex != 3);
+    _s4SilkContainer.hidden = (self.styleIndex != 4);
+
+    if (self.styleIndex == 1 || self.styleIndex == 2) {
+        BOOL isStyle2 = (self.styleIndex == 2);
+        BOOL isNotchTopMerge = (isStyle2 && self.isTopPosition && !self.hasDynamicIsland);
+        CGFloat w = 254.0;
+        CGFloat h = isNotchTopMerge ? 56.0 : (isStyle2 ? 50.0 : 48.0);
+        CGFloat y = 0.0;
+        if (self.isTopPosition) {
+            if (isStyle2) {
+                y = self.hasDynamicIsland ? 8.0 : 0.0;
+            } else {
+                y = self.hasDynamicIsland ? 58.0 : (m.safeTop + 4.0);
+            }
+        } else {
+            y = m.screenH - m.bottomRestMargin - h - 4.0;
+        }
+        self.frame = CGRectMake((m.screenW - w) * 0.5, y, w, h);
+        _pillContainer.frame = self.bounds;
+        _s1CrystalBg.hidden = isStyle2;
+        _s2DropBlackBg.hidden = !isStyle2;
+
+        CGFloat topPad = isNotchTopMerge ? 8.0 : 0.0;
+        CGFloat contentH = h - topPad;
+
+        if (!isStyle2) {
+            _pillContainer.layer.cornerRadius = h * 0.5;
+            _s1CrystalBg.cornerRadius = h * 0.5;
+            _s1CrystalBg.frame = _pillContainer.bounds;
+            [_s1CrystalBg rebuildStaticGlassShellTextureIfNeeded];
+        } else {
+            _s2DropBlackBg.frame = _pillContainer.bounds;
+            UIRectCorner corners = isNotchTopMerge ? (UIRectCornerBottomLeft | UIRectCornerBottomRight) : UIRectCornerAllCorners;
+            UIBezierPath *outerP = [UIBezierPath bezierPathWithRoundedRect:_pillContainer.bounds byRoundingCorners:corners cornerRadii:CGSizeMake(25, 25)];
+            CAShapeLayer *clipM = [CAShapeLayer layer];
+            clipM.path = outerP.CGPath;
+            _pillContainer.layer.mask = clipM;
+
+            UIBezierPath *ringP = [UIBezierPath bezierPathWithRoundedRect:_pillContainer.bounds byRoundingCorners:corners cornerRadii:CGSizeMake(25, 25)];
+            UIBezierPath *innerP = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(_pillContainer.bounds, 3.2, 3.2) byRoundingCorners:corners cornerRadii:CGSizeMake(22, 22)];
+            [ringP appendPath:innerP];
+            ringP.usesEvenOddFillRule = YES;
+            _s2ConicMask.path = ringP.CGPath;
+            _s2ConicSpinner.colors = @[(__bridge id)c1.CGColor, (__bridge id)c2.CGColor, (__bridge id)c3.CGColor, (__bridge id)c4.CGColor, (__bridge id)c1.CGColor];
+            _s2BottomBloom.frame = CGRectMake(-20, h - 18, w + 40, 28);
+            _s2BottomBloom.colors = @[(__bridge id)[c1 colorWithAlphaComponent:0.55].CGColor, (__bridge id)[c2 colorWithAlphaComponent:0.55].CGColor, (__bridge id)[c3 colorWithAlphaComponent:0.55].CGColor];
+        }
+        if (!isStyle2) _pillContainer.layer.mask = nil;
+
+        _miniOrbView.frame = CGRectMake(8, topPad + (contentH - 32.0) * 0.5, 32, 32);
+        _miniWaveView.frame = CGRectMake(40, topPad + 2.0, w - 74.0, contentH - 4.0);
+        _captionLabel.frame = CGRectMake(46, topPad, w - 80.0, contentH);
+        _captionLabel.textAlignment = NSTextAlignmentLeft;
+        _closeButton.frame = CGRectMake(w - 31.0, topPad + (contentH - 24.0) * 0.5, 24, 24);
+    } else if (self.styleIndex == 3) {
+        // 款式 ③：无界北极光海浪天际线 (自动识别顶部/底部 + 灵动岛/刘海)
+        CGFloat h = 112.0;
+        CGFloat y = self.isTopPosition ? 0.0 : (m.screenH - h);
+        self.frame = CGRectMake(0, y, m.screenW, h);
+        _s3HorizonContainer.frame = self.bounds;
+
+        if (self.isTopPosition) {
+            _s3IslandHaloLayer.hidden = NO;
+            CGFloat haloW = self.hasDynamicIsland ? 156.0 : 186.0;
+            CGFloat haloY = self.hasDynamicIsland ? 4.0 : -8.0;
+            _s3IslandHaloLayer.frame = CGRectMake((m.screenW - haloW) * 0.5, haloY, haloW, 44.0);
+            _s3IslandHaloLayer.colors = @[(__bridge id)[UIColor whiteColor].CGColor, (__bridge id)[c1 colorWithAlphaComponent:0.75].CGColor, (__bridge id)[c2 colorWithAlphaComponent:0.42].CGColor, (__bridge id)[UIColor clearColor].CGColor];
+
+            _s3AuroraCurtainLayer.frame = CGRectMake(-m.screenW * 0.15, -26.0, m.screenW * 1.3, 102.0);
+            _s3AuroraCurtainLayer.colors = @[(__bridge id)[c1 colorWithAlphaComponent:0.62].CGColor, (__bridge id)[c3 colorWithAlphaComponent:0.42].CGColor, (__bridge id)[UIColor clearColor].CGColor];
+
+            CGFloat capY = self.hasDynamicIsland ? 44.0 : 32.0;
+            _s3CaptionPillBg.frame = CGRectMake((m.screenW - 236.0) * 0.5, capY, 236.0, 28.0);
+            _captionLabel.frame = CGRectMake((m.screenW - 220.0) * 0.5, capY, 220.0, 28.0);
+            _captionLabel.textAlignment = NSTextAlignmentCenter;
+            _closeButton.frame = CGRectMake(m.screenW - 38.0, capY + 2.0, 24.0, 24.0);
+        } else {
+            _s3IslandHaloLayer.hidden = YES;
+            _s3AuroraCurtainLayer.frame = CGRectMake(-m.screenW * 0.15, h - 78.0, m.screenW * 1.3, 102.0);
+            _s3AuroraCurtainLayer.colors = @[(__bridge id)[c1 colorWithAlphaComponent:0.62].CGColor, (__bridge id)[c3 colorWithAlphaComponent:0.42].CGColor, (__bridge id)[UIColor clearColor].CGColor];
+
+            CGFloat capY = h - 54.0;
+            _s3CaptionPillBg.frame = CGRectMake((m.screenW - 236.0) * 0.5, capY, 236.0, 28.0);
+            _captionLabel.frame = CGRectMake((m.screenW - 220.0) * 0.5, capY, 220.0, 28.0);
+            _captionLabel.textAlignment = NSTextAlignmentCenter;
+            _closeButton.frame = CGRectMake(m.screenW - 38.0, capY + 2.0, 24.0, 24.0);
+        }
+    } else if (self.styleIndex == 4) {
+        // 款式 ④：3D 全息丝绸莫比乌斯光带
+        CGFloat w = 292.0;
+        CGFloat h = 76.0;
+        CGFloat y = self.isTopPosition ? (self.hasDynamicIsland ? 48.0 : (m.safeTop - 2.0)) : (m.screenH - m.bottomRestMargin - h + 4.0);
+        self.frame = CGRectMake((m.screenW - w) * 0.5, y, w, h);
+        _s4SilkContainer.frame = self.bounds;
+        _s4AmbientBloomLayer.colors = @[(__bridge id)[c1 colorWithAlphaComponent:0.48].CGColor, (__bridge id)[c2 colorWithAlphaComponent:0.32].CGColor, (__bridge id)[UIColor clearColor].CGColor];
+
+        _s4JewelBadgeView.frame = CGRectMake(22.0, 21.0, w - 44.0, 34.0);
+        _s4JewelBadgeView.backgroundColor = pillBgCol;
+        _s4JewelBadgeView.layer.borderColor = rimCol.CGColor;
+        _s4JewelDot.layer.shadowColor = c1.CGColor;
+        _s4JewelDot.layer.shadowRadius = 6.0;
+        _s4JewelDot.layer.shadowOpacity = 1.0;
+
+        _captionLabel.frame = CGRectMake(48.0, 21.0, w - 104.0, 34.0);
+        _captionLabel.textAlignment = NSTextAlignmentLeft;
+        _closeButton.frame = CGRectMake(w - 50.0, 26.0, 24.0, 24.0);
+    }
+}
+
+- (void)stepAnimationWithPhase:(CGFloat)phase amplitude:(CGFloat)amp {
+    if (self.hidden) return;
+    UIColor *c1, *c2, *c3, *c4, *rimCol, *pillBgCol;
+    [self obtainThemeColors:&c1 c2:&c2 c3:&c3 c4:&c4 rim:&rimCol pillBg:&pillBgCol];
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+
+    if (self.styleIndex == 1 || self.styleIndex == 2) {
+        [_s1CrystalBg stepAnimationWithPhase:phase amplitude:amp];
+        [_miniOrbView stepAnimationWithPhase:phase amplitude:amp];
+        [_miniWaveView stepAnimationWithPhase:phase amplitude:amp];
+        if (self.styleIndex == 2) {
+            _s2ConicSpinner.transform = CATransform3DMakeRotation(fmod(phase * 0.55, M_PI * 2.0), 0, 0, 1.0);
+        }
+    } else if (self.styleIndex == 3) {
+        CGFloat w = self.bounds.size.width;
+        CGFloat h = self.bounds.size.height;
+        NSArray<UIColor *> *wCols = @[c3, c2, c1];
+        CGFloat freqs[3] = {1.6, 2.2, 1.9};
+        CGFloat speeds[3] = {0.7, -1.1, 1.0};
+        CGFloat offs[3] = {0.0, 1.8, 3.4};
+        CGFloat baseAmp = (10.0 + amp * 12.0);
+
+        for (int i = 0; i < 3; i++) {
+            UIBezierPath *openP = [UIBezierPath bezierPath];
+            CGFloat baseY = self.isTopPosition ? (self.hasDynamicIsland ? 62.0 : 50.0) : (h * 0.62);
+            for (CGFloat x = 0; x <= w; x += 5.0) {
+                CGFloat n = x / MAX(1.0, w);
+                CGFloat env = 0.25 + 0.75 * sin(n * M_PI);
+                CGFloat y = baseY;
+                if (self.isTopPosition) {
+                    CGFloat gaussian = exp(-pow((n - 0.5) * (self.hasDynamicIsland ? 4.5 : 3.2), 2.0));
+                    CGFloat dip = self.hasDynamicIsland ? (10.0 * gaussian) : (-6.0 * gaussian);
+                    y = baseY + dip + sin(n * M_PI * freqs[i] + phase * speeds[i] + offs[i]) * baseAmp * env;
+                } else {
+                    y = baseY - sin(n * M_PI * freqs[i] + phase * speeds[i] + offs[i]) * baseAmp * env;
+                }
+                if (x == 0) [openP moveToPoint:CGPointMake(x, y)];
+                else [openP addLineToPoint:CGPointMake(x, y)];
+            }
+            UIBezierPath *closedP = [openP copy];
+            if (self.isTopPosition) {
+                [closedP addLineToPoint:CGPointMake(w, 0)];
+                [closedP addLineToPoint:CGPointMake(0, 0)];
+            } else {
+                [closedP addLineToPoint:CGPointMake(w, h)];
+                [closedP addLineToPoint:CGPointMake(0, h)];
+            }
+            [closedP closePath];
+            _s3WaveStrokes[i].path = openP.CGPath;
+            _s3WaveStrokes[i].strokeColor = [wCols[i] colorWithAlphaComponent:0.92].CGColor;
+            _s3WaveFills[i].path = closedP.CGPath;
+            _s3WaveFills[i].fillColor = [wCols[i] colorWithAlphaComponent:0.20].CGColor;
+        }
+
+        for (int i = 0; i < 18; i++) {
+            CGPoint p = _s3StarPos[i];
+            if (self.isTopPosition) {
+                p.y += _s3StarSpeed[i];
+                if (p.y > h - 8.0) { p.y = 4.0; p.x = 24.0 + arc4random_uniform((uint32_t)MAX(100, w - 48.0)); }
+            } else {
+                p.y -= _s3StarSpeed[i];
+                if (p.y < 12.0) { p.y = h - 4.0; p.x = 24.0 + arc4random_uniform((uint32_t)MAX(100, w - 48.0)); }
+            }
+            _s3StarPos[i] = p;
+            _s3StarLayers[i].position = p;
+            CGFloat twinkle = 0.25 + 0.75 * fabs(sin(phase * 1.6 + i));
+            _s3StarLayers[i].opacity = (float)twinkle;
+        }
+    } else if (self.styleIndex == 4) {
+        CGFloat w = self.bounds.size.width;
+        CGFloat h = self.bounds.size.height;
+        CGFloat midY = h * 0.50;
+        NSArray<UIColor *> *sCols = @[c1, c2, c3, c4];
+        CGFloat freqs[4] = {1.7, 2.1, 1.4, 2.5};
+        CGFloat speeds[4] = {1.05, -1.15, 0.85, -0.95};
+        CGFloat amps[4] = {20.0, 17.0, 22.0, 13.0};
+        CGFloat offs[4] = {0.0, 1.9, 3.8, 5.1};
+        CGFloat ampBoost = 1.0 + amp * 0.45;
+
+        for (int i = 0; i < 4; i++) {
+            UIBezierPath *silkP = [UIBezierPath bezierPath];
+            for (CGFloat x = 8.0; x <= w - 8.0; x += 5.0) {
+                CGFloat n = (x - 8.0) / MAX(1.0, w - 16.0);
+                CGFloat env = pow(sin(n * M_PI), 1.45);
+                CGFloat y1 = midY - sin(n * M_PI * freqs[i] + phase * speeds[i] + offs[i]) * (amps[i] * ampBoost) * env;
+                if (x == 8.0) [silkP moveToPoint:CGPointMake(x, y1)];
+                else [silkP addLineToPoint:CGPointMake(x, y1)];
+            }
+            for (CGFloat x = w - 8.0; x >= 8.0; x -= 5.0) {
+                CGFloat n = (x - 8.0) / MAX(1.0, w - 16.0);
+                CGFloat env = pow(sin(n * M_PI), 1.45);
+                CGFloat y2 = midY + cos(n * M_PI * freqs[i] - phase * speeds[i] * 0.9 + offs[i]) * (amps[i] * 0.62 * ampBoost) * env;
+                [silkP addLineToPoint:CGPointMake(x, y2)];
+            }
+            [silkP closePath];
+            _s4SilkLayers[i].path = silkP.CGPath;
+            _s4SilkLayers[i].strokeColor = [sCols[i] colorWithAlphaComponent:0.90].CGColor;
+            _s4SilkLayers[i].fillColor = [sCols[i] colorWithAlphaComponent:0.24].CGColor;
+        }
+    }
+
+    [CATransaction commit];
+}
 @end
 
 // ==================== 4. 带内存静态缓存的 3D 深邃球面镜液态玻璃圆钮渲染器 ====================
@@ -5974,15 +6472,23 @@ static void agFetchCloudModelsForTab(AGConfigTab tab, NSString *endpoint, NSStri
 // ==================== 1. 防穿透窗口 ====================
 @interface GeminiPassthroughWindow : UIWindow
 @property (nonatomic, strong) UIView *capsuleWrapper;
+@property (nonatomic, weak) UIView *miniSummonWrapper;
 @property (nonatomic, assign) BOOL lockFullScreenTouch;
 @end
 
 @implementation GeminiPassthroughWindow
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    if (self.hidden || self.alpha < 0.05 || !self.capsuleWrapper) return NO;
+    if (self.hidden || self.alpha < 0.05) return NO;
     if (self.lockFullScreenTouch) return YES;
-    CGPoint p = [self convertPoint:point toView:self.capsuleWrapper];
-    return [self.capsuleWrapper pointInside:p withEvent:event];
+    if (self.miniSummonWrapper && !self.miniSummonWrapper.hidden && self.miniSummonWrapper.alpha > 0.05) {
+        CGPoint mp = [self convertPoint:point toView:self.miniSummonWrapper];
+        if ([self.miniSummonWrapper pointInside:mp withEvent:event]) return YES;
+    }
+    if (self.capsuleWrapper && !self.capsuleWrapper.hidden && self.capsuleWrapper.alpha > 0.05) {
+        CGPoint p = [self convertPoint:point toView:self.capsuleWrapper];
+        return [self.capsuleWrapper pointInside:p withEvent:event];
+    }
+    return NO;
 }
 - (BOOL)_canBecomeKeyWindow { return YES; }
 @end
@@ -6633,6 +7139,9 @@ static void agSimulateScreenSwipe(CGPoint startPt, CGPoint endPt, NSTimeInterval
 @property (nonatomic, strong) AGCardBgCanvasView *cardBgCanvas;
 @property (nonatomic, strong) AGOrbCanvasView *orbCanvas;
 @property (nonatomic, strong) AGWaveCanvasView *waveCanvas;
+@property (nonatomic, strong) AGMiniSummonCanvasView *miniSummonView;
+@property (nonatomic, assign) BOOL isMiniSummonActive;
+- (void)expandMiniSummonToOriginalMainCard;
 
 // ✨ 顶部 3D 灵动球 + 品牌渐变字 + 胶囊徽章 + 5柱声波
 @property (nonatomic, strong) UIView *aiOrbView;
@@ -6836,6 +7345,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         [mgr applyMarqueeThemeColors:agCurrentVisualTheme()];
         [mgr stepMarqueeAnimationWithPhase:mgr.wavePhase voiceAmp:mgr.currentVoiceAmplitude];
         [mgr.cardBgCanvas rebuildStaticGlassShellTextureIfNeeded];
+        if (mgr.miniSummonView) [mgr.miniSummonView refreshStyleAndThemeLayout];
     });
 }
 
@@ -8341,6 +8851,42 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
     [self setupEmbeddedModelPickerInView:content width:capsuleWidth height:capsuleHeight];
     [self refreshBottomBarLayoutForActiveModes];
+
+    // 挂载四大唤出小胶囊形态容器（原主界面 wrapper 100% 不改动）
+    self.miniSummonView = [[AGMiniSummonCanvasView alloc] initWithFrame:CGRectMake(0, 0, 254, 48)];
+    self.miniSummonView.hidden = YES;
+    __weak typeof(self) weakSelf = self;
+    self.miniSummonView.onTapExpand = ^{
+        [weakSelf expandMiniSummonToOriginalMainCard];
+    };
+    self.miniSummonView.onTapClose = ^{
+        [weakSelf dismissOverlay];
+    };
+    [rootVC.view addSubview:self.miniSummonView];
+    self.overlayWindow.miniSummonWrapper = self.miniSummonView;
+}
+
+- (void)expandMiniSummonToOriginalMainCard {
+    if (!self.isMiniSummonActive) return;
+    self.isMiniSummonActive = NO;
+    [self.impactHaptic impactOccurred];
+
+    [UIView animateWithDuration:0.20 animations:^{
+        self.miniSummonView.alpha = 0.0;
+        self.miniSummonView.transform = CGAffineTransformMakeScale(0.88, 0.88);
+    } completion:^(BOOL finished) {
+        self.miniSummonView.hidden = YES;
+        self.miniSummonView.transform = CGAffineTransformIdentity;
+    }];
+
+    self.overlayWindow.capsuleWrapper.hidden = NO;
+    self.overlayWindow.capsuleWrapper.alpha = 0.0;
+    self.overlayWindow.capsuleWrapper.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(0.92, 0.92), CGAffineTransformMakeTranslation(0, 28));
+    [UIView animateWithDuration:0.38 delay:0 usingSpringWithDamping:0.80 initialSpringVelocity:0.9 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction animations:^{
+        self.screenDimBlurView.alpha = 0.36;
+        self.overlayWindow.capsuleWrapper.alpha = 1.0;
+        self.overlayWindow.capsuleWrapper.transform = CGAffineTransformIdentity;
+    } completion:nil];
 }
 
 - (UIButton *)createModeCircleButtonWithTitle:(NSString *)title
@@ -13928,6 +14474,17 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     [self.waveCanvas stepAnimationWithPhase:self.wavePhase amplitude:self.currentVoiceAmplitude];
     [self stepMarqueeAnimationWithPhase:self.wavePhase voiceAmp:self.currentVoiceAmplitude];
 
+    if (self.isMiniSummonActive && self.miniSummonView && !self.miniSummonView.hidden) {
+        [self.miniSummonView stepAnimationWithPhase:self.wavePhase amplitude:self.currentVoiceAmplitude];
+        if (self.currentVoiceQueryBuffer.length > 0) {
+            self.miniSummonView.captionLabel.text = [NSString stringWithFormat:@"🗣️ “%@”", self.currentVoiceQueryBuffer];
+        } else if (self.accumulatedReplyText.length > 0) {
+            NSString *cleanRep = [self.accumulatedReplyText stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+            if (cleanRep.length > 22) cleanRep = [cleanRep substringFromIndex:cleanRep.length - 22];
+            self.miniSummonView.captionLabel.text = [NSString stringWithFormat:@"🔊 %@", cleanRep];
+        }
+    }
+
     NSArray<NSNumber *> *idleScales = @[@(0.55), @(0.85), @(0.62), @(0.88), @(0.55)];
     NSArray<NSNumber *> *weights    = @[@(0.65), @(1.00), @(0.82), @(0.96), @(0.65)];
     for (int i = 0; i < self.waveBars.count; i++) {
@@ -13948,7 +14505,6 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
     [CATransaction commit];
 }
-
 
 - (void)triggerFromSystemHook {
     agWakeScreenBacklightIfNeeded();
@@ -13999,11 +14555,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         self.currentKeyboardHeight = 0.0;
         self.currentCapsuleHeight = m.defaultCapsuleH;
 
-        // 关键修复 1：在计算和设置 frame 之前，必须先将上次关闭动画残留的 transform 归零，彻底杜绝 UIKit 首帧几何尺寸失真放大！
         self.overlayWindow.capsuleWrapper.transform = CGAffineTransformIdentity;
         self.cardBlurView.transform = CGAffineTransformIdentity;
 
-        // 关键修复 2：直接按紧凑正常高度 (defaultCapsuleH) 同步完成首帧布局，打开第 0 秒就是正常大小，绝不先铺满再缩回！
         [self adjustCapsuleHeightTo:m.defaultCapsuleH animated:NO];
         [self.overlayWindow.capsuleWrapper layoutIfNeeded];
         [self.cardBgCanvas setNeedsLayout];
@@ -14017,7 +14571,6 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         [self.overlayWindow makeKeyWindow];
         [self startVisualAnimations];
 
-        // 预先设置好初始提示文案，让首帧画面零延迟呈现
         BOOL hasKey = (agAPIKeyForTab(self.activeModeTab).length >= 5);
         if (!hasKey) {
             self.subStatusLabel.text = @"⚠️ 当前模式未配置 API Key";
@@ -14028,22 +14581,46 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             self.responseTextView.text = @"“请在下方输入框打字提问...”";
         }
 
-        // 丝滑弹簧入场动画（卡片上浮放大 + 全屏紫晕毛玻璃渐显）
-        self.screenDimBlurView.alpha = 0.0;
-        self.overlayWindow.capsuleWrapper.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(0.92, 0.92), CGAffineTransformMakeTranslation(0, 36));
-        [UIView animateWithDuration:0.38 delay:0 usingSpringWithDamping:0.80 initialSpringVelocity:0.9 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction animations:^{
-            self.overlayWindow.alpha = 1.0;
-            self.screenDimBlurView.alpha = 0.36;
-            self.overlayWindow.capsuleWrapper.transform = CGAffineTransformIdentity;
-        } completion:nil];
+        NSInteger summonStyle = agMiniSummonStyle();
+        if (summonStyle > 0 && self.miniSummonView) {
+            // 唤出形态 ①~④：显示小胶囊/水滴/天际线/丝绸，隐藏原主卡片与压暗遮罩，屏幕 95% 完全穿透！
+            self.isMiniSummonActive = YES;
+            [self.miniSummonView refreshStyleAndThemeLayout];
+            self.miniSummonView.captionLabel.text = hasKey ? @"🎙️ 直接开口说话，轻点展开..." : @"⚠️ 未配 API Key (轻点展开)";
+            self.miniSummonView.hidden = NO;
+            self.miniSummonView.alpha = 0.0;
+            CGFloat offsetY = agMiniSummonIsTop() ? -28.0 : 28.0;
+            self.miniSummonView.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(0.86, 0.86), CGAffineTransformMakeTranslation(0, offsetY));
 
-        // 关键顺畅度优化：错峰 0.08 秒（待弹窗动画顺滑起跳后）再异步初始化相机与语音连接，彻底消除唤出瞬间的掉帧！
+            self.overlayWindow.capsuleWrapper.hidden = YES;
+            self.screenDimBlurView.alpha = 0.0;
+
+            [UIView animateWithDuration:0.38 delay:0 usingSpringWithDamping:0.78 initialSpringVelocity:0.9 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction animations:^{
+                self.overlayWindow.alpha = 1.0;
+                self.miniSummonView.alpha = 1.0;
+                self.miniSummonView.transform = CGAffineTransformIdentity;
+            } completion:nil];
+        } else {
+            // 传统模式：直接弹出原版大主界面
+            self.isMiniSummonActive = NO;
+            self.miniSummonView.hidden = YES;
+            self.overlayWindow.capsuleWrapper.hidden = NO;
+            self.overlayWindow.capsuleWrapper.alpha = 1.0;
+            self.screenDimBlurView.alpha = 0.0;
+            self.overlayWindow.capsuleWrapper.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(0.92, 0.92), CGAffineTransformMakeTranslation(0, 36));
+            [UIView animateWithDuration:0.38 delay:0 usingSpringWithDamping:0.80 initialSpringVelocity:0.9 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction animations:^{
+                self.overlayWindow.alpha = 1.0;
+                self.screenDimBlurView.alpha = 0.36;
+                self.overlayWindow.capsuleWrapper.transform = CGAffineTransformIdentity;
+            } completion:nil];
+        }
+
         if (hasKey) {
             AGConfigTab launchTab = self.activeModeTab;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (self.isDismissed || self.overlayWindow.hidden) return;
                 if (launchTab == AGConfigTabVideoAI) {
-                    [self startCameraSession];
+                    if (!self.isMiniSummonActive) [self startCameraSession];
                     [self startAdaptiveVoiceSessionForTab:AGConfigTabVideoAI];
                 } else if (launchTab == AGConfigTabNativeLive) {
                     [self startAdaptiveVoiceSessionForTab:AGConfigTabNativeLive];
@@ -14061,6 +14638,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 - (void)dismissOverlay {
     dispatch_async(dispatch_get_main_queue(), ^{
         self.isDismissed = YES;
+        self.isMiniSummonActive = NO;
         [self stopAllVoiceEngines];
         if (self.isVideoChatActive) {
             [self stopCameraSession];
@@ -14078,10 +14656,20 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionCurveEaseIn animations:^{
             self.overlayWindow.alpha = 0.0;
             self.screenDimBlurView.alpha = 0.0;
-            self.overlayWindow.capsuleWrapper.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(0.94, 0.94), CGAffineTransformMakeTranslation(0, 24));
+            if (self.miniSummonView && !self.miniSummonView.hidden) {
+                self.miniSummonView.alpha = 0.0;
+                self.miniSummonView.transform = CGAffineTransformMakeScale(0.88, 0.88);
+            } else {
+                self.overlayWindow.capsuleWrapper.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(0.94, 0.94), CGAffineTransformMakeTranslation(0, 24));
+            }
         } completion:^(BOOL finished) {
             self.overlayWindow.hidden = YES;
+            self.overlayWindow.capsuleWrapper.hidden = NO;
             self.overlayWindow.capsuleWrapper.transform = CGAffineTransformIdentity;
+            if (self.miniSummonView) {
+                self.miniSummonView.hidden = YES;
+                self.miniSummonView.transform = CGAffineTransformIdentity;
+            }
             [self stopVisualAnimations];
         }];
     });
@@ -14993,7 +15581,36 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
     [marqueeEnableSwitch addTarget:self action:@selector(onMarqueeSwitchChanged:) forControlEvents:UIControlEventValueChanged];
     [marqueeSwitchCard addSubview:marqueeEnableSwitch];
 
-    y += 70.0;
+    y += 68.0;
+
+    // ✨ 新增：唤出灵动形态（①水晶/②水滴/③极光/④丝绸）与（底部/顶部）位置选择卡片
+    UIView *miniSummonCard = [[UIView alloc] initWithFrame:CGRectMake(pad, y, cardW, 114)];
+    miniSummonCard.backgroundColor = [UIColor colorWithRed:0.13 green:0.12 blue:0.22 alpha:1.0];
+    miniSummonCard.layer.cornerRadius = 16.0;
+    miniSummonCard.layer.borderWidth = 0.8;
+    miniSummonCard.layer.borderColor = [UIColor colorWithRed:0.00 green:0.92 blue:1.00 alpha:0.38].CGColor;
+    [self.scrollView addSubview:miniSummonCard];
+
+    UILabel *msTitleLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 9, cardW - 28, 20)];
+    msTitleLbl.text = @"✨ 唤出灵动形态与停靠位置 (轻点即展开原主界面)";
+    msTitleLbl.textColor = [UIColor whiteColor];
+    msTitleLbl.font = [UIFont boldSystemFontOfSize:13.0];
+    [miniSummonCard addSubview:msTitleLbl];
+
+    UISegmentedControl *styleSeg = [[UISegmentedControl alloc] initWithItems:@[@"①水晶胶囊", @"②极光水滴", @"③极光天际", @"④全息丝绸", @"大界面"]];
+    styleSeg.frame = CGRectMake(12, 34, cardW - 24, 30);
+    NSInteger savedStyle = agMiniSummonStyle();
+    styleSeg.selectedSegmentIndex = (savedStyle >= 1 && savedStyle <= 4) ? (savedStyle - 1) : 4;
+    [styleSeg addTarget:self action:@selector(onMiniSummonStyleChanged:) forControlEvents:UIControlEventValueChanged];
+    [miniSummonCard addSubview:styleSeg];
+
+    UISegmentedControl *posSeg = [[UISegmentedControl alloc] initWithItems:@[@"👇 停在底部悬浮", @"👆 停在顶部 (自动适配灵动岛/刘海)"]];
+    posSeg.frame = CGRectMake(12, 72, cardW - 24, 30);
+    posSeg.selectedSegmentIndex = agMiniSummonIsTop() ? 1 : 0;
+    [posSeg addTarget:self action:@selector(onMiniSummonPosChanged:) forControlEvents:UIControlEventValueChanged];
+    [miniSummonCard addSubview:posSeg];
+
+    y += 124.0;
 
     UILabel *tabHeader = [[UILabel alloc] initWithFrame:CGRectMake(pad + 4, y, cardW, 20)];
     tabHeader.text = @"🛠️ 四大独立功能模块 (独立 API·手风琴折叠)：";
@@ -15467,6 +16084,32 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
         }
     }
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.angelguardian.prefsChanged"), NULL, NULL, YES);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)kAGPrefsChangedNotification, NULL, NULL, YES);
+}
+
+- (void)onMiniSummonStyleChanged:(UISegmentedControl *)seg {
+    NSInteger idx = seg.selectedSegmentIndex;
+    NSInteger styleVal = (idx >= 0 && idx <= 3) ? (idx + 1) : 0;
+    NSMutableDictionary *prefs = loadGeminiPrefs();
+    prefs[@"AG_MiniSummon_Style"] = @(styleVal);
+    gIsSavingFromSettingsUI = YES;
+    saveGeminiPrefs(prefs);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        gIsSavingFromSettingsUI = NO;
+    });
+    reloadGeminiPrefsCache();
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)kAGPrefsChangedNotification, NULL, NULL, YES);
+}
+
+- (void)onMiniSummonPosChanged:(UISegmentedControl *)seg {
+    NSMutableDictionary *prefs = loadGeminiPrefs();
+    prefs[@"AG_MiniSummon_Position"] = @(seg.selectedSegmentIndex);
+    gIsSavingFromSettingsUI = YES;
+    saveGeminiPrefs(prefs);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        gIsSavingFromSettingsUI = NO;
+    });
+    reloadGeminiPrefsCache();
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)kAGPrefsChangedNotification, NULL, NULL, YES);
 }
 
