@@ -42,7 +42,7 @@
 | **E盘单文件归档** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调.txt` | 钉钉可打卡版本完整代码备份 |
 | **远端 Git 仓库** | `https://github.com/jianchengw952-source/TimeGuardianSiri123.git` | GitHub 远程仓库（分支：`main`） |
 | **当前 Git Commit** | `1b0135e` | `feat(stealth): eliminate CLSimulationManager and CLLocationSourceInformation static metadata, dynamically register sensitive anti-detection hooks` |
-| **GitHub Actions 运行记录** | Run #138 (ID: `40382937117`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
+| **GitHub Actions 运行记录** | Run #140 (ID: `40385010967`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
 
 ---
 
@@ -154,6 +154,32 @@
   - RootHide (arm64e): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb` (274,956 字节, SHA256: `10FCEB86D563222498C033C8540CAD65DE9756DADC25D5D25A6CA4942132D858`)
 
 
+
+
+### Run #140 验证与交付记录 (2026-10-27 03:16)
+- **GitHub Actions Run ID**: `40385010967` (Run #140, 双架构 build 成功)
+- **Commit**: `bf09c51` (`fix(touch): add CALayer cross-process hit-testing disabling and hide screenDimBlurView in mini summon`)
+- **核心升级特性**：
+  1. **底层 CALayer 跨进程穿透分类与递归禁用**：声明 `CALayer (AGHitTestPassthrough)` 分类并实现 `agDisableLayerHitTestingRecursively`，对图层树递归设置 `allowsHitTesting:NO` 与 `hitTestsAsOpaque:NO`；
+  2. **灵动形态四大容器彻底穿透**：在 `AGMiniSummonCanvasView` 中将图层 `hitTestsAsOpaque:NO`，并递归禁用款式 ③（极光天际线容器 `_s3HorizonContainer`）与款式 ④（全息丝绸容器 `_s4SilkContainer`）的图层触摸命中；
+  3. **CAWindowServer 跨进程底板脱敏**：在 `setupWindowIfNeeded` 中向 `backboardd` 声明窗口底板、根控制器图层 `hitTestsAsOpaque:NO`，并对全屏暗色毛玻璃与 1000×1000 跑马灯外发光容器递归排除触摸命中；
+  4. **全屏毛玻璃移出渲染树**：在小胶囊悬浮唤起状态下将 `screenDimBlurView.hidden = YES`，从根源上消除对底层触摸事件的任何可能截获；在展开为主界面或传统大卡片模式下恢复 `hidden = NO`。
+- **产物文件校验**：
+  - **Rootless (arm64)**: `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
+    - 大小: **421,120 字节**
+    - SHA256: `76B976C79E7584BF44DDDB685E373AD63C4B924898CA8EE9F079BA56D11D1C77`
+    - 内部归档: 纯 `xz` (`debian-binary`, `control.tar.xz`, `data.tar.xz`)
+  - **RootHide (arm64e)**: `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
+    - 大小: **275,980 字节**
+    - SHA256: `C65C89BFA480192897B1F577E08B1157C17939625E8257935743904FCCB47981`
+    - 内部归档: 纯 `xz` (`debian-binary`, `control.tar.xz`, `data.tar.xz`)
+- **全镜像源与分发路径同步**：
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
 
 ### Run #138 验证与交付记录 (2026-10-27 03:04)
 - **GitHub Actions Run ID**: `40382937117` (Run #138, 双架构 build 成功)
