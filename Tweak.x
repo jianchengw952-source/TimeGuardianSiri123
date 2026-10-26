@@ -3356,12 +3356,10 @@ static void agSettingsPanelTickDarwinCallback(CFNotificationCenterRef center, vo
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    reloadGeminiPrefsCache();
     NSDictionary *p = agReadOnlyPrefs();
     BOOL isActive = NO;
     double kLat = 0.0, kLon = 0.0, kSpeed = 0.0;
     agReadSpoofStateFromKernel(&isActive, NULL, NULL, NULL, &kLat, &kLon, NULL, &kSpeed, NULL);
-    // 关键修复：直接读取最新保存的配置字典，绕过 0.20s 内核缓存延迟，打开总开关瞬间防检测开关立即亮起可点
     if (p[@"AG_LocSpoof_Active"] != nil) {
         isActive = [p[@"AG_LocSpoof_Active"] boolValue];
     }
@@ -18529,16 +18527,9 @@ static void agInstallAntiDetectionCHooksIfNeeded(void) {
     if (gHasInstalledCHooks) return;
     gHasInstalledCHooks = YES;
 
+    // 仅挂钩函数体大于 64 字节的标准 C 函数，严禁对 8~12 字节的极短 syscall/objc 桩函数 (access / class_getImageName) 使用 MSHookFunction 防止 16 字节跳板越界引发 CPU 100% 死循环发烫！
     MSHookFunction((void *)dladdr, (void *)hooked_dladdr, (void **)&orig_dladdr);
     MSHookFunction((void *)_dyld_get_image_name, (void *)hooked_dyld_get_image_name, (void **)&orig_dyld_get_image_name);
-    MSHookFunction((void *)class_getImageName, (void *)hooked_class_getImageName, (void **)&orig_class_getImageName);
-    MSHookFunction((void *)objc_copyImageNames, (void *)hooked_objc_copyImageNames, (void **)&orig_objc_copyImageNames);
-    MSHookFunction((void *)access, (void *)hooked_access, (void **)&orig_access);
-
-    void *dyldPathSym = dlsym(RTLD_DEFAULT, "dyld_image_path_containing_address");
-    if (dyldPathSym) {
-        MSHookFunction(dyldPathSym, (void *)hooked_dyld_image_path_containing_address, (void **)&orig_dyld_image_path_containing_address);
-    }
 
     void *snHandle = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY);
     if (snHandle) {
