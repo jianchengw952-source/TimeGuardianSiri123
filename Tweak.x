@@ -16956,7 +16956,7 @@ static AVAudioPCMBuffer *agExtractReplayKitAudioAndDownsample16k(CMSampleBufferR
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
     os_unfair_lock_lock(&_lock);
-    AGStreamTranslateDelegate *del = self.taskMap[@(task.taskIdentifier)];
+    AGStreamTranslateDelegate *del = self.taskMap[@(dataTask.taskIdentifier)];
     os_unfair_lock_unlock(&_lock);
     if (del) {
         [del URLSession:session dataTask:dataTask didReceiveData:data];
@@ -16965,7 +16965,7 @@ static AVAudioPCMBuffer *agExtractReplayKitAudioAndDownsample16k(CMSampleBufferR
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
     os_unfair_lock_lock(&_lock);
-    AGStreamTranslateDelegate *del = self.taskMap[@(dataTask.taskIdentifier)];
+    AGStreamTranslateDelegate *del = self.taskMap[@(task.taskIdentifier)];
     [self.taskMap removeObjectForKey:@(task.taskIdentifier)];
     os_unfair_lock_unlock(&_lock);
     if (del) {
@@ -17988,7 +17988,7 @@ static void agResetRealtimeTranslationState(void) {
 }
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
-    NSMutableDictionary *ctx = self.pipelineTasksMap[@(task.taskIdentifier)];
+    NSMutableDictionary *ctx = self.pipelineTasksMap[@(dataTask.taskIdentifier)];
     if (!ctx || !data || data.length == 0) return;
 
     NSMutableData *rawData = ctx[@"rawData"];
@@ -18033,8 +18033,7 @@ static void agResetRealtimeTranslationState(void) {
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
-    NSMutableDictionary *ctx = self.pipelineTasksMap[@(dataTask.taskIdentifier)];
-    if (!ctx) ctx = self.pipelineTasksMap[@(task.taskIdentifier)];
+    NSMutableDictionary *ctx = self.pipelineTasksMap[@(task.taskIdentifier)];
     if (!ctx) return;
     [self.pipelineTasksMap removeObjectForKey:@(task.taskIdentifier)];
     if (error && error.code == NSURLErrorCancelled) return;
