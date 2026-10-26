@@ -338,6 +338,9 @@ static NSString *agLiveDiagnosticLogPath(void) {
 }
 
 static void agLiveDiagLog(NSString *stage, NSString *format, ...) {
+    if ([stage hasPrefix:@"LOC_"] || [stage hasPrefix:@"CLIENT_"]) {
+        return; // 彻底屏蔽所有虚拟定位相关日志（保留语音、相机、翻译与联网日志）
+    }
     NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
     if (bid && ![bid isEqualToString:@"com.apple.springboard"] && ![bid isEqualToString:@"com.apple.Preferences"]) {
         return; // 铁律：严禁在第三方受控沙盒 App 内操作 /tmp 诊断日志文件，消除文件句柄与沙盒探测特征
@@ -917,7 +920,6 @@ static void saveGeminiPrefs(NSDictionary *dict) {
         @"/var/mobile/Library/Preferences/com.custom.geminisirioverlay.plist"
     ];
     [[NSFileManager defaultManager] removeItemAtPath:@"/tmp/com.custom.geminisirioverlay.plist" error:nil];
-    [[NSFileManager defaultManager] removeItemAtPath:@"/tmp/ag_live_diagnostic.log" error:nil];
     for (NSString *wp in writePaths) {
         NSString *dir = [wp stringByDeletingLastPathComponent];
         if ([[NSFileManager defaultManager] fileExistsAtPath:dir]) {
@@ -1873,8 +1875,7 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
                 agPublishSpoofStateToKernel(YES, scopeMode, moveMode, shieldOn, wifiMode, _isRouteMoving, savedLat, savedLon, -1.0, (_isRouteMoving ? _moveSpeedMetersPerSec : 0.0), targetApps);
 
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    agLiveDiagLog(@"LOC_AUTO_RESTORE", @"Restoring location on SpringBoard boot: %@ (%.6f, %.6f) moving=%d", savedName, savedLat, savedLon, self.isRouteMoving);
-                    [self applyPreferencesAndRestartTimerIfNeeded];
+                        [self applyPreferencesAndRestartTimerIfNeeded];
                     [self pushSimulatedLocationToDaemonWithCourse:self.currentCourse speed:(self.isRouteMoving ? self.moveSpeedMetersPerSec : 0.0) forceRestart:YES];
                 });
             } else {
@@ -1938,8 +1939,6 @@ static void agSpringBoardMasterSyncCallback(CFNotificationCenterRef center, void
     self.isSpoofingActive = YES;
     self.cachedTickLocation = nil;
 
-    agLiveDiagLog(@"LOC_MASTER_SYNC", @"SpringBoard synced new state: place='%@' | WGS84=(%.6f, %.6f) | moving=%d | scope=%ld",
-                  self.currentPlaceName, lat, lon, moving, (long)[p[@"AG_LocSpoof_ScopeMode"] integerValue]);
 
     [self applyPreferencesAndRestartTimerIfNeeded];
     [self pushSimulatedLocationToDaemonWithCourse:self.currentCourse speed:(moving ? self.moveSpeedMetersPerSec : 0.0) forceRestart:YES];
@@ -2230,8 +2229,6 @@ static os_unfair_lock sCachedTickLocLock = OS_UNFAIR_LOCK_INIT;
         self.moveSpeedMetersPerSec = (moveMode == 1) ? 1.5 : 12.5;
         self.isRouteMoving = YES;
         self.isSpoofingActive = YES;
-        agLiveDiagLog(@"LOC_MAP_PIN", @"Start simulated move (mode=%ld, speed=%.1fm/s, dist=%.0fm) to '%@' | targetWGS84=(%.6f, %.6f)",
-                      (long)moveMode, self.moveSpeedMetersPerSec, distM, self.currentPlaceName, wgs.latitude, wgs.longitude);
     } else {
         self.baseWGS84Coord = wgs;
         self.currentWGS84Coord = wgs;
@@ -2241,8 +2238,6 @@ static os_unfair_lock sCachedTickLocLock = OS_UNFAIR_LOCK_INIT;
         self.currentCourse = -1.0;
         self.isSpoofingActive = YES;
         self.cachedTickLocation = nil;
-        agLiveDiagLog(@"LOC_MAP_PIN", @"Pinned location '%@' | input(%@)=(%.6f, %.6f) -> WGS84=(%.6f, %.6f)",
-                      self.currentPlaceName, upperSys, coord.latitude, coord.longitude, wgs.latitude, wgs.longitude);
     }
 
     NSMutableDictionary *p = loadGeminiPrefs();
@@ -2381,7 +2376,6 @@ static os_unfair_lock sCachedTickLocLock = OS_UNFAIR_LOCK_INIT;
             mp[@"AG_LocSpoof_IsMoving"] = @NO;
             saveGeminiPrefs(mp);
 
-            agLiveDiagLog(@"LOC_CRUISE_ARRIVED", @"Arrived at destination: %@ (%.6f, %.6f)", self.currentPlaceName, self.baseWGS84Coord.latitude, self.baseWGS84Coord.longitude);
             [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"🏁 已抵达目标终点：%@", self.currentPlaceName]];
         } else {
             // 2. 沿主方向推进基线坐标
@@ -2517,7 +2511,6 @@ static os_unfair_lock sCachedTickLocLock = OS_UNFAIR_LOCK_INIT;
 
 - (void)resolvePlaceAndPin:(NSString *)placeQuery completion:(void(^)(BOOL ok, NSString *summary))completion {
     NSString *cleanPlace = [placeQuery stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    agLiveDiagLog(@"LOC_VOICE_CMD", @"resolvePlaceAndPin invoked with query='%@' (isMainThread=%d)", cleanPlace, [NSThread isMainThread]);
     if (cleanPlace.length == 0) {
         if (completion) completion(NO, @"地点名称为空");
         return;
@@ -2579,8 +2572,7 @@ static os_unfair_lock sCachedTickLocLock = OS_UNFAIR_LOCK_INIT;
                 if (firstItem && firstItem.placemark.location) {
                     CLLocationCoordinate2D rawCoord = firstItem.placemark.location.coordinate;
                     NSString *displayName = firstItem.name ?: cleanPlace;
-                    agLiveDiagLog(@"LOC_VOICE_CMD", @"MKLocalSearch resolved '%@' -> '%@' (%.6f, %.6f)", cleanPlace, displayName, rawCoord.latitude, rawCoord.longitude);
-                    [self pinLocationWithCoordinate:rawCoord coordSystem:@"GCJ02" placeName:displayName];
+                                [self pinLocationWithCoordinate:rawCoord coordSystem:@"GCJ02" placeName:displayName];
                     if (completion) completion(YES, [NSString stringWithFormat:@"已将定位锁定至「%@」", displayName]);
                 } else {
                     for (NSString *key in landmarks) {
@@ -2640,7 +2632,6 @@ static os_unfair_lock sCachedTickLocLock = OS_UNFAIR_LOCK_INIT;
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          (__bridge CFStringRef)kAGLocMasterSyncNotification,
                                          NULL, NULL, YES);
-    agLiveDiagLog(@"LOC_STEALTH_PRESET", @"Enabled attendance stealth shield preset");
     [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🛡️ 已开启防检测保护护盾"];
 }
 
@@ -2668,7 +2659,6 @@ static os_unfair_lock sCachedTickLocLock = OS_UNFAIR_LOCK_INIT;
     if ([[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"]) {
         [self pushSimulatedLocationToDaemonWithCourse:-1.0 speed:0.0 forceRestart:YES];
     }
-    agLiveDiagLog(@"LOC_STOP_RESET", @"Stopped virtual location spoofing and auto-disabled anti-detection shield");
 
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          (__bridge CFStringRef)kAGLocMasterSyncNotification,
@@ -2869,7 +2859,6 @@ static os_unfair_lock sCachedTickLocLock = OS_UNFAIR_LOCK_INIT;
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          (__bridge CFStringRef)kAGLocMasterSyncNotification,
                                          NULL, NULL, YES);
-    agLiveDiagLog(@"LOC_SCOPE_APPS", @"Updated target apps count=%lu", (unsigned long)self.selectedBundleIDs.count);
     if (self.onSelectionChanged) {
         self.onSelectionChanged(self.selectedBundleIDs.count);
     }
@@ -3714,7 +3703,6 @@ static void agSettingsPanelTickDarwinCallback(CFNotificationCenterRef center, vo
     }
 
     saveGeminiPrefs(p);
-    agLiveDiagLog(@"LOC_SCOPE_MODE", @"Scope mode changed to %ld", (long)mode);
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          (__bridge CFStringRef)kAGLocMasterSyncNotification,
                                          NULL, NULL, YES);
@@ -3758,7 +3746,6 @@ static void agSettingsPanelTickDarwinCallback(CFNotificationCenterRef center, vo
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          (__bridge CFStringRef)kAGLocMasterSyncNotification,
                                          NULL, NULL, YES);
-    agLiveDiagLog(@"LOC_SHIELD_TOGGLE", @"Anti-detection shield toggled: %d", on);
     [self.tableView reloadData];
 }
 
@@ -18123,8 +18110,6 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
     if (agIsCurrentProcessTargetedForLocSpoof() && !agIsInAppCustomConstructedLocation(self) && !agIsCleanSpoofedLocation(self)) {
         AGSpoofedTelemetry tel;
         if (agGetTelemetryForLocationInstance(self, &tel) && tel.valid) {
-            gCurrentClientStepID = AGDiagStep_CallCoord;
-            agReportAppLocationHookHitToSpringBoard();
             return CLLocationCoordinate2DMake(tel.lat, tel.lon);
         }
     }
@@ -18254,8 +18239,6 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 - (CLLocation *)location {
     CLLocation *origLoc = %orig;
     if (agIsCurrentProcessTargetedForLocSpoof()) {
-        gCurrentClientStepID = AGDiagStep_CallMgrLoc;
-        agReportAppLocationHookHitToSpringBoard();
         if (origLoc) return origLoc;
         return [[AGLocationSpoofManager sharedSpoofer] constructRealisticSpoofedLocation];
     }
@@ -18514,8 +18497,6 @@ static AGCLDaemonLocation agDyn_CLLoc_clientLoc(CLLocation *self, SEL _cmd) {
         }
         AGSpoofedTelemetry tel;
         if (agGetTelemetryForLocationInstance(self, &tel) && tel.valid) {
-            gCurrentClientStepID = AGDiagStep_CallClientLoc;
-            agReportAppLocationHookHitToSpringBoard();
             double spd = (tel.speed > 0.0) ? tel.speed : 0.0;
             // 关键修复：与 [loc course] 严格保持一致（静止时同为 -1.0），杜绝外层 course 为 -1.0 而底层 clientLocation.course 为 0.0 的数值冲突
             double crs = (tel.course >= 0.0) ? tel.course : -1.0;
@@ -18869,12 +18850,8 @@ static void agSyncClientHooksWithCurrentState(void) {
     if (shieldActive) {
         agInstallAntiDetectionCHooksIfNeeded();
     }
-    gCurrentClientStepID = AGDiagStep_SyncSuccess;
     os_unfair_lock_unlock(&gHookSyncLock);
 
-    if (spoofActive) {
-        agPostClientDiagEvent(2, AGDiagStep_SyncSuccess, shieldActive ? 1 : 0);
-    }
 }
 
 static void agClientAppMasterSyncCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
