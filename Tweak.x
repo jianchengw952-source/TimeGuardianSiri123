@@ -17714,7 +17714,7 @@ static const char *hooked_dyld_get_image_name(uint32_t image_index) {
         if (agIsSuspiciousJailbreakPath(name)) {
             static char sSafeSysPaths[32][128];
             uint32_t slot = image_index & 31;
-            if (sSafeSysPaths[slot][0] == '\\0') {
+            if (sSafeSysPaths[slot][0] == 0) {
                 snprintf(sSafeSysPaths[slot], sizeof(sSafeSysPaths[slot]),
                          "/System/Library/PrivateFrameworks/CoreSpatial_%u.framework/CoreSpatial_%u",
                          slot, slot);
