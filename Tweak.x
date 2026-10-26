@@ -16645,6 +16645,16 @@ static void (^gPendingLatestTransCallback)(NSString *translatedText) = nil;
 static NSUInteger gTransRequestSeq = 0;
 static NSString *gLastTranslatedSourceSnapshot = nil;
 
+static dispatch_queue_t agTransAudioProcessQueue(void) {
+    static dispatch_queue_t sQueue = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);
+        sQueue = dispatch_queue_create("com.angelguardian.trans.audioproc", attr);
+    });
+    return sQueue;
+}
+
 // ==================== SSE 流式同传委托与零泄漏连接池路由器 ====================
 @interface AGStreamTranslateDelegate : NSObject <NSURLSessionDataDelegate>
 @property (nonatomic, copy) void (^onDelta)(NSString *accumulatedText);
@@ -16714,7 +16724,6 @@ static NSString *gLastTranslatedSourceSnapshot = nil;
 }
 @end
 
-// 全局共享流式连接池路由器：复用同一个 NSURLSession，保持 HTTP/2 与 TLS 长连接热态，0 内存泄漏
 @interface AGSharedTransSessionRouter : NSObject <NSURLSessionDataDelegate>
 @property (nonatomic, strong) NSURLSession *pooledSession;
 @property (nonatomic, copy) NSString *currentProxy;
@@ -16801,7 +16810,7 @@ static NSString *gLastTranslatedSourceSnapshot = nil;
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
     os_unfair_lock_lock(&_lock);
-    AGStreamTranslateDelegate *del = self.taskMap[@(task.taskIdentifier)];
+    AGStreamTranslateDelegate *del = self.taskMap[@(dataTask.taskIdentifier)];
     [self.taskMap removeObjectForKey:@(task.taskIdentifier)];
     os_unfair_lock_unlock(&_lock);
     if (del) {
@@ -16823,76 +16832,112 @@ static void agResetRealtimeTranslationState(void) {
     [[AGSharedTransSessionRouter sharedRouter] resetPool];
 }
 
-// 兼容 Float32 / Big-Endian Int16 / Little-Endian Int16 的无损内存数字增益与有效声学信号检测器
-// 返回值：YES 表示该音频帧包含真实有效声音信号，NO 表示纯静音空帧（防止空帧混入打断识别流）
-static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sampleBuffer) {
-    if (!sampleBuffer) return NO;
+// ReplayKit 纯数字内录音频流转码器：将大端序/小端序、双声道/单声道 CMSampleBuffer 转为标准单声道 Float32 AVAudioPCMBuffer
+static AVAudioPCMBuffer *agConvertReplayKitSampleBufferToPCMBuffer(CMSampleBufferRef sampleBuffer) {
+    if (!sampleBuffer) return nil;
     CMAudioFormatDescriptionRef fmtDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
-    const AudioStreamBasicDescription *asbd = fmtDesc ? CMAudioFormatDescriptionGetStreamBasicDescription(fmtDesc) : NULL;
+    if (!fmtDesc) return nil;
+    const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmtDesc);
+    if (!asbd || asbd->mSampleRate <= 0) return nil;
+
+    CMItemCount numSamples = CMSampleBufferGetNumSamples(sampleBuffer);
+    if (numSamples <= 0) return nil;
+
     CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
-    if (!blockBuffer) return NO;
+    if (!blockBuffer) return nil;
 
     size_t lengthAtOffset = 0, totalLength = 0;
-    char *dataPointer = NULL;
-    if (CMBlockBufferGetDataPointer(blockBuffer, 0, &lengthAtOffset, &totalLength, &dataPointer) != noErr || !dataPointer || totalLength < 4) {
-        return NO;
+    char *rawBytes = NULL;
+    if (CMBlockBufferGetDataPointer(blockBuffer, 0, &lengthAtOffset, &totalLength, &rawBytes) != noErr || !rawBytes || totalLength < 4) {
+        return nil;
     }
 
-    BOOL isFloat = asbd ? ((asbd->mFormatFlags & kAudioFormatFlagIsFloat) != 0) : NO;
-    BOOL isBigEndian = asbd ? ((asbd->mFormatFlags & kAudioFormatFlagIsBigEndian) != 0) : NO;
-    uint32_t bits = asbd ? asbd->mBitsPerChannel : 16;
+    double sampleRate = asbd->mSampleRate;
+    uint32_t channels = MAX(1u, asbd->mChannelsPerFrame);
+    uint32_t bits = asbd->mBitsPerChannel;
+    BOOL isFloat = (asbd->mFormatFlags & kAudioFormatFlagIsFloat) != 0;
+    BOOL isBigEndian = (asbd->mFormatFlags & kAudioFormatFlagIsBigEndian) != 0;
+    BOOL isNonInterleaved = (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
 
-    if (isFloat && bits == 32 && !isBigEndian) {
-        float *samples = (float *)dataPointer;
-        size_t count = totalLength / sizeof(float);
-        if (count == 0) return NO;
-        double sumSquares = 0.0;
-        for (size_t i = 0; i < count; i++) {
-            float s = samples[i];
-            if (isfinite(s)) sumSquares += (double)s * (double)s;
-        }
-        double rms = sqrt(sumSquares / (double)count);
-        if (rms < 0.000015) return NO; // 纯零静音帧
-        if (rms < 0.10) {
-            float gain = (float)MIN(8.0, 0.15 / rms);
-            for (size_t i = 0; i < count; i++) {
-                float v = samples[i] * gain;
-                if (v > 0.96f) v = 0.96f;
-                else if (v < -0.96f) v = -0.96f;
-                samples[i] = v;
+    AVAudioFormat *outFormat = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:sampleRate channels:1];
+    if (!outFormat) return nil;
+    AVAudioPCMBuffer *pcmBuf = [[AVAudioPCMBuffer alloc] initWithPCMFormat:outFormat frameCapacity:(AVAudioFrameCount)numSamples];
+    if (!pcmBuf || !pcmBuf.floatChannelData) return nil;
+    float *dst = pcmBuf.floatChannelData[0];
+
+    double sumSquares = 0.0;
+    AVAudioFrameCount validFrames = 0;
+
+    if (isFloat && bits == 32) {
+        size_t totalFloats = totalLength / sizeof(float);
+        AVAudioFrameCount maxFrames = (AVAudioFrameCount)MIN((size_t)numSamples, isNonInterleaved ? totalFloats : (totalFloats / channels));
+        const uint32_t *srcU32 = (const uint32_t *)rawBytes;
+        for (AVAudioFrameCount i = 0; i < maxFrames; i++) {
+            float mono = 0.0f;
+            if (isNonInterleaved) {
+                uint32_t w = isBigEndian ? CFSwapInt32BigToHost(srcU32[i]) : srcU32[i];
+                float f = 0.0f;
+                memcpy(&f, &w, sizeof(float));
+                mono = isfinite(f) ? f : 0.0f;
+            } else {
+                for (uint32_t c = 0; c < channels; c++) {
+                    uint32_t w = isBigEndian ? CFSwapInt32BigToHost(srcU32[i * channels + c]) : srcU32[i * channels + c];
+                    float f = 0.0f;
+                    memcpy(&f, &w, sizeof(float));
+                    if (isfinite(f)) mono += f;
+                }
+                mono /= (float)channels;
             }
+            dst[i] = mono;
+            sumSquares += (double)mono * (double)mono;
         }
-        return YES;
+        validFrames = maxFrames;
     } else if (!isFloat && bits == 16) {
-        int16_t *samples = (int16_t *)dataPointer;
-        size_t count = totalLength / sizeof(int16_t);
-        if (count == 0) return NO;
-        double sumSquares = 0.0;
-        for (size_t i = 0; i < count; i++) {
-            int16_t raw = samples[i];
-            int16_t hostVal = isBigEndian ? (int16_t)CFSwapInt16BigToHost((uint16_t)raw) : raw;
-            sumSquares += (double)hostVal * (double)hostVal;
-        }
-        double rms = sqrt(sumSquares / (double)count);
-        if (rms < 1.0) return NO; // 纯零静音帧
-        if (rms < 2400.0) {
-            double gain = MIN(8.0, 3200.0 / rms);
-            for (size_t i = 0; i < count; i++) {
-                int16_t raw = samples[i];
-                int16_t hostVal = isBigEndian ? (int16_t)CFSwapInt16BigToHost((uint16_t)raw) : raw;
-                double val = (double)hostVal * gain;
-                if (val > 32000.0) val = 32000.0;
-                else if (val < -32000.0) val = -32000.0;
-                int16_t clamped = (int16_t)val;
-                samples[i] = isBigEndian ? (int16_t)CFSwapInt16HostToBig((uint16_t)clamped) : clamped;
+        size_t totalShorts = totalLength / sizeof(int16_t);
+        AVAudioFrameCount maxFrames = (AVAudioFrameCount)MIN((size_t)numSamples, isNonInterleaved ? totalShorts : (totalShorts / channels));
+        const uint16_t *srcU16 = (const uint16_t *)rawBytes;
+        for (AVAudioFrameCount i = 0; i < maxFrames; i++) {
+            float mono = 0.0f;
+            if (isNonInterleaved) {
+                int16_t s = (int16_t)(isBigEndian ? CFSwapInt16BigToHost(srcU16[i]) : srcU16[i]);
+                mono = (float)s / 32768.0f;
+            } else {
+                for (uint32_t c = 0; c < channels; c++) {
+                    int16_t s = (int16_t)(isBigEndian ? CFSwapInt16BigToHost(srcU16[i * channels + c]) : srcU16[i * channels + c]);
+                    mono += ((float)s / 32768.0f);
+                }
+                mono /= (float)channels;
             }
+            dst[i] = mono;
+            sumSquares += (double)mono * (double)mono;
         }
-        return YES;
+        validFrames = maxFrames;
     }
-    return YES;
+
+    if (validFrames == 0) return nil;
+    pcmBuf.frameLength = validFrames;
+
+    double rms = sqrt(sumSquares / (double)validFrames);
+    if (rms < 0.00003) return nil;
+    if (rms < 0.14) {
+        float gain = (float)MIN(5.0, 0.18 / rms);
+        for (AVAudioFrameCount i = 0; i < validFrames; i++) {
+            float v = dst[i] * gain;
+            if (v > 0.96f) v = 0.96f;
+            else if (v < -0.96f) v = -0.96f;
+            dst[i] = v;
+        }
+    }
+    return pcmBuf;
 }
 
-@implementation AGScreenTranslationOverlay
+@implementation AGScreenTranslationOverlay {
+    NSUInteger _speechTaskGenID;
+    NSTimeInterval _speechTaskStartTime;
+    NSString *_committedTargetContext;
+    NSTimeInterval _lastUIRenderTimestamp;
+    BOOL _disableThinkingBudgetParam;
+}
 
 + (instancetype)sharedOverlay {
     static AGScreenTranslationOverlay *instance = nil;
@@ -16941,12 +16986,12 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
     self.backgroundColor = [UIColor clearColor];
     self.hidden = YES;
     self.isAudioTranslatingActive = NO;
-    // 默认采用零录屏开销、零音质干扰的无感声学同传模式（彻底告别 RPScreenRecorder 60帧录屏导致的手机发卡）
     self.isInternalRecordingMode = NO;
     self.sourceLangIndex = 0;
     self.committedHistoryText = [NSMutableString string];
     self.pipelineTasksMap = [NSMutableDictionary dictionary];
     self.committedSourceContext = @"";
+    _committedTargetContext = @"";
     self.lastTranslatedChunkText = @"";
 
     UIViewController *vc = [[UIViewController alloc] init];
@@ -16986,7 +17031,7 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
     self.translatedTextView.textAlignment = NSTextAlignmentLeft;
     self.translatedTextView.editable = NO;
     self.translatedTextView.selectable = NO;
-    self.translatedTextView.scrollEnabled = NO; // 采用 PC 经典双行固定视野，彻底禁止频繁滚动排版卡顿
+    self.translatedTextView.scrollEnabled = NO;
     self.translatedTextView.showsVerticalScrollIndicator = NO;
     self.translatedTextView.textContainerInset = UIEdgeInsetsMake(2, 8, 4, 8);
     self.translatedTextView.text = @"✨ 电脑级双行稳定同传已就绪...";
@@ -17067,16 +17112,21 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
     [self startZeroInterferenceInternalAudioTranslation];
 }
 
-// 电脑级双行字幕：第一行只锁定保留最近一句完整译文，绝不堆积成乱麻长段
 - (void)appendCommittedTranslationSegment:(NSString *)seg {
     NSString *clean = [seg stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (clean.length == 0) return;
     [self.committedHistoryText setString:clean];
+    _committedTargetContext = [clean copy];
 }
 
-// 电脑级上下双行稳定渲染器（第一行柔白显示上一句完整译文，第二行亮白显示当前句实时译文，0 滚动重排开销）
 - (void)renderCombinedSubtitleWithActiveTail:(NSString *)activeTail instantHint:(NSString *)instantHint {
-    (void)instantHint; // 彻底废除会引起高频闪烁的零碎词典提示
+    (void)instantHint;
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (activeTail.length > 0 && (now - _lastUIRenderTimestamp < 0.08)) {
+        return;
+    }
+    _lastUIRenderTimestamp = now;
+
     NSString *line1 = [self.committedHistoryText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     NSString *line2 = [activeTail stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 
@@ -17089,7 +17139,6 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
 
     NSMutableAttributedString *attr = [[NSMutableAttributedString alloc] init];
     if (line1.length > 0 && line2.length > 0) {
-        // 如果新旧两句完全一样（刚完成定稿交接瞬间），只显示一行，防止视觉重影
         if ([line1 isEqualToString:line2]) {
             [attr appendAttributedString:[[NSAttributedString alloc] initWithString:[NSString stringWithFormat:@"▸ %@", line1]
                                                                          attributes:@{
@@ -17210,6 +17259,7 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
 }
 
 - (void)resetAllTranslationHistoryAndUI {
+    _speechTaskGenID++;
     if (self.speechTask) {
         [self.speechTask cancel];
         self.speechTask = nil;
@@ -17218,8 +17268,15 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
         [self.speechRequest endAudio];
         self.speechRequest = nil;
     }
+    for (NSNumber *tid in [self.pipelineTasksMap allKeys]) {
+        NSURLSessionDataTask *t = self.pipelineTasksMap[tid][@"task"];
+        if (t) [t cancel];
+    }
+    [self.pipelineTasksMap removeAllObjects];
+
     if (self.committedHistoryText) [self.committedHistoryText setString:@""];
     self.committedSourceContext = @"";
+    _committedTargetContext = @"";
     self.lastRecognizedText = @"";
     self.lastTranslatedChunkText = @"";
     self.latestPartialSegment = @"";
@@ -17227,7 +17284,6 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
     self.highestDisplayedSeq = 0;
     self.queuedNextChunkText = nil;
     self.queuedNextChunkShouldCommit = NO;
-    [self.pipelineTasksMap removeAllObjects];
 
     if (self.liveOriginalPreviewLabel) {
         NSString *title = [self currentLangShortTitle];
@@ -17252,6 +17308,12 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
     self.isAudioTranslatingActive = YES;
     [self resetAllTranslationHistoryAndUI];
     [self applySavedFontSizeAndStyle];
+
+    NSString *proxy = agProxyForTab(AGConfigTabTranslation);
+    if (!self.transStreamSession) {
+        self.transStreamSession = agCreateSessionWithProxy(proxy, self, [NSOperationQueue mainQueue]);
+    }
+
     self.alpha = 0.0;
     self.hidden = NO;
     self.cropBoxView.transform = CGAffineTransformMakeScale(0.92, 0.92);
@@ -17276,12 +17338,25 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
     }
 }
 
-#pragma mark - 👂 零截屏、零卡顿、单路纯净收音引擎 (彻底根除双路混塞与录屏掉帧)
+#pragma mark - 👂 零干扰、零压音、零死锁双模收音引擎
 
 - (void)startZeroInterferenceInternalAudioTranslation {
     if (!self.isAudioTranslatingActive || self.hidden) return;
-    [self stopZeroInterferenceInternalAudioTranslation];
-    self.isAudioTranslatingActive = YES;
+
+    [self.audioKeepAliveTimer invalidate];
+    self.audioKeepAliveTimer = nil;
+    [self.microDebounceTimer invalidate];
+    self.microDebounceTimer = nil;
+
+    _speechTaskGenID++;
+    if (self.speechTask) {
+        [self.speechTask cancel];
+        self.speechTask = nil;
+    }
+    if (self.speechRequest) {
+        [self.speechRequest endAudio];
+        self.speechRequest = nil;
+    }
 
     self.committedTranscriptLength = 0;
     self.latestPartialSegment = @"";
@@ -17301,28 +17376,46 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
         return;
     }
 
-    [self setupAndStartSpeechRecognitionTask];
-
     __weak typeof(self) weakSelf = self;
 
     if (self.isInternalRecordingMode) {
+        AVAudioEngine *oldEng = self.voiceFallbackEngine;
+        self.voiceFallbackEngine = nil;
+        if (oldEng) {
+            dispatch_async(agAudioSerialQueue(), ^{
+                @try {
+                    [oldEng.inputNode removeTapOnBus:0];
+                    [oldEng stop];
+                } @catch (NSException *e) {}
+            });
+        }
+
         RPScreenRecorder *recorder = [RPScreenRecorder sharedRecorder];
         if (recorder.isAvailable) {
-            // 核心修复 1：严禁开启 microphoneEnabled = YES！
-            // 既杜绝激活麦克风破坏扬声器/AirPods 立体声音质，又彻底杜绝 AudioApp 与 AudioMic 双路音频交错混塞把语音切碎！
             recorder.microphoneEnabled = NO;
+            [self setupAndStartSpeechRecognitionTask];
+
+            if (self.isReplayKitCapturing) {
+                [recorder stopCaptureWithHandler:nil];
+                self.isReplayKitCapturing = NO;
+            }
+
             self.isReplayKitCapturing = YES;
             self.lastAppAudioTime = [[NSDate date] timeIntervalSince1970];
 
             [recorder startCaptureWithHandler:^(CMSampleBufferRef _Nonnull sampleBuffer, RPSampleBufferType bufferType, NSError * _Nullable error) {
-                if (error || !weakSelf.speechRequest || !weakSelf.isAudioTranslatingActive || weakSelf.hidden) return;
-                // 严格只接收纯净的 RPSampleBufferTypeAudioApp 单路数字音频流，彻底丢弃 RPSampleBufferTypeVideo 视频帧与杂音帧
-                if (bufferType == RPSampleBufferTypeAudioApp) {
-                    if (agApplySafeInMemoryDigitalAGCAndCheckSignal(sampleBuffer)) {
+                if (bufferType != RPSampleBufferTypeAudioApp) return;
+                if (error || !weakSelf || !weakSelf.isAudioTranslatingActive || weakSelf.hidden || !weakSelf.speechRequest) return;
+
+                CFRetain(sampleBuffer);
+                dispatch_async(agTransAudioProcessQueue(), ^{
+                    AVAudioPCMBuffer *pcmBuf = agConvertReplayKitSampleBufferToPCMBuffer(sampleBuffer);
+                    CFRelease(sampleBuffer);
+                    if (pcmBuf && weakSelf.isAudioTranslatingActive && !weakSelf.hidden && weakSelf.speechRequest) {
                         weakSelf.lastAppAudioTime = [[NSDate date] timeIntervalSince1970];
-                        [weakSelf.speechRequest appendAudioSampleBuffer:sampleBuffer];
+                        [weakSelf.speechRequest appendAudioPCMBuffer:pcmBuf];
                     }
-                }
+                });
             } completionHandler:^(NSError * _Nullable error) {
                 if (error && weakSelf.isAudioTranslatingActive && !weakSelf.hidden) {
                     weakSelf.isReplayKitCapturing = NO;
@@ -17330,19 +17423,17 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
                         if (weakSelf.isAudioTranslatingActive && !weakSelf.hidden) {
                             weakSelf.isInternalRecordingMode = NO;
                             [weakSelf.audioSourceToggleBtn setTitle:@"🎙️无感" forState:UIControlStateNormal];
+                            [weakSelf.audioSourceToggleBtn setTitleColor:[UIColor colorWithRed:0.40 green:0.96 blue:0.68 alpha:1.0] forState:UIControlStateNormal];
                             [weakSelf startFallbackAudioEngineCapture];
                         }
                     });
                 }
             }];
 
-            // 智能检测：若前台第三方 App 不允许 SpringBoard 通过 ReplayKit 抓取内部数字流（2.5秒内无有效内录信号），
-            // 立即自动关停 RPScreenRecorder（彻底释放 replayd 60帧录屏开销防卡顿），并无缝切换至无感声学收音模式！
-            [self.audioKeepAliveTimer invalidate];
-            self.audioKeepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:1.2 repeats:YES block:^(NSTimer * _Nonnull timer) {
+            self.audioKeepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer * _Nonnull timer) {
                 if (!weakSelf || !weakSelf.isAudioTranslatingActive || weakSelf.hidden || isDeviceCurrentlyLocked()) return;
                 NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-                if (weakSelf.isInternalRecordingMode && weakSelf.isReplayKitCapturing && (now - weakSelf.lastAppAudioTime > 2.5)) {
+                if (weakSelf.isInternalRecordingMode && weakSelf.isReplayKitCapturing && (now - weakSelf.lastAppAudioTime > 3.5)) {
                     weakSelf.isReplayKitCapturing = NO;
                     weakSelf.isInternalRecordingMode = NO;
                     [[RPScreenRecorder sharedRecorder] stopCaptureWithHandler:nil];
@@ -17357,23 +17448,26 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
             [self startFallbackAudioEngineCapture];
         }
     } else {
-        // 🎙️ 无感声学混音模式（0 录屏开销，0 截屏，完全不影响手机正在播放的视频/音乐音质与音量）
+        if (self.isReplayKitCapturing) {
+            self.isReplayKitCapturing = NO;
+            [[RPScreenRecorder sharedRecorder] stopCaptureWithHandler:nil];
+        }
         [self startFallbackAudioEngineCapture];
     }
 }
 
 - (void)handleTranslationAudioInterruption:(NSNotification *)note {
     if (!self.isAudioTranslatingActive || self.hidden || self.isInternalRecordingMode) return;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (self.isAudioTranslatingActive && !self.hidden && !self.isInternalRecordingMode) {
-            if (!self.voiceFallbackEngine || !self.voiceFallbackEngine.isRunning) {
-                [self startFallbackAudioEngineCapture];
+    NSUInteger type = [note.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
+    if (type == AVAudioSessionInterruptionTypeEnded) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (self.isAudioTranslatingActive && !self.hidden && !self.isInternalRecordingMode) {
+                if (!self.voiceFallbackEngine || !self.voiceFallbackEngine.isRunning) {
+                    [self startFallbackAudioEngineCapture];
+                }
             }
-            if (!self.speechTask || self.speechTask.state != SFSpeechRecognitionTaskStateRunning) {
-                [self setupAndStartSpeechRecognitionTask];
-            }
-        }
-    });
+        });
+    }
 }
 
 - (void)startFallbackAudioEngineCapture {
@@ -17384,6 +17478,15 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
         if (!strongSelf || !strongSelf.isAudioTranslatingActive || strongSelf.hidden) return;
 
         @try {
+            if (strongSelf.voiceFallbackEngine && strongSelf.voiceFallbackEngine.isRunning) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (strongSelf.isAudioTranslatingActive && !strongSelf.hidden && !strongSelf.speechTask) {
+                        [strongSelf setupAndStartSpeechRecognitionTask];
+                    }
+                });
+                return;
+            }
+
             if (strongSelf.voiceFallbackEngine) {
                 [strongSelf.voiceFallbackEngine.inputNode removeTapOnBus:0];
                 [strongSelf.voiceFallbackEngine stop];
@@ -17391,12 +17494,22 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
             }
 
             AVAudioSession *session = [AVAudioSession sharedInstance];
-            // 采用 AVAudioSessionModeDefault + MixWithOthers + AllowBluetoothA2DP：
-            // 1. 绝不触发 VoiceChat 的音量压低（Ducking）
-            // 2. 绝不触发 Measurement 模式的扬声器低音削减，保持手机外放与蓝牙耳机 100% 原生高保真音质！
+            AVAudioSessionCategoryOptions opts = AVAudioSessionCategoryOptionMixWithOthers | AVAudioSessionCategoryOptionAllowBluetoothA2DP | AVAudioSessionCategoryOptionAllowAirPlay;
+            BOOL hasExternalAudioOut = NO;
+            for (AVAudioSessionPortDescription *port in session.currentRoute.outputs) {
+                if (![port.portType isEqualToString:AVAudioSessionPortBuiltInSpeaker] &&
+                    ![port.portType isEqualToString:AVAudioSessionPortBuiltInReceiver]) {
+                    hasExternalAudioOut = YES;
+                    break;
+                }
+            }
+            if (!hasExternalAudioOut) {
+                opts |= AVAudioSessionCategoryOptionDefaultToSpeaker;
+            }
+
             [session setCategory:AVAudioSessionCategoryPlayAndRecord
                             mode:AVAudioSessionModeDefault
-                         options:AVAudioSessionCategoryOptionMixWithOthers | AVAudioSessionCategoryOptionDefaultToSpeaker | AVAudioSessionCategoryOptionAllowBluetooth | AVAudioSessionCategoryOptionAllowBluetoothA2DP | AVAudioSessionCategoryOptionAllowAirPlay
+                         options:opts
                            error:nil];
             if (@available(iOS 13.0, *)) {
                 [session setAllowHapticsAndSystemSoundsDuringRecording:YES error:nil];
@@ -17409,7 +17522,7 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
             AVAudioEngine *engine = [[AVAudioEngine alloc] init];
             AVAudioInputNode *inputNode = engine.inputNode;
             if ([inputNode respondsToSelector:@selector(setVoiceProcessingEnabled:error:)]) {
-                [inputNode setVoiceProcessingEnabled:NO error:nil]; // 关闭回声消除，确保本机扬声器播放的视频原声 100% 被收录
+                [inputNode setVoiceProcessingEnabled:NO error:nil];
             }
             AVAudioFormat *fmt = [inputNode outputFormatForBus:0];
             if (!fmt || fmt.sampleRate <= 0 || fmt.channelCount == 0) {
@@ -17418,8 +17531,8 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
             if (!fmt || fmt.sampleRate <= 0 || fmt.channelCount == 0) return;
 
             [inputNode removeTapOnBus:0];
-            [inputNode installTapOnBus:0 bufferSize:2048 format:fmt block:^(AVAudioPCMBuffer * _Nonnull buffer, AVAudioTime * _Nonnull when) {
-                if (isDeviceCurrentlyLocked() || !weakSelf.speechRequest || !weakSelf.isAudioTranslatingActive || weakSelf.hidden) return;
+            [inputNode installTapOnBus:0 bufferSize:4096 format:fmt block:^(AVAudioPCMBuffer * _Nonnull buffer, AVAudioTime * _Nonnull when) {
+                if (isDeviceCurrentlyLocked() || !weakSelf || !weakSelf.speechRequest || !weakSelf.isAudioTranslatingActive || weakSelf.hidden) return;
                 weakSelf.lastAppAudioTime = [[NSDate date] timeIntervalSince1970];
                 AVAudioFrameCount frames = buffer.frameLength;
                 if (frames == 0 || buffer.floatChannelData == NULL) {
@@ -17435,9 +17548,8 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
                     float a = fabsf(src0[i]);
                     if (a > peak) peak = a;
                 }
-                // 温和线性增益（最高 4.0 倍），杜绝过度放大将环境底噪放大成杂音影响识别准确率
                 float gain = 1.0f;
-                if (peak > 0.0008f && peak < 0.25f) {
+                if (peak > 0.0006f && peak < 0.25f) {
                     gain = MIN(4.0f, 0.35f / peak);
                 }
                 for (AVAudioChannelCount ch = 0; ch < chCount; ch++) {
@@ -17459,19 +17571,22 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
             if ([engine startAndReturnError:&startErr] && !startErr) {
                 strongSelf.voiceFallbackEngine = engine;
                 strongSelf.lastAppAudioTime = [[NSDate date] timeIntervalSince1970];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (strongSelf.isAudioTranslatingActive && !strongSelf.hidden) {
+                        [strongSelf setupAndStartSpeechRecognitionTask];
+                    }
+                });
             }
         } @catch (NSException *e) {}
     });
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [self.audioKeepAliveTimer invalidate];
-        self.audioKeepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer * _Nonnull timer) {
+        self.audioKeepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
             if (!weakSelf || !weakSelf.isAudioTranslatingActive || weakSelf.hidden || isDeviceCurrentlyLocked()) return;
-            NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
             if (!weakSelf.isInternalRecordingMode) {
-                if (!weakSelf.voiceFallbackEngine || !weakSelf.voiceFallbackEngine.isRunning || (now - weakSelf.lastAppAudioTime > 2.8)) {
+                if (!weakSelf.voiceFallbackEngine || !weakSelf.voiceFallbackEngine.isRunning) {
                     [weakSelf startFallbackAudioEngineCapture];
-                    [weakSelf setupAndStartSpeechRecognitionTask];
                 }
             }
         }];
@@ -17479,7 +17594,11 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
 }
 
 - (void)setupAndStartSpeechRecognitionTask {
-    if (!self.isAudioTranslatingActive || self.hidden) return;
+    if (!self.isAudioTranslatingActive || self.hidden || !self.speechRecognizer) return;
+
+    NSUInteger taskGen = ++_speechTaskGenID;
+    _speechTaskStartTime = [[NSDate date] timeIntervalSince1970];
+
     if (self.speechRequest) {
         [self.speechRequest endAudio];
         self.speechRequest = nil;
@@ -17498,125 +17617,147 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
 
     __weak typeof(self) weakSelf = self;
     self.speechTask = [self.speechRecognizer recognitionTaskWithRequest:self.speechRequest resultHandler:^(SFSpeechRecognitionResult * _Nullable result, NSError * _Nullable error) {
-        if (result) {
-            NSString *fullText = result.bestTranscription.formattedString ?: @"";
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (!weakSelf.isAudioTranslatingActive || weakSelf.hidden || fullText.length == 0) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf.isAudioTranslatingActive || strongSelf.hidden) return;
+            if (taskGen != strongSelf->_speechTaskGenID) return;
 
-                if (fullText.length < weakSelf.committedTranscriptLength) {
-                    if (fullText.length < 15 && weakSelf.committedTranscriptLength > 30) {
-                        weakSelf.committedTranscriptLength = 0;
-                    } else {
-                        weakSelf.committedTranscriptLength = fullText.length;
-                    }
-                }
-                NSString *activeWindow = [fullText substringFromIndex:weakSelf.committedTranscriptLength];
-
-                // 方案 4：按完整从句/自然标点切分（英语 48~72 字符或句号标点，日语/韩语 20~32 字符或句号标点）
-                // 彻底告别 24 字符机械腰斩句子，让大模型拿到完整语法上下文，翻译准确率与可读性质的飞跃！
-                BOOL isCJKSource = (weakSelf.sourceLangIndex != 0);
-                NSUInteger minPunctCutLen = isCJKSource ? 10 : 22;
-                NSUInteger softClauseLen  = isCJKSource ? 20 : 48;
-                NSUInteger hardClauseLen  = isCJKSource ? 32 : 72;
-
-                BOOL shouldCommitSlice = NO;
-                NSString *sliceToCommit = nil;
-
-                if (activeWindow.length >= minPunctCutLen) {
-                    // 优先在句末标点 (. ? ! 。 ？ ！) 处自然断句
-                    NSCharacterSet *endPunctSet = [NSCharacterSet characterSetWithCharactersInString:@".?!。？！"];
-                    NSRange endPunctRange = [activeWindow rangeOfCharacterFromSet:endPunctSet
-                                                                          options:NSBackwardsSearch
-                                                                            range:NSMakeRange(minPunctCutLen - 4, activeWindow.length - (minPunctCutLen - 4))];
-                    if (endPunctRange.location != NSNotFound) {
-                        NSUInteger advance = endPunctRange.location + 1;
-                        sliceToCommit = [[activeWindow substringToIndex:advance] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                        weakSelf.committedTranscriptLength += advance;
-                        activeWindow = [fullText substringFromIndex:weakSelf.committedTranscriptLength];
-                        shouldCommitSlice = (sliceToCommit.length >= 2);
-                    } else if (activeWindow.length >= softClauseLen) {
-                        // 次选在从句逗号/分号/空格处切分完整意群
-                        NSCharacterSet *clauseSet = [NSCharacterSet characterSetWithCharactersInString:@",;，、 "];
-                        NSUInteger searchStart = isCJKSource ? 12 : 28;
-                        NSRange cutRange = [activeWindow rangeOfCharacterFromSet:clauseSet
-                                                                         options:NSBackwardsSearch
-                                                                           range:NSMakeRange(searchStart, activeWindow.length - searchStart)];
-                        if (cutRange.location != NSNotFound) {
-                            NSUInteger advance = cutRange.location + 1;
-                            sliceToCommit = [[activeWindow substringToIndex:advance] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                            weakSelf.committedTranscriptLength += advance;
-                            activeWindow = [fullText substringFromIndex:weakSelf.committedTranscriptLength];
-                            shouldCommitSlice = (sliceToCommit.length >= 2);
-                        } else if (activeWindow.length >= hardClauseLen) {
-                            sliceToCommit = [activeWindow stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                            weakSelf.committedTranscriptLength = fullText.length;
-                            activeWindow = @"";
-                            shouldCommitSlice = (sliceToCommit.length >= 2);
+            if (result) {
+                NSString *fullText = result.bestTranscription.formattedString ?: @"";
+                if (fullText.length > 0) {
+                    if (fullText.length < strongSelf.committedTranscriptLength) {
+                        if (fullText.length < 15 && strongSelf.committedTranscriptLength > 30) {
+                            strongSelf.committedTranscriptLength = 0;
+                        } else {
+                            strongSelf.committedTranscriptLength = fullText.length;
                         }
                     }
-                }
+                    NSString *activeWindow = [fullText substringFromIndex:strongSelf.committedTranscriptLength];
 
-                NSString *cleanSpoken = [activeWindow stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                    BOOL isCJKSource = (strongSelf.sourceLangIndex != 0);
+                    NSUInteger minPunctCutLen = isCJKSource ? 8 : 18;
+                    NSUInteger softClauseLen  = isCJKSource ? 18 : 46;
+                    NSUInteger hardClauseLen  = isCJKSource ? 32 : 76;
 
-                // 1. 顶行 20ms 原声实时跳字（直观反馈声音捕获状态）
-                NSString *previewOrig = cleanSpoken.length > 0 ? cleanSpoken : (sliceToCommit ?: @"");
-                if (previewOrig.length > 0) {
-                    weakSelf.liveOriginalPreviewLabel.text = [NSString stringWithFormat:@"🗣️ %@", previewOrig];
-                }
+                    BOOL shouldCommitSlice = NO;
+                    NSString *sliceToCommit = nil;
 
-                // 2. 若完整句子/意群已说完：无缝将已有的当前句译文先垫底到上一行，并发起定稿精确翻译
-                if (shouldCommitSlice && sliceToCommit.length > 0) {
-                    if (weakSelf.lastTranslatedChunkText.length > 0) {
-                        [weakSelf appendCommittedTranslationSegment:weakSelf.lastTranslatedChunkText];
-                        weakSelf.lastTranslatedChunkText = @"";
-                        [weakSelf renderCombinedSubtitleWithActiveTail:nil instantHint:nil];
+                    if (activeWindow.length >= minPunctCutLen) {
+                        NSCharacterSet *endPunctSet = [NSCharacterSet characterSetWithCharactersInString:@".?!。？！"];
+                        NSRange endPunctRange = [activeWindow rangeOfCharacterFromSet:endPunctSet
+                                                                              options:NSBackwardsSearch
+                                                                                range:NSMakeRange(minPunctCutLen - 4, activeWindow.length - (minPunctCutLen - 4))];
+                        if (endPunctRange.location != NSNotFound) {
+                            NSUInteger advance = endPunctRange.location + 1;
+                            sliceToCommit = [[activeWindow substringToIndex:advance] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                            strongSelf.committedTranscriptLength += advance;
+                            activeWindow = [fullText substringFromIndex:strongSelf.committedTranscriptLength];
+                            shouldCommitSlice = (sliceToCommit.length >= 2);
+                        } else if (activeWindow.length >= softClauseLen) {
+                            NSUInteger cutAdvance = 0;
+                            NSCharacterSet *punctClauseSet = [NSCharacterSet characterSetWithCharactersInString:@",;，、"];
+                            NSUInteger searchStart = isCJKSource ? 10 : 24;
+                            NSRange pRange = [activeWindow rangeOfCharacterFromSet:punctClauseSet
+                                                                           options:NSBackwardsSearch
+                                                                             range:NSMakeRange(searchStart, activeWindow.length - searchStart)];
+                            if (pRange.location != NSNotFound) {
+                                cutAdvance = pRange.location + 1;
+                            } else if (!isCJKSource) {
+                                NSArray<NSString *> *conjunctions = @[@" and ", @" but ", @" because ", @" so ", @" which ", @" that ", @" when ", @" while ", @" if "];
+                                for (NSString *conj in conjunctions) {
+                                    NSRange cRange = [activeWindow rangeOfString:conj
+                                                                         options:NSBackwardsSearch | NSCaseInsensitiveSearch
+                                                                           range:NSMakeRange(searchStart, activeWindow.length - searchStart)];
+                                    if (cRange.location != NSNotFound) {
+                                        cutAdvance = cRange.location;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (cutAdvance == 0 && activeWindow.length >= hardClauseLen) {
+                                if (isCJKSource) {
+                                    cutAdvance = activeWindow.length;
+                                } else {
+                                    NSRange spaceRange = [activeWindow rangeOfString:@" "
+                                                                             options:NSBackwardsSearch
+                                                                               range:NSMakeRange(searchStart, activeWindow.length - searchStart)];
+                                    cutAdvance = (spaceRange.location != NSNotFound) ? (spaceRange.location + 1) : activeWindow.length;
+                                }
+                            }
+
+                            if (cutAdvance > 0) {
+                                sliceToCommit = [[activeWindow substringToIndex:cutAdvance] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                                strongSelf.committedTranscriptLength += cutAdvance;
+                                activeWindow = [fullText substringFromIndex:strongSelf.committedTranscriptLength];
+                                shouldCommitSlice = (sliceToCommit.length >= 2);
+                            }
+                        }
                     }
-                    weakSelf.committedSourceContext = sliceToCommit;
-                    weakSelf.lastRecognizedText = @"";
-                    [weakSelf dispatchMicroChunkTranslation:sliceToCommit isCommitSlice:YES];
-                }
 
-                // 3. 对正在说的新句子：采用意群步进防抖（避免半个单词变化就疯狂重翻闪烁）
-                if (cleanSpoken.length > 0) {
-                    weakSelf.latestPartialSegment = cleanSpoken;
-                    [weakSelf triggerMicroDebouncedStreamingTranslation];
-                }
-            });
-        }
+                    NSString *cleanSpoken = [activeWindow stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 
-        if (error || (result && result.isFinal)) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (!weakSelf.isAudioTranslatingActive || weakSelf.hidden) return;
-                if (weakSelf.lastTranslatedChunkText.length > 0) {
-                    [weakSelf appendCommittedTranslationSegment:weakSelf.lastTranslatedChunkText];
-                    weakSelf.lastTranslatedChunkText = @"";
-                    [weakSelf renderCombinedSubtitleWithActiveTail:nil instantHint:nil];
+                    NSString *previewOrig = cleanSpoken.length > 0 ? cleanSpoken : (sliceToCommit ?: @"");
+                    if (previewOrig.length > 0) {
+                        strongSelf.liveOriginalPreviewLabel.text = [NSString stringWithFormat:@"🗣️ %@", previewOrig];
+                    }
+
+                    if (shouldCommitSlice && sliceToCommit.length > 0) {
+                        if (strongSelf.lastTranslatedChunkText.length > 0) {
+                            [strongSelf appendCommittedTranslationSegment:strongSelf.lastTranslatedChunkText];
+                            strongSelf.lastTranslatedChunkText = @"";
+                            [strongSelf renderCombinedSubtitleWithActiveTail:nil instantHint:nil];
+                        }
+                        strongSelf.committedSourceContext = sliceToCommit;
+                        strongSelf.lastRecognizedText = @"";
+                        [strongSelf dispatchMicroChunkTranslation:sliceToCommit isCommitSlice:YES];
+
+                        NSTimeInterval taskAge = [[NSDate date] timeIntervalSince1970] - strongSelf->_speechTaskStartTime;
+                        if (taskAge >= 50.0) {
+                            strongSelf.committedTranscriptLength = 0;
+                            [strongSelf setupAndStartSpeechRecognitionTask];
+                            return;
+                        }
+                    }
+
+                    if (cleanSpoken.length > 0) {
+                        strongSelf.latestPartialSegment = cleanSpoken;
+                        [strongSelf triggerMicroDebouncedStreamingTranslation];
+                    }
                 }
-                weakSelf.committedTranscriptLength = 0;
-                if (!weakSelf.isInternalRecordingMode && (!weakSelf.voiceFallbackEngine || !weakSelf.voiceFallbackEngine.isRunning)) {
-                    [weakSelf startFallbackAudioEngineCapture];
+            }
+
+            if (error || (result && result.isFinal)) {
+                if (taskGen != strongSelf->_speechTaskGenID) return;
+                if (strongSelf.lastTranslatedChunkText.length > 0) {
+                    [strongSelf appendCommittedTranslationSegment:strongSelf.lastTranslatedChunkText];
+                    strongSelf.lastTranslatedChunkText = @"";
+                    [strongSelf renderCombinedSubtitleWithActiveTail:nil instantHint:nil];
                 }
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    if (weakSelf.isAudioTranslatingActive && !weakSelf.hidden) [weakSelf setupAndStartSpeechRecognitionTask];
+                strongSelf.committedTranscriptLength = 0;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.55 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    if (strongSelf.isAudioTranslatingActive && !strongSelf.hidden && taskGen == strongSelf->_speechTaskGenID) {
+                        [strongSelf setupAndStartSpeechRecognitionTask];
+                    }
                 });
-            });
-        }
+            }
+        });
     }];
 }
 
-// 方案 3：电脑级「意群步进 + 0.35s 停顿防抖」门控（彻底消除每 0.12 秒对半截残词推倒重翻导致的闪烁）
 - (void)triggerMicroDebouncedStreamingTranslation {
     if (!self.isAudioTranslatingActive || self.hidden || isDeviceCurrentlyLocked()) return;
     NSString *seg = self.latestPartialSegment;
-    if (!seg || seg.length < 3 || [seg isEqualToString:self.lastRecognizedText]) return;
+    if (!seg || seg.length < 2 || [seg isEqualToString:self.lastRecognizedText]) return;
 
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     BOOL isCJK = (self.sourceLangIndex != 0);
     NSInteger charDelta = (NSInteger)seg.length - (NSInteger)(self.lastRecognizedText.length);
-    NSInteger stepThreshold = isCJK ? 6 : 15; // 英语每新增约 3 个完整单词(15字符)或日韩新增 6 字才立即步进翻译一次
 
-    // 若已累积一个完整词组步长且距离上次请求 >= 0.38s，立即触发一次平滑跟进翻译
-    if (self.pipelineTasksMap.count == 0 && charDelta >= stepThreshold && (now - self.lastSpeechTranslateTime >= 0.38)) {
+    BOOL isFirstBurstOfSentence = (self.lastRecognizedText.length == 0 && seg.length >= (isCJK ? 4 : 10));
+    BOOL isClauseStepReady = (charDelta >= (isCJK ? 6 : 15) && (now - self.lastSpeechTranslateTime >= 0.42));
+
+    if (self.pipelineTasksMap.count == 0 && ((isFirstBurstOfSentence && (now - self.lastSpeechTranslateTime >= 0.25)) || isClauseStepReady)) {
         [self.microDebounceTimer invalidate];
         self.microDebounceTimer = nil;
         self.lastRecognizedText = seg;
@@ -17625,9 +17766,8 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
         return;
     }
 
-    // 否则重置 0.35s 停顿定时器：一旦说话人自然停顿 0.35s，立即翻译当前整句
     [self.microDebounceTimer invalidate];
-    self.microDebounceTimer = [NSTimer scheduledTimerWithTimeInterval:0.35 target:self selector:@selector(flushPendingSpeechSegmentTick) userInfo:nil repeats:NO];
+    self.microDebounceTimer = [NSTimer scheduledTimerWithTimeInterval:0.30 target:self selector:@selector(flushPendingSpeechSegmentTick) userInfo:nil repeats:NO];
 }
 
 - (void)flushPendingSpeechSegmentTick {
@@ -17642,6 +17782,7 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
 
 - (void)stopZeroInterferenceInternalAudioTranslation {
     self.isAudioTranslatingActive = NO;
+    _speechTaskGenID++;
     [self.audioKeepAliveTimer invalidate];
     self.audioKeepAliveTimer = nil;
     [self.microDebounceTimer invalidate];
@@ -17675,31 +17816,23 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
         if (eng) {
             @try {
                 [eng.inputNode removeTapOnBus:0];
-                if ([eng.inputNode respondsToSelector:@selector(setVoiceProcessingEnabled:error:)]) {
-                    [eng.inputNode setVoiceProcessingEnabled:NO error:nil];
-                }
                 [eng stop];
                 [eng reset];
             } @catch (NSException *e) {}
         }
         @try {
-            GeminiAssistantManager *mgr = [GeminiAssistantManager sharedManager];
-            if (!mgr.overlayWindow || mgr.overlayWindow.hidden) {
-                AVAudioSession *session = [AVAudioSession sharedInstance];
-                [session setCategory:AVAudioSessionCategoryAmbient withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
-                NSError *deactErr = nil;
-                [session setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:&deactErr];
-                if (deactErr) {
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), agAudioSerialQueue(), ^{
-                        [session setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:nil];
-                    });
+            if (!self.isAudioTranslatingActive) {
+                GeminiAssistantManager *mgr = [GeminiAssistantManager sharedManager];
+                if (!mgr.overlayWindow || mgr.overlayWindow.hidden) {
+                    AVAudioSession *session = [AVAudioSession sharedInstance];
+                    [session setCategory:AVAudioSessionCategoryAmbient withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
                 }
             }
         } @catch (NSException *e) {}
     });
 }
 
-#pragma mark - ⚡ 双缓冲无闪烁 SSE 流式同传引擎 (全 API 通用 + 上下文指代消解)
+#pragma mark - ⚡ 严格使用翻译专属配置、不绑定任何固定模型的 SSE 同传引擎
 
 - (void)dispatchMicroChunkTranslation:(NSString *)chunkText isCommitSlice:(BOOL)isCommit {
     if (!chunkText || chunkText.length < 2) return;
@@ -17709,12 +17842,11 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
     NSString *model = agTransModel();
     NSString *proxy = agProxyForTab(AGConfigTabTranslation);
 
-    if (apiKey.length < 4) {
-        [self updateSubtitleDisplay:@"⚠️ 请先在《设置 -> ✨天使守护》配置翻译 API Key"];
+    if (endpoint.length < 4 || apiKey.length < 4 || model.length == 0) {
+        [self updateSubtitleDisplay:@"⚠️ 请先在《设置 -> ✨天使守护 -> 实时字幕与翻译》配置专属接口、API Key 并选择模型"];
         return;
     }
 
-    // 清理过时的非定稿请求，保证网络队列永远零积压
     if (isCommit || self.pipelineTasksMap.count >= 1) {
         NSArray<NSNumber *> *allKeys = [self.pipelineTasksMap allKeys];
         for (NSNumber *tid in allKeys) {
@@ -17738,17 +17870,20 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
         self.highestDisplayedSeq = seq;
     }
 
-    NSString *sysInstruction = @"你是一位精通多国语言的同声传译专家。请将待译外语直接翻译为地道、通顺、一眼就能看懂的简体中文口语。只输出纯中文译文，绝不输出任何解释、引号或原文。";
-    NSString *userPrompt = (self.committedSourceContext.length > 0 && !isCommit)
-        ? [NSString stringWithFormat:@"[上句语境(仅供理解上下文指代，切勿重复翻译): %@]\n[当前待译句子]: %@", self.committedSourceContext, chunkText]
-        : chunkText;
+    NSString *sysInstruction = @"你是专业的同声传译员。请结合上文语境，将【当前待译句子】直接翻译为自然、通顺、让人一眼看懂的简体中文口语字幕。只输出【当前待译句子】对应的纯中文译文，绝不重复翻译上文，绝不输出任何解释、引号或原文。";
+    NSString *userPrompt = chunkText;
+    if (self.committedSourceContext.length > 0 && ![self.committedSourceContext isEqualToString:chunkText]) {
+        NSString *prevZh = _committedTargetContext.length > 0 ? _committedTargetContext : @"";
+        userPrompt = [NSString stringWithFormat:@"[上句语境(仅供理解代词指代与上下文，切勿重复翻译): %@ -> %@]\n[当前待译句子]: %@",
+                      self.committedSourceContext, prevZh, chunkText];
+    }
 
     BOOL isGoogle = agIsGoogleNativeProtocol(endpoint, model);
     NSMutableURLRequest *req = nil;
 
     if (isGoogle) {
         NSString *baseEP = agSanitizeEndpoint(endpoint, AGConfigTabTranslation);
-        NSString *fullM = [model hasPrefix:@"models/"] ? model : [NSString stringWithFormat:@"models/%@", (model.length > 0 ? model : @"gemini-2.5-flash-lite")];
+        NSString *fullM = [model hasPrefix:@"models/"] ? model : [NSString stringWithFormat:@"models/%@", model];
         NSString *urlStr = [NSString stringWithFormat:@"%@/v1beta/%@:streamGenerateContent?alt=sse&key=%@", baseEP, fullM, apiKey];
         req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
         req.HTTPMethod = @"POST";
@@ -17756,9 +17891,10 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
 
         NSMutableDictionary *genCfg = [@{
             @"temperature": @0.1,
-            @"maxOutputTokens": @96
+            @"maxOutputTokens": @120
         } mutableCopy];
-        if ([fullM containsString:@"2.5"] || [fullM containsString:@"3."]) {
+        NSString *lowerM = [fullM lowercaseString];
+        if (!_disableThinkingBudgetParam && ([lowerM containsString:@"2.5"] || [lowerM containsString:@"3."]) && ![lowerM containsString:@"pro"]) {
             genCfg[@"thinkingConfig"] = @{ @"thinkingBudget": @0 };
         }
         NSDictionary *body = @{
@@ -17774,7 +17910,6 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
         [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
         [req setValue:[NSString stringWithFormat:@"Bearer %@", apiKey] forHTTPHeaderField:@"Authorization"];
         NSString *exactM = [model stringByReplacingOccurrencesOfString:@"models/" withString:@""];
-        if (exactM.length == 0) exactM = @"gpt-4o-mini";
         NSDictionary *body = @{
             @"model": exactM,
             @"messages": @[
@@ -17782,12 +17917,12 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
                 @{ @"role": @"user", @"content": userPrompt }
             ],
             @"temperature": @0.1,
-            @"max_tokens": @96,
+            @"max_tokens": @120,
             @"stream": @YES
         };
         req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     }
-    req.timeoutInterval = 4.5;
+    req.timeoutInterval = 5.0;
 
     if (!self.transStreamSession) {
         self.transStreamSession = agCreateSessionWithProxy(proxy, self, [NSOperationQueue mainQueue]);
@@ -17797,6 +17932,7 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
         @"task": task,
         @"seq": @(seq),
         @"isCommit": @(isCommit),
+        @"sourceText": chunkText,
         @"streamBuf": [NSMutableString string],
         @"sseBuf": [NSMutableString string],
         @"rawData": [NSMutableData data]
@@ -17839,10 +17975,9 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
     }
     [sseBuf setString:lines.lastObject ?: @""];
 
-    // 双缓冲防闪烁门控：当新译文流式生成达到可读长度（或超过上一版译文长度）时才平滑替换上屏，杜绝从 1 个字重新跳动的闪烁感
     if (hasDelta && streamBuf.length > 0 && seq >= self.highestDisplayedSeq && !isCommit) {
         NSString *cleanPart = [streamBuf stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (cleanPart.length >= 4 || cleanPart.length >= self.lastTranslatedChunkText.length) {
+        if (cleanPart.length >= 2 && (self.lastTranslatedChunkText.length == 0 || cleanPart.length + 2 >= self.lastTranslatedChunkText.length)) {
             self.highestDisplayedSeq = seq;
             self.lastTranslatedChunkText = cleanPart;
             [self renderCombinedSubtitleWithActiveTail:cleanPart instantHint:nil];
@@ -17860,9 +17995,22 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
     NSMutableData *rawData = ctx[@"rawData"];
     NSUInteger seq = [ctx[@"seq"] unsignedIntegerValue];
     BOOL isCommit = [ctx[@"isCommit"] boolValue];
+    NSString *srcText = ctx[@"sourceText"] ?: @"";
 
     if (streamBuf.length == 0 && rawData.length > 0 && !error) {
         NSDictionary *json = [NSJSONSerialization JSONObjectWithData:rawData options:0 error:nil];
+        if ([json isKindOfClass:[NSDictionary class]] && json[@"error"]) {
+            NSString *errMsg = json[@"error"][@"message"] ?: @"API 响应异常";
+            if (!_disableThinkingBudgetParam && [errMsg containsString:@"thinking"]) {
+                _disableThinkingBudgetParam = YES;
+                [self dispatchMicroChunkTranslation:srcText isCommitSlice:isCommit];
+                return;
+            }
+            if (self.committedHistoryText.length == 0 && self.lastTranslatedChunkText.length == 0) {
+                [self updateSubtitleDisplay:[NSString stringWithFormat:@"⚠️ %@", errMsg]];
+            }
+            return;
+        }
         NSString *fullReply = [agExtractTextFromJSON(json) stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (fullReply.length > 0) {
             [streamBuf setString:fullReply];
@@ -17873,10 +18021,12 @@ static BOOL agApplySafeInMemoryDigitalAGCAndCheckSignal(CMSampleBufferRef sample
     if (finalChunkZh.length > 0) {
         if (isCommit) {
             [self appendCommittedTranslationSegment:finalChunkZh];
+            _lastUIRenderTimestamp = 0;
             [self renderCombinedSubtitleWithActiveTail:self.lastTranslatedChunkText instantHint:nil];
         } else if (seq >= self.highestDisplayedSeq) {
             self.highestDisplayedSeq = seq;
             self.lastTranslatedChunkText = finalChunkZh;
+            _lastUIRenderTimestamp = 0;
             [self renderCombinedSubtitleWithActiveTail:finalChunkZh instantHint:nil];
         }
     }
@@ -17905,8 +18055,8 @@ static void agPerformGeneralTranslation(NSString *sourceText, void (^completion)
     NSString *model = agTransModel();
     NSString *proxy = agProxyForTab(AGConfigTabTranslation);
 
-    if (apiKey.length < 4) {
-        if (completion) completion(nil, [NSError errorWithDomain:@"AGTrans" code:401 userInfo:@{NSLocalizedDescriptionKey: @"未配置有效 API Key"}]);
+    if (endpoint.length < 4 || apiKey.length < 4 || model.length == 0) {
+        if (completion) completion(nil, [NSError errorWithDomain:@"AGTrans" code:401 userInfo:@{NSLocalizedDescriptionKey: @"未配置翻译专属 API 或模型"}]);
         return;
     }
 
@@ -17921,7 +18071,7 @@ static void agPerformGeneralTranslation(NSString *sourceText, void (^completion)
 
     if (isGoogle) {
         NSString *baseEP = agSanitizeEndpoint(endpoint, AGConfigTabTranslation);
-        NSString *fullM = [model hasPrefix:@"models/"] ? model : [NSString stringWithFormat:@"models/%@", (model.length > 0 ? model : @"gemini-2.5-flash-lite")];
+        NSString *fullM = [model hasPrefix:@"models/"] ? model : [NSString stringWithFormat:@"models/%@", model];
         NSString *urlStr = [NSString stringWithFormat:@"%@/v1beta/%@:generateContent?key=%@", baseEP, fullM, apiKey];
         req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
         req.HTTPMethod = @"POST";
@@ -17930,7 +18080,8 @@ static void agPerformGeneralTranslation(NSString *sourceText, void (^completion)
             @"temperature": @0.1,
             @"maxOutputTokens": @1024
         } mutableCopy];
-        if ([fullM containsString:@"2.5"] || [fullM containsString:@"3."]) {
+        NSString *lowerM = [fullM lowercaseString];
+        if (([lowerM containsString:@"2.5"] || [lowerM containsString:@"3."]) && ![lowerM containsString:@"pro"]) {
             genCfg[@"thinkingConfig"] = @{ @"thinkingBudget": @0 };
         }
         NSDictionary *body = @{
@@ -17945,7 +18096,6 @@ static void agPerformGeneralTranslation(NSString *sourceText, void (^completion)
         [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
         [req setValue:[NSString stringWithFormat:@"Bearer %@", apiKey] forHTTPHeaderField:@"Authorization"];
         NSString *exactM = [model stringByReplacingOccurrencesOfString:@"models/" withString:@""];
-        if (exactM.length == 0) exactM = @"gpt-4o-mini";
         NSDictionary *body = @{
             @"model": exactM,
             @"messages": @[ @{ @"role": @"user", @"content": prompt } ],
