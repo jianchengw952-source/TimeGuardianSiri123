@@ -42,7 +42,7 @@
 | **E盘单文件归档** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调.txt` | 钉钉可打卡版本完整代码备份 |
 | **远端 Git 仓库** | `https://github.com/jianchengw952-source/TimeGuardianSiri123.git` | GitHub 远程仓库（分支：`main`） |
 | **当前 Git Commit** | `1b0135e` | `feat(stealth): eliminate CLSimulationManager and CLLocationSourceInformation static metadata, dynamically register sensitive anti-detection hooks` |
-| **GitHub Actions 运行记录** | Run #140 (ID: `40385010967`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
+| **GitHub Actions 运行记录** | Run #142 (ID: `40398437280`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
 
 ---
 
@@ -155,6 +155,38 @@
 
 
 
+
+
+### Run #142 验证与交付记录 (2026-10-27 04:47)
+- **GitHub Actions Run ID**: `40398437280` (Run #142, 双架构 build 成功)
+- **Commit**: `91aac17` (`feat(trans): upgrade web search card extraction, SSE live stream router pool, and in-situ chameleon sampling`)
+- **核心升级特性**：
+  1. **Bing 即时焦点卡片增强抽取 + 会话连接池复用（方案 6）**：
+     - 在 `agFetchRealtimeWebSearchContextForQuery` 中引入 `sSearchSession` 静态连接复用池与 `os_unfair_lock` 线程安全锁，消除重复握手延迟；
+     - 增加顶部问答卡片（天气 `wtr_currTemp`/`wtr_cond`、股价汇率 `b_focusTextLarge` 等）优先正则提取，秒级捕获即时答案；
+  2. **同传听译微切片管线 + 零泄漏连接池 + 内录数字增益 + 网页翻译复用（方案 1、2、3、4）**：
+     - 引入全局共享流式连接池路由器 `AGSharedTransSessionRouter`（混淆类名 `_UINetworkStreamSessionRouter`），复用同一会话保持 HTTP/2 与 TLS 长连接热态；
+     - 区分英语言语与中日韩（CJK）高密度言语的动态软/硬切片阈值（12~24 字符智能断句），严格隔离定稿切片与新词尾句，彻底杜绝丢句与重影；
+     - 实现多声道 Float32 / Big-Endian Int16 / Little-Endian Int16 兼容的安全内存数字增益（AGC）；
+  3. **原位智能跟随翻译升级（方案 5）**：
+     - 实现 `agSamplePatchBackgroundStyle` 变色龙底色采样器：采样局部屏幕像素亮度，自动切换深色/浅色自适应底色与对比文字颜色；
+     - 智能跨行自然段合并算法：基于行间距、垂直空隙与列对齐重叠率，将破碎多行整合成连续自然段覆膜。
+- **产物文件校验**：
+  - **Rootless (arm64)**: `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
+    - 大小: **427,328 字节**
+    - SHA256: `D3D2382016D54948DB030CB0A52C2675DF78B7CBDF716A67E2AEBBE4F65E5138`
+    - 内部归档: 纯 `xz` (`debian-binary`, `control.tar.xz`, `data.tar.xz`)
+  - **RootHide (arm64e)**: `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
+    - 大小: **279,832 字节**
+    - SHA256: `D59B7A9C8029C6AAF002D9AAD33B94F8D086ED6C0C24784C5D6AB56CABECFF34`
+    - 内部归档: 纯 `xz` (`debian-binary`, `control.tar.xz`, `data.tar.xz`)
+- **全镜像源与分发路径同步**：
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
 
 ### Run #140 验证与交付记录 (2026-10-27 03:16)
 - **GitHub Actions Run ID**: `40385010967` (Run #140, 双架构 build 成功)
