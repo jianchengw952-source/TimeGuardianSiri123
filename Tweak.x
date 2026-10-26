@@ -5651,6 +5651,7 @@ static void agGetDeviceMemoryInfo(double *outUsedRAMGB, double *outTotalRAMGB) {
     }
 }
 
+// ====== 最终确认替换块 1 开始（对应方案 6：增强天气/汇率/即时卡片联网提取 + 连接复用） ======
 static void agFetchRealtimeWebSearchContextForQuery(NSString *query, NSString *proxy, void(^completion)(NSString *searchSummary)) {
     NSString *cleanQ = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     BOOL webEnabled = agIsWebSearchEnabled();
@@ -5665,7 +5666,6 @@ static void agFetchRealtimeWebSearchContextForQuery(NSString *query, NSString *p
         return;
     }
 
-    // 方案 1：全网通用网页搜索升级（支持天气、即时事实、新闻、百科、汇率等）
     NSString *webURLStr = [NSString stringWithFormat:@"https://cn.bing.com/search?q=%@&setlang=zh-cn", encodedQ];
     NSURL *url = [NSURL URLWithString:webURLStr];
     if (!url) {
@@ -5676,7 +5676,19 @@ static void agFetchRealtimeWebSearchContextForQuery(NSString *query, NSString *p
     NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
     agLiveDiagLog(@"WEB_SEARCH_DIAG", @"Starting universal web search for query='%@', proxy='%@'", cleanQ, proxy ?: @"none");
 
-    NSURLSession *session = agCreateSessionWithProxy(proxy, nil, nil);
+    static NSURLSession *sSearchSession = nil;
+    static NSString *sLastSearchProxy = nil;
+    static os_unfair_lock sSearchLock = OS_UNFAIR_LOCK_INIT;
+    os_unfair_lock_lock(&sSearchLock);
+    NSString *normProxy = proxy ?: @"";
+    if (!sSearchSession || ![sLastSearchProxy isEqualToString:normProxy]) {
+        if (sSearchSession) [sSearchSession finishTasksAndInvalidate];
+        sSearchSession = agCreateSessionWithProxy(normProxy, nil, nil);
+        sLastSearchProxy = [normProxy copy];
+    }
+    NSURLSession *session = sSearchSession;
+    os_unfair_lock_unlock(&sSearchLock);
+
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.HTTPMethod = @"GET";
     req.timeoutInterval = 3.5;
@@ -5701,27 +5713,51 @@ static void agFetchRealtimeWebSearchContextForQuery(NSString *query, NSString *p
         }
 
         NSMutableArray<NSString *> *snippets = [NSMutableArray array];
+        NSMutableSet<NSString *> *seenSnippets = [NSMutableSet set];
         if (html.length > 0) {
-            NSRegularExpression *pRe = [NSRegularExpression regularExpressionWithPattern:@"<p[^>]*>(.*?)</p>" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
             NSRegularExpression *tagStripRe = [NSRegularExpression regularExpressionWithPattern:@"<[^>]+>" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
-            NSArray<NSTextCheckingResult *> *pMatches = [pRe matchesInString:html options:0 range:NSMakeRange(0, html.length)];
+            NSRegularExpression *scriptStripRe = [NSRegularExpression regularExpressionWithPattern:@"<(?:script|style)[^>]*>.*?</(?:script|style)>" options:NSRegularExpressionDotMatchesLineSeparators | NSRegularExpressionCaseInsensitive error:nil];
+            NSString *sanitizedHTML = [scriptStripRe stringByReplacingMatchesInString:html options:0 range:NSMakeRange(0, html.length) withTemplate:@""];
 
-            for (NSTextCheckingResult *m in pMatches) {
-                if (snippets.count >= 4) break;
-                if (m.numberOfRanges > 1) {
-                    NSString *rawP = [html substringWithRange:[m rangeAtIndex:1]];
-                    NSString *cleanText = [tagStripRe stringByReplacingMatchesInString:rawP options:0 range:NSMakeRange(0, rawP.length) withTemplate:@""];
-                    cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&quot;" withString:@"\""];
-                    cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&amp;" withString:@"&"];
-                    cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&nbsp;" withString:@" "];
-                    cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&#39;" withString:@"'"];
-                    cleanText = [cleanText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                    if (cleanText.length >= 15 && ![cleanText containsString:@"JavaScript"] && ![cleanText containsString:@"Cookie"] && ![cleanText containsString:@"浙公网安备"]) {
-                        NSString *trimmedSnippet = (cleanText.length > 150) ? [cleanText substringToIndex:150] : cleanText;
-                        [snippets addObject:[NSString stringWithFormat:@"- %@", trimmedSnippet]];
+            void (^extractWithPattern)(NSString *, NSUInteger) = ^(NSString *pattern, NSUInteger minLen) {
+                if (snippets.count >= 6) return;
+                NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionDotMatchesLineSeparators | NSRegularExpressionCaseInsensitive error:nil];
+                NSArray<NSTextCheckingResult *> *matches = [re matchesInString:sanitizedHTML options:0 range:NSMakeRange(0, sanitizedHTML.length)];
+                for (NSTextCheckingResult *m in matches) {
+                    if (snippets.count >= 6) break;
+                    if (m.numberOfRanges > 1) {
+                        NSString *raw = [sanitizedHTML substringWithRange:[m rangeAtIndex:1]];
+                        NSString *cleanText = [tagStripRe stringByReplacingMatchesInString:raw options:0 range:NSMakeRange(0, raw.length) withTemplate:@" "];
+                        cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&quot;" withString:@"\""];
+                        cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&amp;" withString:@"&"];
+                        cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&nbsp;" withString:@" "];
+                        cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&#39;" withString:@"'"];
+                        cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&#x27;" withString:@"'"];
+                        cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&lt;" withString:@"<"];
+                        cleanText = [cleanText stringByReplacingOccurrencesOfString:@"&gt;" withString:@">"];
+                        cleanText = [cleanText stringByReplacingOccurrencesOfString:@"\\s+" withString:@" " options:NSRegularExpressionSearch range:NSMakeRange(0, cleanText.length)];
+                        cleanText = [cleanText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                        if (cleanText.length >= minLen &&
+                            ![cleanText containsString:@"JavaScript"] &&
+                            ![cleanText containsString:@"Cookie"] &&
+                            ![cleanText containsString:@"浙公网安备"] &&
+                            ![cleanText containsString:@"沪ICP备"]) {
+                            NSString *clipped = (cleanText.length > 180) ? [cleanText substringToIndex:180] : cleanText;
+                            if (![seenSnippets containsObject:clipped]) {
+                                [seenSnippets addObject:clipped];
+                                [snippets addObject:[NSString stringWithFormat:@"- %@", clipped]];
+                            }
+                        }
                     }
                 }
-            }
+            };
+
+            // 1. 优先提取 Bing 顶部即时问答卡片（天气、实时股价、汇率、百科焦点数值）
+            extractWithPattern(@"<div[^>]*class=\"[^\"]*(?:b_focusTextLarge|b_focusTextMedium|b_focusTextSmall|b_factrow|wtr_currTemp|wtr_cond|wtr_high|wtr_low|b_ans)[^\"]*\"[^>]*>(.*?)</div>", 4);
+            // 2. 提取搜索结果摘要块 (b_caption / b_algoSlug)
+            extractWithPattern(@"<div[^>]*class=\"[^\"]*(?:b_caption|b_algoSlug)[^\"]*\"[^>]*>(.*?)</div>", 12);
+            // 3. 常规段落兜底 (<p>)
+            extractWithPattern(@"<p[^>]*>(.*?)</p>", 15);
         }
 
         NSString *finalContext = (snippets.count > 0) ? [snippets componentsJoinedByString:@"\n"] : nil;
@@ -5731,6 +5767,7 @@ static void agFetchRealtimeWebSearchContextForQuery(NSString *query, NSString *p
         });
     }] resume];
 }
+// ====== 最终确认替换块 1 结束 ======
 
 static NSString *agSanitizeEndpoint(NSString *raw, AGConfigTab tab) {
     NSString *ep = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -16597,7 +16634,10 @@ static NSString *agInstantLocalPreviewForSegment(NSString *segment, NSInteger la
     return hits.count > 0 ? [hits componentsJoinedByString:@"·"] : @"";
 }
 
-// ==================== 全平台 API 通用的零积压实时翻译调度器 ====================
+// ====== 最终确认替换块 2 开始（对应方案 1、2、3、4：实时语音同传听译与连接池全面升级） ======
+#define AGSharedTransSessionRouter _UINetworkStreamSessionRouter
+
+// ==================== 全平台 API 通用的零积压实时翻译调度器（含 HTTP/2 连接池复用） ====================
 static NSURLSessionDataTask *gActiveTransTask = nil;
 static NSTimeInterval gActiveTransStartTime = 0;
 static NSString *gPendingLatestSourceText = nil;
@@ -16605,37 +16645,7 @@ static void (^gPendingLatestTransCallback)(NSString *translatedText) = nil;
 static NSUInteger gTransRequestSeq = 0;
 static NSString *gLastTranslatedSourceSnapshot = nil;
 
-// 彻底清空实时翻译队列、快照与缓冲槽，防止上次残留的译文在新会话中弹出
-static void agResetRealtimeTranslationState(void) {
-    gTransRequestSeq++; // 使所有旧的在途回调立即失效
-    if (gActiveTransTask) {
-        [gActiveTransTask cancel];
-        gActiveTransTask = nil;
-    }
-    gActiveTransStartTime = 0;
-    gPendingLatestSourceText = nil;
-    gPendingLatestTransCallback = nil;
-    gLastTranslatedSourceSnapshot = nil;
-}
-
-// 提取自任意长语音识别流的最近 120 字滑动窗口（防止长文拖慢第三方大模型 TTFT 首字响应）
-static NSString *agExtractSlidingWindowForLiveTrans(NSString *fullRecognizedText) {
-    if (!fullRecognizedText) return @"";
-    NSString *trimmed = [fullRecognizedText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    NSUInteger maxWindowLen = 120;
-    if (trimmed.length <= maxWindowLen) return trimmed;
-
-    // 优先在最近 120 字内的句号/问号/逗号/空格处自然切分，保持语义完整
-    NSString *tail = [trimmed substringFromIndex:(trimmed.length - maxWindowLen)];
-    NSCharacterSet *punctSet = [NSCharacterSet characterSetWithCharactersInString:@"。.!！？?，,;；\n"];
-    NSRange firstPunct = [tail rangeOfCharacterFromSet:punctSet];
-    if (firstPunct.location != NSNotFound && firstPunct.location < 36 && firstPunct.location + 1 < tail.length) {
-        return [[tail substringFromIndex:(firstPunct.location + 1)] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-    }
-    return tail;
-}
-
-// ==================== SSE 流式同传委托（<200ms 首字即时上屏） ====================
+// ==================== SSE 流式同传委托与零泄漏连接池路由器 ====================
 @interface AGStreamTranslateDelegate : NSObject <NSURLSessionDataDelegate>
 @property (nonatomic, copy) void (^onDelta)(NSString *accumulatedText);
 @property (nonatomic, copy) void (^onCompletion)(void);
@@ -16704,29 +16714,149 @@ static NSString *agExtractSlidingWindowForLiveTrans(NSString *fullRecognizedText
 }
 @end
 
+// 全局共享流式连接池路由器：复用同一个 NSURLSession，保持 HTTP/2 与 TLS 长连接热态，0 内存泄漏
+@interface AGSharedTransSessionRouter : NSObject <NSURLSessionDataDelegate>
+@property (nonatomic, strong) NSURLSession *pooledSession;
+@property (nonatomic, copy) NSString *currentProxy;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, AGStreamTranslateDelegate *> *taskMap;
++ (instancetype)sharedRouter;
+- (NSURLSessionDataTask *)startStreamTaskWithRequest:(NSURLRequest *)req proxy:(NSString *)proxy delegate:(AGStreamTranslateDelegate *)del;
+- (NSURLSession *)sharedNonStreamSessionForProxy:(NSString *)proxy;
+- (void)resetPool;
+@end
+
+@implementation AGSharedTransSessionRouter {
+    os_unfair_lock _lock;
+    NSURLSession *_nonStreamSession;
+    NSString *_nonStreamProxy;
+}
+
++ (instancetype)sharedRouter {
+    static AGSharedTransSessionRouter *sRouter = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sRouter = [[self alloc] init];
+    });
+    return sRouter;
+}
+
+- (instancetype)init {
+    if (self = [super init]) {
+        _lock = OS_UNFAIR_LOCK_INIT;
+        _taskMap = [NSMutableDictionary dictionary];
+        _currentProxy = @"";
+        _nonStreamProxy = @"";
+    }
+    return self;
+}
+
+- (NSURLSessionDataTask *)startStreamTaskWithRequest:(NSURLRequest *)req proxy:(NSString *)proxy delegate:(AGStreamTranslateDelegate *)del {
+    NSString *cleanProxy = [proxy ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    os_unfair_lock_lock(&_lock);
+    if (!self.pooledSession || ![self.currentProxy isEqualToString:cleanProxy]) {
+        if (self.pooledSession) {
+            [self.pooledSession finishTasksAndInvalidate];
+        }
+        self.pooledSession = agCreateSessionWithProxy(cleanProxy, self, [NSOperationQueue mainQueue]);
+        self.currentProxy = cleanProxy;
+    }
+    NSURLSessionDataTask *task = [self.pooledSession dataTaskWithRequest:req];
+    if (task && del) {
+        self.taskMap[@(task.taskIdentifier)] = del;
+    }
+    os_unfair_lock_unlock(&_lock);
+    [task resume];
+    return task;
+}
+
+- (NSURLSession *)sharedNonStreamSessionForProxy:(NSString *)proxy {
+    NSString *cleanProxy = [proxy ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    os_unfair_lock_lock(&_lock);
+    if (!_nonStreamSession || ![_nonStreamProxy isEqualToString:cleanProxy]) {
+        if (_nonStreamSession) {
+            [_nonStreamSession finishTasksAndInvalidate];
+        }
+        _nonStreamSession = agCreateSessionWithProxy(cleanProxy, nil, nil);
+        _nonStreamProxy = [cleanProxy copy];
+    }
+    NSURLSession *sess = _nonStreamSession;
+    os_unfair_lock_unlock(&_lock);
+    return sess;
+}
+
+- (void)resetPool {
+    os_unfair_lock_lock(&_lock);
+    [self.taskMap removeAllObjects];
+    os_unfair_lock_unlock(&_lock);
+}
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
+    os_unfair_lock_lock(&_lock);
+    AGStreamTranslateDelegate *del = self.taskMap[@(dataTask.taskIdentifier)];
+    os_unfair_lock_unlock(&_lock);
+    if (del) {
+        [del URLSession:session dataTask:dataTask didReceiveData:data];
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    os_unfair_lock_lock(&_lock);
+    AGStreamTranslateDelegate *del = self.taskMap[@(task.taskIdentifier)];
+    [self.taskMap removeObjectForKey:@(task.taskIdentifier)];
+    os_unfair_lock_unlock(&_lock);
+    if (del) {
+        [del URLSession:session task:task didCompleteWithError:error];
+    }
+}
+@end
+
+static void agResetRealtimeTranslationState(void) {
+    gTransRequestSeq++;
+    if (gActiveTransTask) {
+        [gActiveTransTask cancel];
+        gActiveTransTask = nil;
+    }
+    gActiveTransStartTime = 0;
+    gPendingLatestSourceText = nil;
+    gPendingLatestTransCallback = nil;
+    gLastTranslatedSourceSnapshot = nil;
+    [[AGSharedTransSessionRouter sharedRouter] resetPool];
+}
+
+static NSString *agExtractSlidingWindowForLiveTrans(NSString *fullRecognizedText) {
+    if (!fullRecognizedText) return @"";
+    NSString *trimmed = [fullRecognizedText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSUInteger maxWindowLen = 120;
+    if (trimmed.length <= maxWindowLen) return trimmed;
+
+    NSString *tail = [trimmed substringFromIndex:(trimmed.length - maxWindowLen)];
+    NSCharacterSet *punctSet = [NSCharacterSet characterSetWithCharactersInString:@"。.!！？?，,;；\n"];
+    NSRange firstPunct = [tail rangeOfCharacterFromSet:punctSet];
+    if (firstPunct.location != NSNotFound && firstPunct.location < 36 && firstPunct.location + 1 < tail.length) {
+        return [[tail substringFromIndex:(firstPunct.location + 1)] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    }
+    return tail;
+}
+
 static void agFireNextRealtimeTranslationIfNeeded(void);
 
-// 实时听译统一入口：任何新识别出的文本调用此函数，自动防抖、防排队积压、超时秒断重发
 static void agEnqueueRealtimeTranslationText(NSString *rawSourceText, void(^completion)(NSString *translatedText)) {
     NSString *windowText = agExtractSlidingWindowForLiveTrans(rawSourceText);
     if (windowText.length == 0) return;
     if (gLastTranslatedSourceSnapshot && [gLastTranslatedSourceSnapshot isEqualToString:windowText]) {
-        return; // 内容未变，不发重复请求
+        return;
     }
 
-    // 始终用最新的一句话覆盖待发缓冲槽（直接丢弃中间过期的半句话，彻底杜绝雪崩延迟！）
     gPendingLatestSourceText = [windowText copy];
     gPendingLatestTransCallback = [completion copy];
 
     NSTimeInterval now = CACurrentMediaTime();
     if (gActiveTransTask != nil) {
-        // 断路器：如果上一个请求已经卡住超过 2.5 秒仍未返回，且现在有了新话，立即掐断旧请求并发起最新请求！
-        if (now - gActiveTransStartTime >= 2.5) {
-            agLiveDiagLog(@"TRANS_BREAKER", @"Canceling stalled translation task (>2.5s) to flush latest speech");
+        if (now - gActiveTransStartTime >= 2.2) {
+            agLiveDiagLog(@"TRANS_BREAKER", @"Canceling stalled translation task (>2.2s) to flush latest speech");
             [gActiveTransTask cancel];
             gActiveTransTask = nil;
         } else {
-            // 当前请求未超时，静默等待其完成后在回调里自动无缝发出 gPendingLatestSourceText
             return;
         }
     }
@@ -16744,7 +16874,6 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     gPendingLatestSourceText = nil;
     gLastTranslatedSourceSnapshot = textToTranslate;
 
-    // 严格读取「🌐 实时翻译」模块自己独立配置的 Endpoint / APIKey / Proxy / Model
     NSString *endpoint = agEndpointForTab(AGConfigTabTranslation);
     NSString *apiKey   = agAPIKeyForTab(AGConfigTabTranslation);
     NSString *proxy    = agProxyForTab(AGConfigTabTranslation);
@@ -16757,7 +16886,6 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     NSMutableURLRequest *req = nil;
     if (isGoogle) {
         NSString *fullM = [modelID hasPrefix:@"models/"] ? modelID : [NSString stringWithFormat:@"models/%@", (modelID.length > 0 ? modelID : @"gemini-2.5-flash-lite")];
-        // 核心加速：改用 SSE 流式接口 streamGenerateContent?alt=sse，首字 150ms 闪电上屏！
         NSString *baseEP = agSanitizeEndpoint(endpoint, AGConfigTabTranslation);
         NSString *urlStr = [NSString stringWithFormat:@"%@/v1beta/%@:streamGenerateContent?alt=sse&key=%@", baseEP, fullM, apiKey];
         req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
@@ -16777,7 +16905,6 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
         };
         req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     } else {
-        // 100% 标准 OpenAI 兼容协议（支持 DeepSeek / 通义千问 / 豆包 / 智谱 / NewAPI / OneAPI 等任意第三方接口）
         NSString *urlStr = agSanitizeOpenAIEndpoint(endpoint);
         req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
         req.HTTPMethod = @"POST";
@@ -16817,10 +16944,70 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
         }
     };
 
-    NSURLSession *session = agCreateSessionWithProxy(proxy, streamDel, [NSOperationQueue mainQueue]);
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:req];
-    gActiveTransTask = task;
-    [task resume];
+    gActiveTransTask = [[AGSharedTransSessionRouter sharedRouter] startStreamTaskWithRequest:req proxy:proxy delegate:streamDel];
+}
+
+// 兼容 Float32 / Big-Endian Int16 / Little-Endian Int16 的无损内存数字增益引擎
+static void agApplySafeInMemoryDigitalAGC(CMSampleBufferRef sampleBuffer) {
+    if (!sampleBuffer) return;
+    CMAudioFormatDescriptionRef fmtDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
+    const AudioStreamBasicDescription *asbd = fmtDesc ? CMAudioFormatDescriptionGetStreamBasicDescription(fmtDesc) : NULL;
+    CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
+    if (!blockBuffer) return;
+
+    size_t lengthAtOffset = 0, totalLength = 0;
+    char *dataPointer = NULL;
+    if (CMBlockBufferGetDataPointer(blockBuffer, 0, &lengthAtOffset, &totalLength, &dataPointer) != noErr || !dataPointer || totalLength < 4) {
+        return;
+    }
+
+    BOOL isFloat = asbd ? ((asbd->mFormatFlags & kAudioFormatFlagIsFloat) != 0) : NO;
+    BOOL isBigEndian = asbd ? ((asbd->mFormatFlags & kAudioFormatFlagIsBigEndian) != 0) : NO;
+    uint32_t bits = asbd ? asbd->mBitsPerChannel : 16;
+
+    if (isFloat && bits == 32 && !isBigEndian) {
+        float *samples = (float *)dataPointer;
+        size_t count = totalLength / sizeof(float);
+        if (count == 0) return;
+        double sumSquares = 0.0;
+        for (size_t i = 0; i < count; i++) {
+            float s = samples[i];
+            if (isfinite(s)) sumSquares += (double)s * (double)s;
+        }
+        double rms = sqrt(sumSquares / (double)count);
+        if (rms > 0.00003 && rms < 0.12) {
+            float gain = (float)MIN(16.0, 0.18 / rms);
+            for (size_t i = 0; i < count; i++) {
+                float v = samples[i] * gain;
+                if (v > 0.98f) v = 0.98f;
+                else if (v < -0.98f) v = -0.98f;
+                samples[i] = v;
+            }
+        }
+    } else if (!isFloat && bits == 16) {
+        int16_t *samples = (int16_t *)dataPointer;
+        size_t count = totalLength / sizeof(int16_t);
+        if (count == 0) return;
+        double sumSquares = 0.0;
+        for (size_t i = 0; i < count; i++) {
+            int16_t raw = samples[i];
+            int16_t hostVal = isBigEndian ? (int16_t)CFSwapInt16BigToHost((uint16_t)raw) : raw;
+            sumSquares += (double)hostVal * (double)hostVal;
+        }
+        double rms = sqrt(sumSquares / (double)count);
+        if (rms > 1.0 && rms < 2600.0) {
+            double gain = MIN(16.0, 3800.0 / rms);
+            for (size_t i = 0; i < count; i++) {
+                int16_t raw = samples[i];
+                int16_t hostVal = isBigEndian ? (int16_t)CFSwapInt16BigToHost((uint16_t)raw) : raw;
+                double val = (double)hostVal * gain;
+                if (val > 32767.0) val = 32767.0;
+                else if (val < -32768.0) val = -32768.0;
+                int16_t clamped = (int16_t)val;
+                samples[i] = isBigEndian ? (int16_t)CFSwapInt16HostToBig((uint16_t)clamped) : clamped;
+            }
+        }
+    }
 }
 
 @implementation AGScreenTranslationOverlay
@@ -16998,11 +17185,13 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 - (void)appendCommittedTranslationSegment:(NSString *)seg {
     NSString *clean = [seg stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (clean.length == 0) return;
-    if (self.committedHistoryText.length > 0 && ![self.committedHistoryText hasSuffix:@" "] && ![self.committedHistoryText hasSuffix:@"，"] && ![self.committedHistoryText hasSuffix:@"。"]) {
+    if (self.committedHistoryText.length > 0 &&
+        ![self.committedHistoryText hasSuffix:@" "] &&
+        ![self.committedHistoryText hasSuffix:@"，"] &&
+        ![self.committedHistoryText hasSuffix:@"。"]) {
         [self.committedHistoryText appendString:@" "];
     }
     [self.committedHistoryText appendString:clean];
-    // 保持历史定稿区在 75 个汉字以内，自动滑动淘汰最老句子，确保阅读视线始终在最新两行
     if (self.committedHistoryText.length > 75) {
         NSUInteger cutIdx = self.committedHistoryText.length - 58;
         [self.committedHistoryText deleteCharactersInRange:NSMakeRange(0, cutIdx)];
@@ -17028,11 +17217,14 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 
 - (void)updateSubtitleDisplay:(NSString *)text {
     if (!text || text.length == 0) return;
-    self.translatedTextView.text = text;
-    NSInteger len = self.translatedTextView.text.length;
-    if (len > 0) {
-        [self.translatedTextView scrollRangeToVisible:NSMakeRange(len - 1, 1)];
-    }
+    if ([self.translatedTextView.text isEqualToString:text]) return;
+    [UIView performWithoutAnimation:^{
+        self.translatedTextView.text = text;
+        NSInteger len = self.translatedTextView.text.length;
+        if (len > 0) {
+            [self.translatedTextView scrollRangeToVisible:NSMakeRange(len - 1, 1)];
+        }
+    }];
 }
 
 - (void)relayoutCropBoxSubviews {
@@ -17155,12 +17347,10 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 }
 
 - (void)hideTranslatorFloatingBox {
-    // 1. 同步一票否决主原子锁与窗口可见性，彻底掐死所有异步委托与定时器的“僵尸复活”
     self.isAudioTranslatingActive = NO;
     self.hidden = YES;
     self.alpha = 0.0;
 
-    // 2. 彻底拆卸所有收音引擎与识别任务
     [self stopZeroInterferenceInternalAudioTranslation];
     [self resetAllTranslationHistoryAndUI];
     if (self.transStreamSession) {
@@ -17169,7 +17359,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     }
 }
 
-#pragma mark - 👂 无损音量 + 内存副本 3.5x 自适应数字增幅 (In-Memory Soft AGC)
+#pragma mark - 👂 无损音量 + 兼容 Float32/Int16 内存自适应数字增益 + 异步 OCR 字幕兜底
 
 - (void)startZeroInterferenceInternalAudioTranslation {
     if (!self.isAudioTranslatingActive || self.hidden) return;
@@ -17201,8 +17391,6 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     id avsc = (avSysCls && [avSysCls respondsToSelector:@selector(sharedAVSystemController)]) ? [avSysCls sharedAVSystemController] : nil;
 
     if (self.isInternalRecordingMode) {
-        // 🔇 彻底废除流氓降音：绝不修改用户的系统音量滑块！保留真实音量体验！
-        // 同时在内存副本中对数字 PCM 进行 16x 自适应放大，因此即便用户静音/音量拉到0，翻译引擎依然能收到清晰的数字声音！
         if (avsc && [avsc respondsToSelector:@selector(getVolume:forCategory:)]) {
             float vol = 0.5f;
             [avsc getVolume:&vol forCategory:@"Audio/Video"];
@@ -17215,43 +17403,16 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
             self.isReplayKitCapturing = YES;
             [recorder startCaptureWithHandler:^(CMSampleBufferRef  _Nonnull sampleBuffer, RPSampleBufferType bufferType, NSError * _Nullable error) {
                 if (error || !weakSelf.speechRequest || !weakSelf.isAudioTranslatingActive || weakSelf.hidden) return;
-                // 仅处理系统应用内录音频 (RPSampleBufferTypeAudioApp) 和麦克风音频 (RPSampleBufferTypeAudioMic)
                 if (bufferType == RPSampleBufferTypeAudioApp || bufferType == RPSampleBufferTypeAudioMic) {
                     weakSelf.lastAppAudioTime = [[NSDate date] timeIntervalSince1970];
-                    // 在内存中对 PCM 采样点进行自适应数字增益放大 (Digital AGC，放大至标准 -18dB)
-                    CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
-                    if (blockBuffer) {
-                        size_t lengthAtOffset = 0, totalLength = 0;
-                        char *dataPointer = NULL;
-                        if (CMBlockBufferGetDataPointer(blockBuffer, 0, &lengthAtOffset, &totalLength, &dataPointer) == noErr && dataPointer && totalLength >= 4) {
-                            int16_t *samples = (int16_t *)dataPointer;
-                            size_t count = totalLength / sizeof(int16_t);
-                            double sumSquares = 0.0;
-                            for (size_t i = 0; i < count; i++) {
-                                double s = (double)samples[i];
-                                sumSquares += s * s;
-                            }
-                            double rms = sqrt(sumSquares / (double)count);
-                            // 即使系统音量为 0 或静音，只要数字总线有大于 1.0 的数据，自动增益最高 16 倍放大到规范电平 (~3800)！
-                            if (rms > 1.0 && rms < 2600.0) {
-                                double targetRMS = 3800.0;
-                                double gain = MIN(16.0, targetRMS / rms);
-                                for (size_t i = 0; i < count; i++) {
-                                    double val = (double)samples[i] * gain;
-                                    if (val > 32767.0) val = 32767.0;
-                                    else if (val < -32768.0) val = -32768.0;
-                                    samples[i] = (int16_t)val;
-                                }
-                            }
-                        }
-                    }
+                    // 方案 3：安全识别 Float32 / Big-Endian Int16 / Little-Endian Int16 后再执行数字 AGC 放大，彻底消除杂音
+                    agApplySafeInMemoryDigitalAGC(sampleBuffer);
                     [weakSelf.speechRequest appendAudioSampleBuffer:sampleBuffer];
                 }
             } completionHandler:^(NSError * _Nullable error) {
                 if (error && weakSelf.isAudioTranslatingActive && !weakSelf.hidden) {
                     weakSelf.isReplayKitCapturing = NO;
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        // 当应用受 DRM 保护或音频会话独占被拒时，无缝自动降级为双路麦克风收音
                         if (weakSelf.isAudioTranslatingActive && !weakSelf.hidden) {
                             [weakSelf startFallbackAudioEngineCapture];
                         }
@@ -17262,7 +17423,13 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
             [self startFallbackAudioEngineCapture];
         }
 
-        // 智能静音兜底：仅在悬浮窗可见且确实无音频时执行，且在窗口隐藏时立即休眠
+        // 方案 4：异步后台队列静音 OCR 兜底（消除主线程掉帧 + 绑定当前语种 + 多行字幕从上到下排序）
+        static dispatch_queue_t sSilentOCRQueue = nil;
+        static dispatch_once_t onceQueueToken;
+        dispatch_once(&onceQueueToken, ^{
+            sSilentOCRQueue = dispatch_queue_create("com.angelguardian.silentocr", DISPATCH_QUEUE_SERIAL);
+        });
+
         [self.silentFallbackTimer invalidate];
         self.silentFallbackTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer * _Nonnull timer) {
             if (!weakSelf || !weakSelf.isAudioTranslatingActive || weakSelf.hidden || isDeviceCurrentlyLocked()) return;
@@ -17276,43 +17443,60 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
                 CGRect subRect = CGRectMake(0, (size_t)(h * 0.70), w, (size_t)(h * 0.28));
                 CGImageRef cropImg = CGImageCreateWithImageInRect(cgImg, subRect);
                 if (!cropImg) return;
-                VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCGImage:cropImg options:@{}];
-                CGImageRelease(cropImg);
-                VNRecognizeTextRequest *req = [[VNRecognizeTextRequest alloc] initWithCompletionHandler:^(VNRequest * _Nonnull request, NSError * _Nullable error) {
-                    if (error || !weakSelf.isAudioTranslatingActive || weakSelf.hidden) return;
-                    NSMutableString *ocrText = [NSMutableString string];
-                    for (VNRecognizedTextObservation *obs in request.results) {
-                        VNRecognizedText *top = [[obs topCandidates:1] firstObject];
-                        if (top && top.string.length > 0) {
-                            if (ocrText.length > 0) [ocrText appendString:@" "];
-                            [ocrText appendString:top.string];
+
+                NSString *curLang = [weakSelf currentLocaleIdentifier];
+                dispatch_async(sSilentOCRQueue, ^{
+                    if (!weakSelf || !weakSelf.isAudioTranslatingActive || weakSelf.hidden) {
+                        CGImageRelease(cropImg);
+                        return;
+                    }
+                    VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCGImage:cropImg options:@{}];
+                    CGImageRelease(cropImg);
+
+                    VNRecognizeTextRequest *req = [[VNRecognizeTextRequest alloc] initWithCompletionHandler:^(VNRequest * _Nonnull request, NSError * _Nullable error) {
+                        if (error || !weakSelf.isAudioTranslatingActive || weakSelf.hidden || request.results.count == 0) return;
+
+                        NSArray<VNRecognizedTextObservation *> *sortedObs = [request.results sortedArrayUsingComparator:^NSComparisonResult(VNRecognizedTextObservation *a, VNRecognizedTextObservation *b) {
+                            if (fabs(a.boundingBox.origin.y - b.boundingBox.origin.y) > 0.04) {
+                                return (a.boundingBox.origin.y > b.boundingBox.origin.y) ? NSOrderedAscending : NSOrderedDescending;
+                            }
+                            return (a.boundingBox.origin.x < b.boundingBox.origin.x) ? NSOrderedAscending : NSOrderedDescending;
+                        }];
+
+                        NSMutableString *ocrText = [NSMutableString string];
+                        for (VNRecognizedTextObservation *obs in sortedObs) {
+                            VNRecognizedText *top = [[obs topCandidates:1] firstObject];
+                            if (top && top.string.length > 0) {
+                                if (ocrText.length > 0) [ocrText appendString:@" "];
+                                [ocrText appendString:top.string];
+                            }
                         }
-                    }
-                    NSString *cleaned = [ocrText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                    if (cleaned.length >= 2 && ![cleaned isEqualToString:weakSelf.lastOcrRecognizedText]) {
-                        weakSelf.lastOcrRecognizedText = cleaned;
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            weakSelf.liveOriginalPreviewLabel.text = [NSString stringWithFormat:@"📺 画面字幕: %@", cleaned];
-                            agEnqueueRealtimeTranslationText(cleaned, ^(NSString *translatedText) {
-                                [weakSelf updateSubtitleDisplay:translatedText];
+                        NSString *cleaned = [ocrText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                        if (cleaned.length >= 2 && ![cleaned isEqualToString:weakSelf.lastOcrRecognizedText]) {
+                            weakSelf.lastOcrRecognizedText = cleaned;
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                if (!weakSelf.isAudioTranslatingActive || weakSelf.hidden) return;
+                                weakSelf.liveOriginalPreviewLabel.text = [NSString stringWithFormat:@"📺 画面字幕: %@", cleaned];
+                                agEnqueueRealtimeTranslationText(cleaned, ^(NSString *translatedText) {
+                                    [weakSelf updateSubtitleDisplay:translatedText];
+                                });
                             });
-                        });
-                    }
-                }];
-                req.recognitionLevel = VNRequestTextRecognitionLevelFast;
-                req.usesLanguageCorrection = NO;
-                [handler performRequests:@[req] error:nil];
+                        }
+                    }];
+                    req.recognitionLevel = VNRequestTextRecognitionLevelFast;
+                    req.usesLanguageCorrection = NO;
+                    req.recognitionLanguages = @[curLang ?: @"en-US", @"en-US", @"ja-JP", @"ko-KR", @"zh-Hans"];
+                    [handler performRequests:@[req] error:nil];
+                });
             }
         }];
     } else {
-        // 🎙️ 外放麦克风收音模式
         [self startFallbackAudioEngineCapture];
     }
 }
 
 - (void)handleTranslationAudioInterruption:(NSNotification *)note {
     if (!self.isAudioTranslatingActive || self.hidden || self.isInternalRecordingMode) return;
-    // 无论收到中断开始(type=1)还是中断结束(type=0)，延迟 0.35s 以 MixWithOthers 混音模式静默拉起听译引擎，不打断前台软件播放
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (self.isAudioTranslatingActive && !self.hidden && !self.isInternalRecordingMode) {
             if (!self.voiceFallbackEngine || !self.voiceFallbackEngine.isRunning) {
@@ -17340,8 +17524,6 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
             }
 
             AVAudioSession *session = [AVAudioSession sharedInstance];
-            // 严禁在此处调用 setActive:NO！直接以 PlayAndRecord + Measurement 模式 + MixWithOthers 混音激活，
-            // 既不打断前台 App 播放，又强制关闭 iOS 硬件回声消除 (AEC)，确保本机扬声器外放的软件讲话声 100% 被收录！
             [session setCategory:AVAudioSessionCategoryPlayAndRecord
                             mode:AVAudioSessionModeMeasurement
                          options:AVAudioSessionCategoryOptionMixWithOthers | AVAudioSessionCategoryOptionDefaultToSpeaker | AVAudioSessionCategoryOptionAllowBluetooth | AVAudioSessionCategoryOptionAllowBluetoothA2DP
@@ -17357,7 +17539,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
             AVAudioEngine *engine = [[AVAudioEngine alloc] init];
             AVAudioInputNode *inputNode = engine.inputNode;
             if ([inputNode respondsToSelector:@selector(setVoiceProcessingEnabled:error:)]) {
-                [inputNode setVoiceProcessingEnabled:NO error:nil]; // 关闭硬件 AEC，防止抹除本机软件外放人声
+                [inputNode setVoiceProcessingEnabled:NO error:nil];
             }
             AVAudioFormat *fmt = [inputNode outputFormatForBus:0];
             if (!fmt || fmt.sampleRate <= 0 || fmt.channelCount == 0) {
@@ -17383,7 +17565,6 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
                     float a = fabsf(src0[i]);
                     if (a > peak) peak = a;
                 }
-                // 针对手机小音量外放音频提供最高 6.0 倍自适应数字放大
                 float gain = 1.0f;
                 if (peak > 0.0002f && peak < 0.30f) {
                     gain = MIN(6.0f, 0.42f / peak);
@@ -17411,7 +17592,6 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
         } @catch (NSException *e) {}
     });
 
-    // 启动 1.0 秒保活巡检定时器：一旦前台软件切视频或抢占音频焦点导致引擎停摆，立即自动恢复
     dispatch_async(dispatch_get_main_queue(), ^{
         [self.audioKeepAliveTimer invalidate];
         self.audioKeepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
@@ -17449,55 +17629,69 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     self.speechTask = [self.speechRecognizer recognitionTaskWithRequest:self.speechRequest resultHandler:^(SFSpeechRecognitionResult * _Nullable result, NSError * _Nullable error) {
         if (result) {
             NSString *fullText = result.bestTranscription.formattedString ?: @"";
-            if (fullText.length < weakSelf.committedTranscriptLength) {
-                weakSelf.committedTranscriptLength = 0;
-            }
-            NSString *activeWindow = [fullText substringFromIndex:weakSelf.committedTranscriptLength];
-
-            // 核心加速：3~5 词微切片机制（超过 26 个字符遇到空格/标点立即切分定稿，绝不攒到 72 字符整句重翻！）
-            BOOL shouldCommitSlice = NO;
-            NSString *sliceToCommit = nil;
-            if (activeWindow.length >= 26) {
-                NSRange cutRange = [activeWindow rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@" ,.?!;。？！、"] options:NSBackwardsSearch range:NSMakeRange(14, activeWindow.length - 14)];
-                if (cutRange.location != NSNotFound) {
-                    NSUInteger advance = cutRange.location + 1;
-                    sliceToCommit = [[activeWindow substringToIndex:advance] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                    weakSelf.committedTranscriptLength += advance;
-                    activeWindow = [fullText substringFromIndex:weakSelf.committedTranscriptLength];
-                    shouldCommitSlice = (sliceToCommit.length >= 2);
-                } else if (activeWindow.length >= 36) {
-                    sliceToCommit = [activeWindow stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                    weakSelf.committedTranscriptLength = fullText.length;
-                    activeWindow = @"";
-                    shouldCommitSlice = (sliceToCommit.length >= 2);
-                }
-            }
-            (void)shouldCommitSlice;
-
-            NSString *cleanSpoken = [activeWindow stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-
             dispatch_async(dispatch_get_main_queue(), ^{
+                if (!weakSelf.isAudioTranslatingActive || weakSelf.hidden || fullText.length == 0) return;
+
+                // 防止苹果语音识别回溯微调单个词长度时误把全部已定稿游标归零
+                if (fullText.length < weakSelf.committedTranscriptLength) {
+                    if (fullText.length < 12 && weakSelf.committedTranscriptLength > 24) {
+                        weakSelf.committedTranscriptLength = 0;
+                    } else {
+                        weakSelf.committedTranscriptLength = fullText.length;
+                    }
+                }
+                NSString *activeWindow = [fullText substringFromIndex:weakSelf.committedTranscriptLength];
+
+                // 区分英语 (24~36字符) 与日语/韩语 (12~18字符，无空格且单字信息密度高) 的智能微切片阈值
+                BOOL isCJKSource = (weakSelf.sourceLangIndex != 0);
+                NSUInteger softCutLen = isCJKSource ? 12 : 24;
+                NSUInteger minSearchStart = isCJKSource ? 6 : 12;
+                NSUInteger hardCutLen = isCJKSource ? 18 : 36;
+
+                BOOL shouldCommitSlice = NO;
+                NSString *sliceToCommit = nil;
+                if (activeWindow.length >= softCutLen) {
+                    NSRange cutRange = [activeWindow rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@" ,.?!;。？！、，"]
+                                                                     options:NSBackwardsSearch
+                                                                       range:NSMakeRange(minSearchStart, activeWindow.length - minSearchStart)];
+                    if (cutRange.location != NSNotFound) {
+                        NSUInteger advance = cutRange.location + 1;
+                        sliceToCommit = [[activeWindow substringToIndex:advance] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                        weakSelf.committedTranscriptLength += advance;
+                        activeWindow = [fullText substringFromIndex:weakSelf.committedTranscriptLength];
+                        shouldCommitSlice = (sliceToCommit.length >= 2);
+                    } else if (activeWindow.length >= hardCutLen) {
+                        sliceToCommit = [activeWindow stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                        weakSelf.committedTranscriptLength = fullText.length;
+                        activeWindow = @"";
+                        shouldCommitSlice = (sliceToCommit.length >= 2);
+                    }
+                }
+
+                NSString *cleanSpoken = [activeWindow stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
                 // 1. 顶行 20ms 原声实时跳字
                 NSString *previewOrig = cleanSpoken.length > 0 ? cleanSpoken : (sliceToCommit ?: @"");
                 if (previewOrig.length > 0) {
                     weakSelf.liveOriginalPreviewLabel.text = [NSString stringWithFormat:@"🗣️ %@", previewOrig];
                 }
 
-                // 2. 全平台通用零积压实时翻译调度器（单通道飞行锁 + 最新覆盖缓冲槽 + 2.4s 超时断路器 + 120字滑动窗口）
-                NSString *speechToTranslate = (fullText.length > 0) ? fullText : (cleanSpoken.length > 0 ? cleanSpoken : (sliceToCommit ?: @""));
-                if (speechToTranslate.length > 0) {
-                    agEnqueueRealtimeTranslationText(speechToTranslate, ^(NSString *translatedText) {
-                        [weakSelf updateSubtitleDisplay:translatedText];
-                    });
+                // 2. 若产生了定稿微切片，立即取消过期的旧尾句请求并发起定稿锁定，杜绝重影与丢句
+                if (shouldCommitSlice && sliceToCommit.length > 0) {
+                    weakSelf.committedSourceContext = sliceToCommit;
+                    weakSelf.lastTranslatedChunkText = @"";
+                    weakSelf.lastRecognizedText = @"";
+                    [weakSelf dispatchMicroChunkTranslation:sliceToCommit isCommitSlice:YES];
                 }
 
-                // 3. 对正在说的新词：0ms 本地高频词典垫底显示
+                // 3. 对正在说的新词：0ms 本地高频词典立即垫底上屏 + 触发增量流式翻译
                 if (cleanSpoken.length > 0) {
                     weakSelf.latestPartialSegment = cleanSpoken;
                     NSString *instantZh = agInstantLocalPreviewForSegment(cleanSpoken, weakSelf.sourceLangIndex);
-                    if (weakSelf.translatedTextView.text.length == 0 && instantZh.length > 0) {
+                    if (instantZh.length > 0 && weakSelf.lastTranslatedChunkText.length == 0) {
                         [weakSelf renderCombinedSubtitleWithActiveTail:nil instantHint:instantZh];
                     }
+                    [weakSelf triggerMicroDebouncedStreamingTranslation];
                 }
             });
         }
@@ -17562,12 +17756,9 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 
     if (self.isReplayKitCapturing) {
         self.isReplayKitCapturing = NO;
-        [[RPScreenRecorder sharedRecorder] stopCaptureWithHandler:^(NSError * _Nullable error) {
-            // 确保后台 replayd 服务完全安全退出
-        }];
+        [[RPScreenRecorder sharedRecorder] stopCaptureWithHandler:^(NSError * _Nullable error) {}];
     }
 
-    // 恢复之前的系统媒体音量
     if (self.savedSystemVolume > 0.01f) {
         Class avSysCls = objc_getClass("AVSystemController");
         id avsc = (avSysCls && [avSysCls respondsToSelector:@selector(sharedAVSystemController)]) ? [avSysCls sharedAVSystemController] : nil;
@@ -17589,12 +17780,10 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
         [self.speechTask cancel];
         self.speechTask = nil;
     }
-
     if (self.speechRecognizer) {
         self.speechRecognizer = nil;
     }
 
-    // 核心修复：音频会话两阶段注销（先切 Ambient 释放硬件麦克风黄点，再 deactive，支持忙碌重试）
     dispatch_async(agAudioSerialQueue(), ^{
         if (eng) {
             @try {
@@ -17623,7 +17812,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     });
 }
 
-#pragma mark - ⚡ 双通道并发微切片 SSE 流式同传引擎 (全 API 通用)
+#pragma mark - ⚡ 双通道并发微切片 SSE 流式同传引擎 (定稿通道与尾句通道隔离防丢句/防重影)
 
 - (void)dispatchMicroChunkTranslation:(NSString *)chunkText isCommitSlice:(BOOL)isCommit {
     if (!chunkText || chunkText.length < 2) return;
@@ -17631,32 +17820,48 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     NSString *apiKey = agTransAPIKey();
     NSString *endpoint = agTransEndpoint();
     NSString *model = agTransModel();
-    NSString *proxy = loadGeminiPrefs()[@"AG_Trans_ProxyPort"] ?: @"";
+    NSString *proxy = agProxyForTab(AGConfigTabTranslation);
 
     if (apiKey.length < 4) {
         [self updateSubtitleDisplay:@"⚠️ 请先在《设置 -> ✨天使守护》配置翻译 API Key"];
         return;
     }
 
-    // 双通道并发控制：允许最多 2 个请求同时在途（例如通道 1 正在完成定稿切片，通道 2 同时流式翻译新说的词）
-    if (self.pipelineTasksMap.count >= 2) {
+    // 关键隔离：如果是定稿切片 (isCommit == YES)，或准备发起新尾句时，清理掉已经过时的旧非定稿尾句任务，绝不让定稿句被阻塞或产生重影！
+    if (isCommit || self.pipelineTasksMap.count >= 2) {
+        NSArray<NSNumber *> *allKeys = [self.pipelineTasksMap allKeys];
+        for (NSNumber *tid in allKeys) {
+            NSDictionary *info = self.pipelineTasksMap[tid];
+            if (![info[@"isCommit"] boolValue]) {
+                NSURLSessionDataTask *oldPartialTask = info[@"task"];
+                [self.pipelineTasksMap removeObjectForKey:tid];
+                if (oldPartialTask) [oldPartialTask cancel];
+            }
+        }
+    }
+
+    if (!isCommit && self.pipelineTasksMap.count >= 2) {
         self.queuedNextChunkText = chunkText;
-        self.queuedNextChunkShouldCommit = isCommit;
+        self.queuedNextChunkShouldCommit = NO;
         return;
     }
 
     NSUInteger seq = ++self.latestTranslationSeq;
-    NSString *ctxHint = self.committedSourceContext.length > 0
+    if (isCommit) {
+        self.highestDisplayedSeq = seq;
+    }
+
+    NSString *ctxHint = self.committedSourceContext.length > 0 && !isCommit
         ? [NSString stringWithFormat:@"（上文语境参考，切勿重复翻译：%@）\n", self.committedSourceContext]
         : @"";
-    NSString *prompt = [NSString stringWithFormat:@"%@请仅将以下最新实时语音词组直接译为最简练的中文口语（只输出这几个词对应的 2~8 个中文字，严禁解释或重复上文）：\n%@", ctxHint, chunkText];
+    NSString *prompt = [NSString stringWithFormat:@"%@请仅将以下最新实时语音词组直接译为最简练自然的中文口语（只输出对应的中文译文，严禁解释或重复上文）：\n%@", ctxHint, chunkText];
 
     BOOL isGoogle = agIsGoogleNativeProtocol(endpoint, model);
     NSMutableURLRequest *req = nil;
 
     if (isGoogle) {
         NSString *baseEP = agSanitizeEndpoint(endpoint, AGConfigTabTranslation);
-        NSString *fullM = [model hasPrefix:@"models/"] ? model : [NSString stringWithFormat:@"models/%@", model];
+        NSString *fullM = [model hasPrefix:@"models/"] ? model : [NSString stringWithFormat:@"models/%@", (model.length > 0 ? model : @"gemini-2.5-flash-lite")];
         NSString *urlStr = [NSString stringWithFormat:@"%@/v1beta/%@:streamGenerateContent?alt=sse&key=%@", baseEP, fullM, apiKey];
         req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
         req.HTTPMethod = @"POST";
@@ -17681,6 +17886,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
         [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
         [req setValue:[NSString stringWithFormat:@"Bearer %@", apiKey] forHTTPHeaderField:@"Authorization"];
         NSString *exactM = [model stringByReplacingOccurrencesOfString:@"models/" withString:@""];
+        if (exactM.length == 0) exactM = @"gpt-4o-mini";
         NSDictionary *body = @{
             @"model": exactM,
             @"messages": @[ @{ @"role": @"user", @"content": prompt } ],
@@ -17690,13 +17896,14 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
         };
         req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     }
-    req.timeoutInterval = 5.0;
+    req.timeoutInterval = 4.5;
 
     if (!self.transStreamSession) {
         self.transStreamSession = agCreateSessionWithProxy(proxy, self, [NSOperationQueue mainQueue]);
     }
     NSURLSessionDataTask *task = [self.transStreamSession dataTaskWithRequest:req];
     self.pipelineTasksMap[@(task.taskIdentifier)] = [@{
+        @"task": task,
         @"seq": @(seq),
         @"isCommit": @(isCommit),
         @"streamBuf": [NSMutableString string],
@@ -17753,6 +17960,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
     NSMutableDictionary *ctx = self.pipelineTasksMap[@(task.taskIdentifier)];
     if (!ctx) return;
     [self.pipelineTasksMap removeObjectForKey:@(task.taskIdentifier)];
+    if (error && error.code == NSURLErrorCancelled) return;
 
     NSMutableString *streamBuf = ctx[@"streamBuf"];
     NSMutableData *rawData = ctx[@"rawData"];
@@ -17791,7 +17999,7 @@ static void agFireNextRealtimeTranslationIfNeeded(void) {
 
 @end
 
-// ==================== 网页/全屏原位覆膜就地翻译管理器（兼容任意自定义翻译 API） ====================
+// ==================== 网页/全屏原位覆膜就地翻译管理器（复用 HTTP/2 长连接池） ====================
 
 static void agPerformGeneralTranslation(NSString *sourceText, void (^completion)(NSString *translatedText, NSError *error)) {
     if (!sourceText || sourceText.length < 2) {
@@ -17801,7 +18009,7 @@ static void agPerformGeneralTranslation(NSString *sourceText, void (^completion)
     NSString *apiKey = agTransAPIKey();
     NSString *endpoint = agTransEndpoint();
     NSString *model = agTransModel();
-    NSString *proxy = loadGeminiPrefs()[@"AG_Trans_ProxyPort"] ?: @"";
+    NSString *proxy = agProxyForTab(AGConfigTabTranslation);
 
     if (apiKey.length < 4) {
         if (completion) completion(nil, [NSError errorWithDomain:@"AGTrans" code:401 userInfo:@{NSLocalizedDescriptionKey: @"未配置有效 API Key"}]);
@@ -17813,13 +18021,13 @@ static void agPerformGeneralTranslation(NSString *sourceText, void (^completion)
         @"1. 每一行必须严格对应翻译，每行格式必须保持：[序号] 中文翻译内容，严禁遗漏、合并或拆分序号！\n"
         @"2. 只输出中文翻译结果，绝不输出任何多余的解释、问候或额外标记：\n%@", sourceText];
 
-    NSURLSession *session = agCreateSessionWithProxy(proxy, nil, nil);
+    NSURLSession *session = [[AGSharedTransSessionRouter sharedRouter] sharedNonStreamSessionForProxy:proxy];
     BOOL isGoogle = agIsGoogleNativeProtocol(endpoint, model);
     NSMutableURLRequest *req = nil;
 
     if (isGoogle) {
         NSString *baseEP = agSanitizeEndpoint(endpoint, AGConfigTabTranslation);
-        NSString *fullM = [model hasPrefix:@"models/"] ? model : [NSString stringWithFormat:@"models/%@", model];
+        NSString *fullM = [model hasPrefix:@"models/"] ? model : [NSString stringWithFormat:@"models/%@", (model.length > 0 ? model : @"gemini-2.5-flash-lite")];
         NSString *urlStr = [NSString stringWithFormat:@"%@/v1beta/%@:generateContent?key=%@", baseEP, fullM, apiKey];
         req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
         req.HTTPMethod = @"POST";
@@ -17843,6 +18051,7 @@ static void agPerformGeneralTranslation(NSString *sourceText, void (^completion)
         [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
         [req setValue:[NSString stringWithFormat:@"Bearer %@", apiKey] forHTTPHeaderField:@"Authorization"];
         NSString *exactM = [model stringByReplacingOccurrencesOfString:@"models/" withString:@""];
+        if (exactM.length == 0) exactM = @"gpt-4o-mini";
         NSDictionary *body = @{
             @"model": exactM,
             @"messages": @[ @{ @"role": @"user", @"content": prompt } ],
@@ -17872,7 +18081,7 @@ static void agPerformGeneralTranslation(NSString *sourceText, void (^completion)
     }];
     [task resume];
 }
-
+// ====== 最终确认替换块 2 结束 ======
 
 typedef void *IOHIDEventSystemClientRef;
 typedef void *IOHIDEventRef;
@@ -18180,6 +18389,56 @@ static void initInSituGlobalTouchMonitor(void) {
     [self performInSituRetranslateQuietly];
 }
 
+// ====== 最终确认替换块 3 开始（对应方案 5：跨行自然段合并 + 深浅色网页自适应底色采样） ======
+static void agSamplePatchBackgroundStyle(CGImageRef cleanCG, CGRect screenRect, CGSize screenSize, UIColor **outBgColor, UIColor **outTextColor, UIColor **outBorderColor) {
+    BOOL isLightBackground = NO;
+    if (cleanCG && screenSize.width > 0 && screenSize.height > 0) {
+        size_t imgW = CGImageGetWidth(cleanCG);
+        size_t imgH = CGImageGetHeight(cleanCG);
+        CGFloat scaleX = (CGFloat)imgW / screenSize.width;
+        CGFloat scaleY = (CGFloat)imgH / screenSize.height;
+        CGRect rawPixelRect = CGRectMake(screenRect.origin.x * scaleX,
+                                         screenRect.origin.y * scaleY,
+                                         screenRect.size.width * scaleX,
+                                         screenRect.size.height * scaleY);
+        CGRect pixelRect = CGRectIntersection(rawPixelRect, CGRectMake(0, 0, (CGFloat)imgW, (CGFloat)imgH));
+        if (!CGRectIsNull(pixelRect) && pixelRect.size.width >= 4.0 && pixelRect.size.height >= 4.0) {
+            CGImageRef subCG = CGImageCreateWithImageInRect(cleanCG, pixelRect);
+            if (subCG) {
+                uint8_t rgba[4 * 4 * 4] = {0};
+                CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+                CGContextRef ctx = CGBitmapContextCreate(rgba, 4, 4, 8, 16, cs, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+                if (ctx) {
+                    CGContextDrawImage(ctx, CGRectMake(0, 0, 4, 4), subCG);
+                    CGContextRelease(ctx);
+                    double lumSum = 0.0;
+                    for (int i = 0; i < 16; i++) {
+                        uint8_t r = rgba[i * 4 + 0];
+                        uint8_t g = rgba[i * 4 + 1];
+                        uint8_t b = rgba[i * 4 + 2];
+                        lumSum += (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
+                    }
+                    if ((lumSum / 16.0) > 0.52) {
+                        isLightBackground = YES;
+                    }
+                }
+                CGColorSpaceRelease(cs);
+                CGImageRelease(subCG);
+            }
+        }
+    }
+
+    if (isLightBackground) {
+        if (outBgColor)     *outBgColor     = [UIColor colorWithRed:0.97 green:0.97 blue:0.99 alpha:0.96];
+        if (outTextColor)   *outTextColor   = [UIColor colorWithRed:0.10 green:0.11 blue:0.16 alpha:1.0];
+        if (outBorderColor) *outBorderColor = [UIColor colorWithWhite:0.0 alpha:0.10];
+    } else {
+        if (outBgColor)     *outBgColor     = [UIColor colorWithRed:0.08 green:0.09 blue:0.14 alpha:0.95];
+        if (outTextColor)   *outTextColor   = [UIColor colorWithRed:0.98 green:0.98 blue:1.00 alpha:1.0];
+        if (outBorderColor) *outBorderColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+    }
+}
+
 - (void)performInSituRetranslateQuietly {
     if (!self.isInSituActive || !agTransIsEnabled()) return;
     NSString *apiKey = agTransAPIKey();
@@ -18189,7 +18448,6 @@ static void initInSituGlobalTouchMonitor(void) {
     self.statusLabel.text = @"⚡ 正在刷新翻译...";
     self.statusLabel.textColor = [UIColor colorWithRed:1.0 green:0.85 blue:0.30 alpha:1.0];
 
-    // 隐藏浮层并瞬时截图，避免截到旧的中文覆膜
     self.patchContainerView.hidden = YES;
     self.revertPillView.hidden = YES;
     UIImage *screenImg = nil;
@@ -18219,10 +18477,13 @@ static void initInSituGlobalTouchMonitor(void) {
         }
 
         VNRecognizeTextRequest *req = [[VNRecognizeTextRequest alloc] initWithCompletionHandler:^(VNRequest * _Nonnull request, NSError * _Nullable error) {
-            CGImageRelease(cleanCG);
-            if (currentEpoch != weakSelf.inSituScanEpoch) return;
+            if (currentEpoch != weakSelf.inSituScanEpoch) {
+                CGImageRelease(cleanCG);
+                return;
+            }
 
             if (error || request.results.count == 0) {
+                CGImageRelease(cleanCG);
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (currentEpoch != weakSelf.inSituScanEpoch) return;
                     [weakSelf.patchContainerView.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
@@ -18235,19 +18496,18 @@ static void initInSituGlobalTouchMonitor(void) {
 
             CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
             CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
-            NSMutableArray<NSDictionary *> *detectedBlocks = [NSMutableArray array];
-            NSMutableArray<NSString *> *sourceLines = [NSMutableArray array];
+            CGSize screenSize = CGSizeMake(screenW, screenH);
+            NSMutableArray<NSMutableDictionary *> *rawLines = [NSMutableArray array];
 
             for (VNRecognizedTextObservation *obs in request.results) {
                 VNRecognizedText *cand = [[obs topCandidates:1] firstObject];
                 if (cand.string.length < 2) continue;
                 if ([cand.string rangeOfCharacterFromSet:[NSCharacterSet letterCharacterSet]].location == NSNotFound) continue;
 
-                // 检查是否包含外语字符(英文、俄语、西里尔、日文假名、韩文等)，若为纯中文则无需重复翻译
                 BOOL hasForeignChars = NO;
                 for (NSUInteger ci = 0; ci < cand.string.length; ci++) {
                     unichar c = [cand.string characterAtIndex:ci];
-                    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= 0x0400 && c <= 0x04FF) || (c >= 0x3040 && c <= 0x30FF)) {
+                    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= 0x0400 && c <= 0x04FF) || (c >= 0x3040 && c <= 0x30FF) || (c >= 0xAC00 && c <= 0xD7AF)) {
                         hasForeignChars = YES;
                         break;
                     }
@@ -18260,15 +18520,64 @@ static void initInSituGlobalTouchMonitor(void) {
                                          box.size.width * screenW,
                                          box.size.height * screenH);
 
-                // 过滤状态栏及底部胶囊区域
                 if (rect.origin.y < 44.0 || rect.origin.y > (screenH - 70.0) || rect.size.width < 15.0 || rect.size.height < 8.0) continue;
 
-                [detectedBlocks addObject:@{
+                [rawLines addObject:[@{
                     @"text": cand.string,
-                    @"rect": [NSValue valueWithCGRect:rect]
-                }];
-                [sourceLines addObject:[NSString stringWithFormat:@"[%lu] %@", (unsigned long)(detectedBlocks.count), cand.string]];
+                    @"rect": [NSValue valueWithCGRect:rect],
+                    @"lineHeight": @(rect.size.height),
+                    @"lineCount": @1
+                } mutableCopy]];
             }
+
+            // 1. 严格按阅读顺序（从上到下、从左到右）排序
+            [rawLines sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+                CGRect ra = [a[@"rect"] CGRectValue];
+                CGRect rb = [b[@"rect"] CGRectValue];
+                if (fabs(ra.origin.y - rb.origin.y) > MIN(ra.size.height, rb.size.height) * 0.45) {
+                    return (ra.origin.y < rb.origin.y) ? NSOrderedAscending : NSOrderedDescending;
+                }
+                return (ra.origin.x < rb.origin.x) ? NSOrderedAscending : NSOrderedDescending;
+            }];
+
+            // 2. 智能跨行自然段合并
+            NSMutableArray<NSMutableDictionary *> *detectedBlocks = [NSMutableArray array];
+            for (NSMutableDictionary *lineItem in rawLines) {
+                if (detectedBlocks.count == 0) {
+                    [detectedBlocks addObject:lineItem];
+                    continue;
+                }
+                NSMutableDictionary *prevItem = detectedBlocks.lastObject;
+                CGRect prevRect = [prevItem[@"rect"] CGRectValue];
+                CGRect curRect  = [lineItem[@"rect"] CGRectValue];
+                CGFloat prevLineH = [prevItem[@"lineHeight"] doubleValue];
+                CGFloat vGap = curRect.origin.y - CGRectGetMaxY(prevRect);
+                CGFloat hOverlap = MIN(CGRectGetMaxX(prevRect), CGRectGetMaxX(curRect)) - MAX(prevRect.origin.x, curRect.origin.x);
+                BOOL sameColumn = (fabs(curRect.origin.x - prevRect.origin.x) < 36.0) || (hOverlap > MIN(prevRect.size.width, curRect.size.width) * 0.45);
+                BOOL similarFont = fabs(curRect.size.height - prevLineH) < (prevLineH * 0.45);
+                CGRect unionRect = CGRectUnion(prevRect, curRect);
+
+                if (vGap >= -5.0 && vGap <= MAX(14.0, prevLineH * 0.85) && sameColumn && similarFont && unionRect.size.height <= 165.0) {
+                    prevItem[@"text"] = [NSString stringWithFormat:@"%@ %@", prevItem[@"text"], lineItem[@"text"]];
+                    prevItem[@"rect"] = [NSValue valueWithCGRect:unionRect];
+                    prevItem[@"lineCount"] = @([prevItem[@"lineCount"] integerValue] + 1);
+                } else {
+                    [detectedBlocks addObject:lineItem];
+                }
+            }
+
+            NSMutableArray<NSString *> *sourceLines = [NSMutableArray array];
+            for (NSUInteger i = 0; i < detectedBlocks.count; i++) {
+                NSMutableDictionary *blk = detectedBlocks[i];
+                CGRect r = [blk[@"rect"] CGRectValue];
+                UIColor *bgCol = nil, *txtCol = nil, *bdrCol = nil;
+                agSamplePatchBackgroundStyle(cleanCG, r, screenSize, &bgCol, &txtCol, &bdrCol);
+                blk[@"bgColor"] = bgCol;
+                blk[@"textColor"] = txtCol;
+                blk[@"borderColor"] = bdrCol;
+                [sourceLines addObject:[NSString stringWithFormat:@"[%lu] %@", (unsigned long)(i + 1), blk[@"text"]]];
+            }
+            CGImageRelease(cleanCG);
 
             if (sourceLines.count == 0 || currentEpoch != weakSelf.inSituScanEpoch) {
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -18311,6 +18620,7 @@ static void initInSituGlobalTouchMonitor(void) {
                 for (NSUInteger i = 0; i < detectedBlocks.count; i++) {
                     NSDictionary *item = detectedBlocks[i];
                     CGRect rect = [item[@"rect"] CGRectValue];
+                    CGFloat singleLineH = [item[@"lineHeight"] doubleValue];
                     NSString *zhLine = indexedMap[@(i + 1)];
                     if (!zhLine || zhLine.length == 0) {
                         zhLine = (i < translatedLines.count) ? [translatedLines[i] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] : @"";
@@ -18318,16 +18628,18 @@ static void initInSituGlobalTouchMonitor(void) {
                     }
                     if (zhLine.length == 0) zhLine = item[@"text"];
 
-                    CGRect patchRect = CGRectInset(rect, -2.0, -1.0);
+                    CGRect patchRect = CGRectInset(rect, -3.0, -1.5);
                     UIView *patch = [[UIView alloc] initWithFrame:patchRect];
-                    patch.backgroundColor = [UIColor colorWithRed:0.08 green:0.09 blue:0.14 alpha:0.94];
-                    patch.layer.cornerRadius = 4.0;
+                    patch.backgroundColor = item[@"bgColor"] ?: [UIColor colorWithRed:0.08 green:0.09 blue:0.14 alpha:0.95];
+                    patch.layer.cornerRadius = 5.0;
+                    patch.layer.borderWidth = 0.6;
+                    patch.layer.borderColor = [item[@"borderColor"] CGColor];
                     patch.userInteractionEnabled = NO;
 
-                    UILabel *lbl = [[UILabel alloc] initWithFrame:patch.bounds];
+                    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectInset(patch.bounds, 3.0, 1.0)];
                     lbl.text = zhLine;
-                    lbl.textColor = [UIColor colorWithRed:0.98 green:0.98 blue:1.0 alpha:1.0];
-                    lbl.font = [UIFont systemFontOfSize:MAX(11.0, MIN(22.0, rect.size.height * 0.85)) weight:UIFontWeightMedium];
+                    lbl.textColor = item[@"textColor"] ?: [UIColor whiteColor];
+                    lbl.font = [UIFont systemFontOfSize:MAX(11.0, MIN(20.0, singleLineH * 0.82)) weight:UIFontWeightMedium];
                     lbl.numberOfLines = 0;
                     lbl.adjustsFontSizeToFitWidth = YES;
                     lbl.minimumScaleFactor = 0.55;
@@ -18356,6 +18668,7 @@ static void initInSituGlobalTouchMonitor(void) {
         [handler performRequests:@[req] error:nil];
     });
 }
+// ====== 最终确认替换块 3 结束 ======
 
 - (void)revertInSituTranslation {
     [self.impactHaptic impactOccurred];
