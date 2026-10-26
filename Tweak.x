@@ -5029,6 +5029,19 @@ static BOOL agMiniSummonIsTop(void) {
     if (self.onTapClose) self.onTapClose();
 }
 
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    if (self.hidden || self.alpha < 0.05) return NO;
+    if (CGRectContainsPoint(CGRectInset(self.closeButton.frame, -8, -8), point)) return YES;
+    if (self.styleIndex == 3) {
+        // 款式 ③ 极光天际线：仅中间字幕条与关闭钮可点，四周极光海浪 100% 穿透不挡滑动！
+        return CGRectContainsPoint(CGRectInset(_s3CaptionPillBg.frame, -10, -8), point);
+    } else if (self.styleIndex == 4) {
+        // 款式 ④ 全息丝绸：仅中间晶核铭牌与关闭钮可点，外围丝绸光晕 100% 穿透！
+        return CGRectContainsPoint(CGRectInset(_s4JewelBadgeView.frame, -8, -6), point);
+    }
+    return CGRectContainsPoint(self.bounds, point);
+}
+
 - (void)handleExpandTap:(UITapGestureRecognizer *)tap {
     CGPoint pt = [tap locationInView:self];
     if (CGRectContainsPoint(CGRectInset(self.closeButton.frame, -8, -8), pt)) {
@@ -6477,20 +6490,38 @@ static void agFetchCloudModelsForTab(AGConfigTab tab, NSString *endpoint, NSStri
 @end
 
 @implementation GeminiPassthroughWindow
-- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    if (self.hidden || self.alpha < 0.05) return NO;
-    if (self.lockFullScreenTouch) return YES;
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (self.hidden || self.alpha < 0.05) return nil;
+    if (self.lockFullScreenTouch) return [super hitTest:point withEvent:event];
+    // 灵动小胶囊形态下：除小胶囊自身外，其余全屏区域直接返回 nil，将滑动手势 100% 交还底层 App 与桌面
     if (self.miniSummonWrapper && !self.miniSummonWrapper.hidden && self.miniSummonWrapper.alpha > 0.05) {
         CGPoint mp = [self convertPoint:point toView:self.miniSummonWrapper];
-        if ([self.miniSummonWrapper pointInside:mp withEvent:event]) return YES;
+        if ([self.miniSummonWrapper pointInside:mp withEvent:event]) {
+            return [self.miniSummonWrapper hitTest:mp withEvent:event] ?: self.miniSummonWrapper;
+        }
+        return nil;
     }
     if (self.capsuleWrapper && !self.capsuleWrapper.hidden && self.capsuleWrapper.alpha > 0.05) {
         CGPoint p = [self convertPoint:point toView:self.capsuleWrapper];
-        return [self.capsuleWrapper pointInside:p withEvent:event];
+        if ([self.capsuleWrapper pointInside:p withEvent:event]) {
+            return [self.capsuleWrapper hitTest:p withEvent:event] ?: self.capsuleWrapper;
+        }
+        return nil;
     }
-    return NO;
+    return nil;
 }
-- (BOOL)_canBecomeKeyWindow { return YES; }
+
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    return ([self hitTest:point withEvent:event] != nil);
+}
+
+// 关键修复：灵动形态下绝不抢占 KeyWindow（返回 NO），只有展开为完整主界面需要打字时才允许成为 KeyWindow！
+- (BOOL)_canBecomeKeyWindow {
+    if (self.miniSummonWrapper && !self.miniSummonWrapper.hidden) {
+        return NO;
+    }
+    return YES;
+}
 @end
 
 // ==================== 全局灵动胶囊反馈悬浮窗 (模块 E1) ====================
@@ -8879,6 +8910,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     } completion:^(BOOL finished) {
         self.miniSummonView.hidden = YES;
         self.miniSummonView.transform = CGAffineTransformIdentity;
+        [self.overlayWindow makeKeyWindow];
     }];
 
     self.overlayWindow.capsuleWrapper.hidden = NO;
@@ -14612,7 +14644,6 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         self.isDismissed = NO;
         self.overlayWindow.alpha = 0.0;
         self.overlayWindow.hidden = NO;
-        [self.overlayWindow makeKeyWindow];
         [self startVisualAnimations];
 
         BOOL hasKey = (agAPIKeyForTab(self.activeModeTab).length >= 5);
@@ -14627,8 +14658,11 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
         NSInteger summonStyle = agMiniSummonStyle();
         if (summonStyle > 0 && self.miniSummonView) {
-            // 唤出形态 ①~④：显示小胶囊/水滴/天际线/丝绸，隐藏原主卡片与压暗遮罩，屏幕 95% 完全穿透！
+            // 唤出形态 ①~④：不调用 makeKeyWindow，保持底层 App 与桌面 100% 自由滑动！
             self.isMiniSummonActive = YES;
+            if (self.overlayWindow.isKeyWindow) {
+                [self.overlayWindow resignKeyWindow];
+            }
             [self.miniSummonView refreshStyleAndThemeLayout];
             self.miniSummonView.captionLabel.text = hasKey ? @"🎙️ 直接开口说话，轻点展开..." : @"⚠️ 未配 API Key (轻点展开)";
             self.miniSummonView.hidden = NO;
@@ -14645,9 +14679,10 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 self.miniSummonView.transform = CGAffineTransformIdentity;
             } completion:nil];
         } else {
-            // 传统模式：直接弹出原版大主界面
+            // 传统模式：直接弹出原版大主界面，激活 KeyWindow 支持输入框打字
             self.isMiniSummonActive = NO;
             self.miniSummonView.hidden = YES;
+            [self.overlayWindow makeKeyWindow];
             self.overlayWindow.capsuleWrapper.hidden = NO;
             self.overlayWindow.capsuleWrapper.alpha = 1.0;
             self.screenDimBlurView.alpha = 0.0;
