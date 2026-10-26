@@ -41,8 +41,8 @@
 | **E盘归档目录** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调` | 完整项目工程归档，含源码、配置及双版本 `.deb` |
 | **E盘单文件归档** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调.txt` | 钉钉可打卡版本完整代码备份 |
 | **远端 Git 仓库** | `https://github.com/jianchengw952-source/TimeGuardianSiri123.git` | GitHub 远程仓库（分支：`main`） |
-| **当前 Git Commit** | `fe2715b` | `feat(stealth): eliminate CLSimulationManager and CLLocationSourceInformation static metadata, dynamically register sensitive anti-detection hooks` |
-| **GitHub Actions 运行记录** | Run #121 (ID: `40246994613`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
+| **当前 Git Commit** | `1b0135e` | `feat(stealth): eliminate CLSimulationManager and CLLocationSourceInformation static metadata, dynamically register sensitive anti-detection hooks` |
+| **GitHub Actions 运行记录** | Run #124 (ID: `40248103741`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
 
 ---
 
@@ -61,18 +61,20 @@
 * [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (989,078 字节，SHA256: `5D9137C5264522E99D5EF8A1E566B21F4A08429E7C0EAA0E310E2DDCB6AAB261`)
 * [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (42,272 字节，SHA256: `F3BE38B9CB429A66E165F2B072A1E0D51FE86128BAC9317B98941DB7AAEB9BFE`)
 
-### 3. 最新云端编译产物（Run #121 / Commit `fe2715b`）
-> **本次更新（纯 C 栈遥测缓存 + 消除关联对象竞争 + 修复 sCleanSource 释放闪退 + 移除全部 dyld/dladdr 钩子）**：
-> 1. `AGSpoofedTelemetry` 纯 C 栈与轻量锁重构：移除全部 `kAGBoundTelemetryDataKey` 与 `objc_setAssociatedObject` 动态关联绑定，彻底消除多线程高频读取时的内存竞争与死锁；放宽缓存窗口至 1.80 秒，保证物理运动遥测平滑自洽。
-> 2. 修复 `agDyn_CLLoc_srcInfo`：直接调用原实现返回系统原生实例（内部已被动态拦截返回 NO），彻底根除手动分配 `sCleanSource` 在 ARC 下过度释放导致的野指针闪退。
-> 3. 安全收敛 C 钩子与系统符号：完全剔除对 `dladdr` 与 `_dyld_get_image_name` 的劫持覆写，防止现代崩溃日志收集框架在栈回溯时遭遇段错误；仅保留 `CNCopyCurrentNetworkInfo` 进行 Wi-Fi 隐藏与伪装。
+### 3. 最新云端编译产物（Run #124 / Commit `1b0135e`）
+> **本次更新（补全自定义类名隐身宏 + 彻底消除 /tmp 明文痕迹 + 恢复安全无闪退版 dladdr/dyld 隐藏钩子）**：
+> 1. 补全头部隐身宏：追加 `AGInSituTranslationOverlay`、`AGGlobalActionPillWindow`、`AGLockScreenRootViewController`、`AGCardBgCanvasView`、`AGOrbCanvasView`、`AGWaveCanvasView`、`AGScreenTranslationOverlay`、`AGStreamTranslateDelegate` 共 8 个自定义类伪装映射（全面伪装为 `_UIStatusBarFloatingPillWindow` 等 UIKit 私有类），彻底抹除 Mach-O 自定义类名特征。
+> 2. 彻底抹除 `/tmp` 痕迹：`reloadGeminiPrefsCache` 移除 `geminiPrefsFilePath()`，`saveGeminiPrefs` 剔除 `/tmp/com.custom.geminisirioverlay.plist` 并主动执行 `removeItemAtPath` 清除旧残留与日志，彻底杜绝风控扫描 `/tmp` 发现越狱插件配置。
+> 3. 恢复安全无闪退版 `dladdr` 与 `_dyld_get_image_name`：
+>    - `hooked_dladdr`：**仅替换路径串与符号名**，绝不触碰 `dli_fbase` 与 `dli_saddr`，杜绝 Matrix / HMD / KSCrash 等异常收集框架在栈回溯时因基址偏移下溢导致的崩溃；
+>    - `hooked_dyld_get_image_name`：纯 C 静态路径池对敏感越狱 dylib 进行沙盒私有路径伪装映射。
 > 4. 纯 `xz` 压包标准，100% 兼容 Sileo。
 
 * **Dopamine (Rootless arm64)**：
   - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
-  - 文件大小：`403,080` 字节
-  - SHA256: `0EDAFBB29C874FE0C476482EE615D47B6E208352692EB67E1CB2DB3E1433BF27`
-  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (401,928 字节)
+  - 文件大小：`405,092` 字节
+  - SHA256: `EE9E7D8E5F4EB64EC39B78A7E36140FFA32C4D8F5A518D48E77DFFDD476543BF`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (403,948 字节)
   - 分发路径：
     - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
     - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
@@ -80,9 +82,9 @@
 
 * **Relaxin (RootHide arm64e)**：
   - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
-  - 文件大小：`264,980` 字节
-  - SHA256: `E19386B0DEE4381E88439662813DEFC5615954D655AE306468244C6F637D6835`
-  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (262,176 字节)
+  - 文件大小：`265,372` 字节
+  - SHA256: `EF40A707855805A5E90CA465BCDB46A01EC8B612213544BCD6B6D5A916D837D6`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (262,568 字节)
   - 分发路径：
     - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
     - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
