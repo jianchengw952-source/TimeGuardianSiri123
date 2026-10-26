@@ -7141,7 +7141,9 @@ static void agSimulateScreenSwipe(CGPoint startPt, CGPoint endPt, NSTimeInterval
 @property (nonatomic, strong) AGWaveCanvasView *waveCanvas;
 @property (nonatomic, strong) AGMiniSummonCanvasView *miniSummonView;
 @property (nonatomic, assign) BOOL isMiniSummonActive;
+@property (nonatomic, assign) NSTimeInterval lastLocalActionExecTime;
 - (void)expandMiniSummonToOriginalMainCard;
+- (void)dismissOverlayIfMainCardActive;
 
 // ✨ 顶部 3D 灵动球 + 品牌渐变字 + 胶囊徽章 + 5柱声波
 @property (nonatomic, strong) UIView *aiOrbView;
@@ -11353,9 +11355,36 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     [self dispatchMultimodalRequestWithText:promptText audioData:audioData isInitialGreeting:NO forTab:self.activeModeTab];
 }
 
+- (void)dismissOverlayIfMainCardActive {
+    if (self.isMiniSummonActive && self.miniSummonView && !self.miniSummonView.hidden) {
+        // 灵动小胶囊形态下：保持停留在原位置绝不自动关闭！仅释放焦点让新打开的软件顺畅运行，并在 0.9s 后自动守护语音引擎不断连
+        [self.inputField resignFirstResponder];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.90 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!self.isDismissed && self.isMiniSummonActive && self.activeModeTab != AGConfigTabPureText) {
+                if (self.liveWebSocketTask && (!self.liveAudioEngine || !self.liveAudioEngine.isRunning)) {
+                    [self setupAndStartFullDuplexPCMAudioEngine];
+                } else if (!self.liveWebSocketTask && (!self.audioRecorder || !self.audioRecorder.isRecording)) {
+                    [self attemptStartAudioRecorder];
+                }
+            }
+        });
+        return;
+    }
+    // 完整主界面形态下：照常打开软件后自动关闭主界面
+    [self dismissOverlay];
+}
+
 - (void)showActionBanner:(NSString *)msg {
     [[AGGlobalActionPillWindow sharedPill] showActionPill:msg];
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.isMiniSummonActive && self.miniSummonView && !self.miniSummonView.hidden && msg.length > 0) {
+            self.miniSummonView.captionLabel.text = msg;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (self.isMiniSummonActive && self.miniSummonView && [self.miniSummonView.captionLabel.text isEqualToString:msg]) {
+                    self.miniSummonView.captionLabel.text = @"🎙️ 直接开口说话，轻点展开...";
+                }
+            });
+        }
         if (self.actionBannerLabel) {
             [self.actionBannerLabel.superview bringSubviewToFront:self.actionBannerLabel];
             self.actionBannerLabel.text = msg;
@@ -11407,6 +11436,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     if (self.currentVoiceQueryBuffer.length == 0) return;
     NSString *fullCmd = [self.currentVoiceQueryBuffer copy];
     if ([self tryExecuteDirectLocalCommand:fullCmd]) {
+        self.lastLocalActionExecTime = [[NSDate date] timeIntervalSince1970];
         [self.currentVoiceQueryBuffer setString:@""];
         if (self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
             [self.pcmPlayerNode stop];
@@ -11429,6 +11459,12 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     });
     NSArray<NSTextCheckingResult *> *matches = [sActionRegex matchesInString:responseText options:0 range:NSMakeRange(0, responseText.length)];
     if (matches.count > 0) {
+        // 若本地毫秒级直通车刚刚在 3.5 秒内执行过动作，则仅剥离标记，避免小胶囊不断线时重复二次打开软件
+        if ([[NSDate date] timeIntervalSince1970] - self.lastLocalActionExecTime < 3.5) {
+            if (outExecuted) *outExecuted = YES;
+            NSString *cleaned = [sActionRegex stringByReplacingMatchesInString:responseText options:0 range:NSMakeRange(0, responseText.length) withTemplate:@""];
+            return [cleaned stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        }
         NSMutableArray<NSDictionary *> *actionList = [NSMutableArray array];
         for (NSTextCheckingResult *match in matches) {
             if (match.numberOfRanges > 1) {
@@ -12363,7 +12399,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         [self.pendingSpeechChunk setString:@""];
         self.previousKeyWindow = nil;
         [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"🚀 正在打开 %@...", appName]];
-        [self dismissOverlay];
+        [self dismissOverlayIfMainCardActive];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
             @try {
                 [[%c(LSApplicationWorkspace) defaultWorkspace] openApplicationWithBundleID:targetBundleID];
@@ -12405,7 +12441,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     NSString *phone = [self resolvePhoneNumberForTarget:target];
     if (phone.length > 0) {
         [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"📞 正在为您呼叫 %@ (%@)...", target, phone]];
-        [self dismissOverlay];
+        [self dismissOverlayIfMainCardActive];
         NSURL *telURL = [NSURL URLWithString:[NSString stringWithFormat:@"tel://%@", phone]];
         agSafeLaunchURL(telURL);
     } else {
@@ -12418,7 +12454,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     NSString *phone = [self resolvePhoneNumberForTarget:target];
     if (phone.length > 0) {
         [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"💬 正在拟定短信发送给 %@...", target]];
-        [self dismissOverlay];
+        [self dismissOverlayIfMainCardActive];
         NSString *encodedBody = [content stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
         NSString *smsURLStr = [NSString stringWithFormat:@"sms:%@&body=%@", phone, encodedBody ?: @""];
         agSafeLaunchURL([NSURL URLWithString:smsURLStr]);
@@ -12432,7 +12468,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     if (!target || target.length == 0) return;
     NSString *msg = content ?: @"";
     [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"💬 正在向「%@」发送微信: %@...", target, msg]];
-    [self dismissOverlay];
+    [self dismissOverlayIfMainCardActive];
 
     NSDictionary *payload = @{
         @"action": @"send_text",
@@ -12468,7 +12504,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
 - (void)handleWeChatOpenChatWithTarget:(NSString *)target {
     [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"💬 正在打开与「%@」的微信对话...", target]];
-    [self dismissOverlay];
+    [self dismissOverlayIfMainCardActive];
     NSDictionary *payload = @{
         @"action": @"open_chat",
         @"targetName": target,
@@ -12574,9 +12610,17 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 }
 
 - (void)handleTakeScreenshot {
-    [self dismissOverlay];
+    BOOL keepMini = (self.isMiniSummonActive && self.miniSummonView && !self.miniSummonView.hidden);
+    if (keepMini) {
+        self.overlayWindow.alpha = 0.0;
+    } else {
+        [self dismissOverlay];
+    }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIImage *screenshot = _UICreateScreenUIImage();
+        if (keepMini && !self.isDismissed) {
+            [UIView animateWithDuration:0.20 animations:^{ self.overlayWindow.alpha = 1.0; }];
+        }
         if (screenshot) {
             UIImageWriteToSavedPhotosAlbum(screenshot, nil, nil, nil);
             AudioServicesPlaySystemSound(1108);
@@ -13247,7 +13291,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 // 视觉 OCR 寻找屏幕上的目标文字并自动模拟点击 (GUI Agent)
 - (void)handleVisualTapTextOnScreen:(NSString *)targetText {
     if (!targetText || targetText.length == 0) return;
-    [self dismissOverlay];
+    [self dismissOverlayIfMainCardActive];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIImage *screenImg = _UICreateScreenUIImage();
         if (!screenImg || !screenImg.CGImage) return;
@@ -13287,7 +13331,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
 // 合成全自动刷视频/滑动/双击点赞手势
 - (void)handleSynthesizedUIGesture:(NSString *)gesture {
-    [self dismissOverlay];
+    [self dismissOverlayIfMainCardActive];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         CGRect sb = [UIScreen mainScreen].bounds;
         CGFloat midX = sb.size.width * 0.5;
@@ -13932,7 +13976,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
     if (targetURL) {
         [[AGGlobalActionPillWindow sharedPill] showActionPill:pillText];
-        [self dismissOverlay];
+        [self dismissOverlayIfMainCardActive];
         agSafeLaunchURL(targetURL);
         return;
     }
@@ -13967,7 +14011,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         // 本地安装了该应用：自动将关键词写入剪贴板，秒开该 App 并提示粘贴
         [UIPasteboard generalPasteboard].string = cleanKw;
         [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"📋 已复制「%@」并打开【%@】，直接粘贴即可", cleanKw, platform ?: @"应用"]];
-        [self dismissOverlay];
+        [self dismissOverlayIfMainCardActive];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
             @try {
                 [[%c(LSApplicationWorkspace) defaultWorkspace] openApplicationWithBundleID:bundleID];
@@ -13981,7 +14025,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         pillText = [NSString stringWithFormat:@"🔍 正在百度搜索: %@...", cleanKw];
         targetURL = [NSURL URLWithString:[NSString stringWithFormat:@"https://www.baidu.com/s?wd=%@", encoded]];
         [[AGGlobalActionPillWindow sharedPill] showActionPill:pillText];
-        [self dismissOverlay];
+        [self dismissOverlayIfMainCardActive];
         agSafeLaunchURL(targetURL);
         return;
     }
@@ -13989,7 +14033,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     // 坚决不降级打开 Safari，直接明确提示未安装
     [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"⚠️ 手机未安装「%@」", platform ?: @"目标应用"]];
     [self showActionBanner:[NSString stringWithFormat:@"⚠️ 手机未安装「%@」", platform ?: @"目标应用"]];
-    [self dismissOverlay];
+    [self dismissOverlayIfMainCardActive];
 }
 - (void)handleMediaControl:(NSString *)action {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -14032,7 +14076,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         NSString *clean = [action lowercaseString];
         if ([clean containsString:@"home"] || [clean containsString:@"桌面"]) {
             [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🏠 已返回主屏幕"];
-            [self dismissOverlay];
+            [self dismissOverlayIfMainCardActive];
             SBUIController *uic = [%c(SBUIController) sharedInstanceIfExists];
             if (uic && [uic respondsToSelector:@selector(clickedMenuButton)]) {
                 [uic clickedMenuButton];
@@ -14079,7 +14123,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         pillText = @"⭕ 正在打开 微信朋友圈...";
     }
     [[AGGlobalActionPillWindow sharedPill] showActionPill:pillText];
-    [self dismissOverlay];
+    [self dismissOverlayIfMainCardActive];
     agSafeLaunchURL([NSURL URLWithString:urlStr]);
 }
 
@@ -14098,7 +14142,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         pillText = @"💰 正在打开 支付宝收款码...";
     }
     [[AGGlobalActionPillWindow sharedPill] showActionPill:pillText];
-    [self dismissOverlay];
+    [self dismissOverlayIfMainCardActive];
     agSafeLaunchURL([NSURL URLWithString:urlStr]);
 }
 
@@ -14144,7 +14188,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     }
 
     [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"🧭 正在使用%@导航前往: %@...", chosenApp, dest]];
-    [self dismissOverlay];
+    [self dismissOverlayIfMainCardActive];
     agSafeLaunchURL(targetURL);
 }
 
@@ -14156,7 +14200,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         ? [NSURL URLWithString:[NSString stringWithFormat:@"qqmusic://qq.com/ui/search?searchType=0&keyword=%@", encoded]]
         : [NSURL URLWithString:[NSString stringWithFormat:@"orpheus://search/%@", encoded]];
     [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"🎵 正在检索音乐: %@...", keyword]];
-    [self dismissOverlay];
+    [self dismissOverlayIfMainCardActive];
     agSafeLaunchURL(targetURL);
 }
 
@@ -14167,7 +14211,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         NSURL *u = [NSURL URLWithString:target];
         if (u) {
             [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🌐 正在打开链接..."];
-            [self dismissOverlay];
+            [self dismissOverlayIfMainCardActive];
             agSafeLaunchURL(u);
         }
     });
