@@ -17088,6 +17088,7 @@ static void agRunNativeOfflineTranslationDiagnostics(void (^completion)(NSString
         } else {
             anyOfflineProbeSuccess = ([installedTransPrefixes containsObject:@"zh"] && installedTransPrefixes.count >= 2);
         }
+        (void)anyOfflineProbeSuccess;
 
         // 4. 汇总常用语种（中/英/日/韩）与扩展语种（俄/法/德/西/意/葡）状态，生成大白话报告
         BOOL hasZh = [installedTransPrefixes containsObject:@"zh"];
