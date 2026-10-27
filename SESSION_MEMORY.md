@@ -1,6 +1,6 @@
 # TimeGuardianSiri123 项目会话记忆文件 (SESSION_MEMORY.md)
 
-> **生成时间**：2026-10-27 10:16:00 (本地时间)
+> **生成时间**：2026-10-27 11:15:00 (本地时间)
 > **会话标识**：`02de72ea-60df-4738-8977-4a4ebaf78b2f`  
 > **用途说明**：供用户切换 Google Antigravity 账号或开启新会话后，直接读取本文件无缝继承当前项目的完整开发上下文。
 
@@ -61,7 +61,7 @@
 * [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (1,075,641 字节，SHA256: `0320E70A3883FB9624EC9800A6C61C2A9D969E6C7B4309E95DAAB8054363507E`)
 * [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (50,749 字节，SHA256: `03CAC9505D0DE46612E073FC1F5606FAF65292915511D8E46C77B26EC8335B80`)
 
-### 3. 最新云端编译产物（Run #134 / Commit `c909851`）
+### 3. 最新云端编译产物（Run #154 / Commit `f614802`）
 > **本次更新（补全自定义类名隐身宏 + 彻底消除 /tmp 明文痕迹 + 恢复安全无闪退版 dladdr/dyld 隐藏钩子）**：
 > 1. 补全头部隐身宏：追加 `AGInSituTranslationOverlay`、`AGGlobalActionPillWindow`、`AGLockScreenRootViewController`、`AGCardBgCanvasView`、`AGOrbCanvasView`、`AGWaveCanvasView`、`AGScreenTranslationOverlay`、`AGStreamTranslateDelegate` 共 8 个自定义类伪装映射（全面伪装为 `_UIStatusBarFloatingPillWindow` 等 UIKit 私有类），彻底抹除 Mach-O 自定义类名特征。
 > 2. 彻底抹除 `/tmp` 痕迹：`reloadGeminiPrefsCache` 移除 `geminiPrefsFilePath()`，`saveGeminiPrefs` 剔除 `/tmp/com.custom.geminisirioverlay.plist` 并主动执行 `removeItemAtPath` 清除旧残留与日志，彻底杜绝风控扫描 `/tmp` 发现越狱插件配置。
@@ -156,6 +156,44 @@
 
 
 
+
+### Run #154 验证与交付记录 (2026-10-27 11:15)
+> **本次更新（恢复干净音频析构 + 定点修复 ⚙️ 齿轮注销 + 听译彻底剥离录屏·零发热·本地芯片离线秒识 + 🍎原生/☁️API 切换按钮）**：
+> 1. **100% 恢复原本音频函数（还原至干净状态）**：
+>    - `stopAllVoiceEngines`：恢复为初始原生版本，保留即时停止本地 VAD（`stopNativeAppleNeuralVAD`）与空闲提早返回优化（`if (!rec && !eng && !wasSpeakingTTS && !hadActiveWS) return;`），移除后台延迟析构；
+>    - `handleAudioSessionInterruption:` 与 `handleAudioSessionRouteChange:`：恢复为初始版本，移除 `modelPickerContainer` 条件守卫。
+> 2. **定点修复 ⚙️ 齿轮按钮注销**：
+>    - `togglePureModelPicker`：展开模型列表时仅展示面板，像旁边的 `文A` 按钮一样绝不调用 `stopAllVoiceEngines` 拆毁底层音频引擎，彻底消除点齿轮注销问题；
+>    - `refreshOverlayPickerHeader`：移除隐藏事务中多余的 `layoutIfNeeded` 强制重排；
+>    - `tableView:cellForRowAtIndexPath:`：对缓存模型列表进行严格防崩过滤与类型清洗，杜绝异常字典/空值引发崩溃。
+> 3. **听译彻底修复（0 录屏弹窗 + 0 发热 + 苹果本地芯片离线秒识 + 🍎原生/☁️API 切换按钮）**：
+>    - 彻底剥离 `RPScreenRecorder` 录屏框架，从根本上根除录屏红条与系统录屏授权弹窗；
+>    - 开启苹果芯片离线识别：`self.speechRequest.requiresOnDeviceRecognition = YES`，语音识别完全由 Apple Neural Engine 硬件离线秒识；
+>    - 全局单例复用 `_LTTranslator` 翻译器，并增设单飞防堵互斥锁 `_isNativeTransBusy` 与最新未消费段落挂起机制，彻底解决 XPC 重复握手风暴与 CPU 高负荷发热；
+>    - 音频采集采用 4096 帧大块缓冲直通（~11 次/秒），零内存拷贝与零主线程阻塞；
+>    - 浮窗顶部收音源按钮改版复用为 `[🍎原生 / ☁️API]` 实时切换开关（青色原生离线 / 橙金云端大模型 API）。
+
+* **Dopamine (Rootless arm64)**：
+  - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
+  - 文件大小：`427,068` 字节
+  - SHA256: `DC9C484C5ACDE1CE50BE13F03912EDB6DD0C3E97EB234C8D02DC8422982AABBE`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (776 字节), `data.tar.xz` (426,100 字节)
+  - 分发路径：
+    - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+    - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+    - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+
+* **Relaxin (RootHide arm64e)**：
+  - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
+  - 文件大小：`278,172` 字节
+  - SHA256: `3151CB4A115336924284F1021F61BC9D2582D9967532A58629A716ED883A4B4E`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (776 字节), `data.tar.xz` (277,204 字节)
+  - 分发路径：
+    - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+    - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+    - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+
+---
 
 ### Run #152 验证与交付记录 (2026-10-27 10:16)
 > **本次更新（修复齿轮注销崩溃 + 零音损收音 + 🍎iOS原生离线/☁️API大模型实时切换按钮）**：
