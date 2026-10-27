@@ -7127,47 +7127,67 @@ static void agSetLowPowerMode(BOOL enable) {
     [[AGGlobalActionPillWindow sharedPill] showActionPill:enable ? @"🔋 已开启低电量模式" : @"🔋 已关闭低电量模式"];
 }
 
-// 底层 IOHIDEvent 硬件级屏幕触控与滑动手势合成器（用于视觉点击按钮、自动刷抖音/小红书）
+// 底层 IOHIDEvent 硬件级零风控拟人触控与贝塞尔曲线手势合成器
 typedef CFTypeRef (*IOHIDEventCreateDigitizerEventFunc)(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, float, float, float, float, float, Boolean, Boolean, uint32_t);
 typedef CFTypeRef (*IOHIDEventCreateDigitizerFingerEventFunc)(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, float, float, float, float, float, Boolean, Boolean, uint32_t);
 typedef void (*IOHIDEventAppendEventFunc)(CFTypeRef, CFTypeRef, uint32_t);
 typedef void (*IOHIDEventSetIntegerValueFunc)(CFTypeRef, uint32_t, CFIndex);
+typedef void (*IOHIDEventSetFloatValueFunc)(CFTypeRef, uint32_t, double);
+typedef void (*IOHIDEventSetSenderIDFunc)(CFTypeRef, uint64_t);
 typedef void (*BKSHIDEventSendToFocusedProcessFunc)(CFTypeRef);
 
-static void agSendSynthesizedTouchEvent(CGPoint pt, BOOL isTouching, uint32_t eventMask) {
+static void agSendSynthesizedTouchEventWithRadius(CGPoint pt, BOOL isTouching, uint32_t eventMask, float radiusMM, float pressureVal) {
     static IOHIDEventCreateDigitizerEventFunc createHand = NULL;
     static IOHIDEventCreateDigitizerFingerEventFunc createFinger = NULL;
     static IOHIDEventAppendEventFunc appendEv = NULL;
     static IOHIDEventSetIntegerValueFunc setIntVal = NULL;
+    static IOHIDEventSetFloatValueFunc setFloatVal = NULL;
+    static IOHIDEventSetSenderIDFunc setSenderID = NULL;
     static BKSHIDEventSendToFocusedProcessFunc sendFocused = NULL;
+    static uint64_t sHardwareScreenSenderID = 0x8000000817319372ULL;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         void *ioHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
         void *bksHandle = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_LAZY);
         if (ioHandle) {
-            createHand = (IOHIDEventCreateDigitizerEventFunc)dlsym(ioHandle, "IOHIDEventCreateDigitizerEvent");
+            createHand   = (IOHIDEventCreateDigitizerEventFunc)dlsym(ioHandle, "IOHIDEventCreateDigitizerEvent");
             createFinger = (IOHIDEventCreateDigitizerFingerEventFunc)dlsym(ioHandle, "IOHIDEventCreateDigitizerFingerEvent");
-            appendEv = (IOHIDEventAppendEventFunc)dlsym(ioHandle, "IOHIDEventAppendEvent");
-            setIntVal = (IOHIDEventSetIntegerValueFunc)dlsym(ioHandle, "IOHIDEventSetIntegerValue");
+            appendEv     = (IOHIDEventAppendEventFunc)dlsym(ioHandle, "IOHIDEventAppendEvent");
+            setIntVal    = (IOHIDEventSetIntegerValueFunc)dlsym(ioHandle, "IOHIDEventSetIntegerValue");
+            setFloatVal  = (IOHIDEventSetFloatValueFunc)dlsym(ioHandle, "IOHIDEventSetFloatValue");
+            setSenderID  = (IOHIDEventSetSenderIDFunc)dlsym(ioHandle, "IOHIDEventSetSenderID");
         }
         if (bksHandle) {
             sendFocused = (BKSHIDEventSendToFocusedProcessFunc)dlsym(bksHandle, "BKSHIDEventSendToFocusedProcess");
         }
+        sHardwareScreenSenderID ^= ((uint64_t)arc4random() << 16);
     });
     if (!createHand || !createFinger || !appendEv || !sendFocused) return;
 
     CGRect sb = [UIScreen mainScreen].bounds;
     float normX = MAX(0.01f, MIN(0.99f, pt.x / MAX(1.0, sb.size.width)));
     float normY = MAX(0.01f, MIN(0.99f, pt.y / MAX(1.0, sb.size.height)));
+    float pressure = isTouching ? pressureVal : 0.0f;
     uint64_t abTime = mach_absolute_time();
 
-    CFTypeRef handEv = createHand(kCFAllocatorDefault, abTime, 3, 0, 0, eventMask, 0, normX, normY, 0.0f, (isTouching ? 1.0f : 0.0f), 0.0f, isTouching, isTouching, 0);
+    CFTypeRef handEv = createHand(kCFAllocatorDefault, abTime, 3, 0, 0, eventMask, 0, normX, normY, 0.0f, pressure, 0.0f, isTouching, isTouching, 0);
     if (!handEv) return;
     if (setIntVal) {
-        setIntVal(handEv, 0xB0019, 1); // kIOHIDEventFieldDigitizerIsDisplayIntegrated = 1
+        setIntVal(handEv, 0xB0019, 1); // kIOHIDEventFieldDigitizerIsDisplayIntegrated = 1 (内置电容屏标志)
     }
-    CFTypeRef fingerEv = createFinger(kCFAllocatorDefault, abTime, 1, 2, eventMask, normX, normY, 0.0f, (isTouching ? 1.0f : 0.0f), 0.0f, isTouching, isTouching, 0);
+    if (setSenderID) {
+        setSenderID(handEv, sHardwareScreenSenderID);
+    }
+    CFTypeRef fingerEv = createFinger(kCFAllocatorDefault, abTime, 1, 2, eventMask, normX, normY, 0.0f, pressure, 0.0f, isTouching, isTouching, 0);
     if (fingerEv) {
+        if (setFloatVal) {
+            // 注入真人手指接触电容屏的椭圆面积半径 (MajorRadius / MinorRadius) 与密度，彻底消除 radius=0 的脚本破绽
+            float rMaj = isTouching ? radiusMM : 0.0f;
+            float rMin = isTouching ? (radiusMM * 0.86f) : 0.0f;
+            setFloatVal(fingerEv, 0xB0014, rMaj); // kIOHIDEventFieldDigitizerMajorRadius
+            setFloatVal(fingerEv, 0xB0015, rMin); // kIOHIDEventFieldDigitizerMinorRadius
+            setFloatVal(fingerEv, 0xB000C, isTouching ? 0.65 : 0.0); // kIOHIDEventFieldDigitizerDensity
+        }
         appendEv(handEv, fingerEv, 0);
         CFRelease(fingerEv);
     }
@@ -7175,27 +7195,61 @@ static void agSendSynthesizedTouchEvent(CGPoint pt, BOOL isTouching, uint32_t ev
     CFRelease(handEv);
 }
 
+static void agSendSynthesizedTouchEvent(CGPoint pt, BOOL isTouching, uint32_t eventMask) {
+    float radius = 4.85f + ((float)arc4random_uniform(120)) * 0.01f;
+    float pressure = 0.24f + ((float)arc4random_uniform(18)) * 0.01f;
+    agSendSynthesizedTouchEventWithRadius(pt, isTouching, eventMask, radius, pressure);
+}
+
 static void agSimulateScreenTapAtPoint(CGPoint pt) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        agSendSynthesizedTouchEvent(pt, YES, 0x03); // Touch Down
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            agSendSynthesizedTouchEvent(pt, NO, 0x02); // Touch Up
+        CGRect sb = [UIScreen mainScreen].bounds;
+        // 1. 二维高斯随机落点偏移 (±2.5pt)，绝不重复点在同一个死点像素
+        CGFloat jx = ((CGFloat)arc4random_uniform(50) - 25.0) * 0.10;
+        CGFloat jy = ((CGFloat)arc4random_uniform(50) - 25.0) * 0.10;
+        CGPoint downPt = CGPointMake(MAX(6.0, MIN(sb.size.width - 6.0, pt.x + jx)),
+                                     MAX(6.0, MIN(sb.size.height - 6.0, pt.y + jy)));
+        // 2. 模拟真人指腹肉垫按下到抬起之间的 0.4~1.0pt 微小自然滚动
+        CGPoint upPt = CGPointMake(downPt.x + ((CGFloat)arc4random_uniform(14) - 7.0) * 0.10,
+                                   downPt.y + ((CGFloat)arc4random_uniform(14) - 7.0) * 0.10);
+        float baseRadius = 4.75f + ((float)arc4random_uniform(110)) * 0.01f;
+        float basePress  = 0.25f + ((float)arc4random_uniform(16)) * 0.01f;
+
+        agSendSynthesizedTouchEventWithRadius(downPt, YES, 0x03, baseRadius, basePress);
+        // 3. 随机化真人按压停留时长 (52ms ~ 88ms)
+        NSTimeInterval holdDur = 0.052 + ((double)arc4random_uniform(36)) * 0.001;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(holdDur * 0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            agSendSynthesizedTouchEventWithRadius(upPt, YES, 0x04, baseRadius * 1.08f, basePress * 1.12f);
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(holdDur * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            agSendSynthesizedTouchEventWithRadius(upPt, NO, 0x02, 0.0f, 0.0f);
         });
     });
 }
 
 static void agSimulateScreenSwipe(CGPoint startPt, CGPoint endPt, NSTimeInterval duration) {
-    NSInteger steps = 14;
-    NSTimeInterval stepTime = MAX(0.012, duration / (double)steps);
+    NSInteger steps = 16;
+    NSTimeInterval totalDur = MAX(0.18, duration + ((double)arc4random_uniform(40) - 20.0) * 0.001);
+    NSTimeInterval stepTime = totalDur / (double)steps;
+
+    // 构造模拟人类大拇指自然生理弧度的二阶贝塞尔控制点（彻底告别死板数学直线）
+    CGFloat midX = (startPt.x + endPt.x) * 0.5 + (((CGFloat)arc4random_uniform(24) - 12.0) + (endPt.y < startPt.y ? 9.0 : -9.0));
+    CGFloat midY = (startPt.y + endPt.y) * 0.5 + ((CGFloat)arc4random_uniform(16) - 8.0);
+    CGPoint ctrlPt = CGPointMake(midX, midY);
+
     agSendSynthesizedTouchEvent(startPt, YES, 0x03);
     for (NSInteger i = 1; i <= steps; i++) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(stepTime * i * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            CGFloat t = (CGFloat)i / (CGFloat)steps;
-            CGPoint cur = CGPointMake(startPt.x + (endPt.x - startPt.x) * t, startPt.y + (endPt.y - startPt.y) * t);
+            CGFloat rawT = (CGFloat)i / (CGFloat)steps;
+            // Ease-In-Out 真人加减速曲线（起步加速 -> 中段快速 -> 末尾减速）
+            CGFloat t = rawT * rawT * (3.0 - 2.0 * rawT);
+            CGFloat u = 1.0 - t;
+            CGFloat bx = u * u * startPt.x + 2.0 * u * t * ctrlPt.x + t * t * endPt.x;
+            CGFloat by = u * u * startPt.y + 2.0 * u * t * ctrlPt.y + t * t * endPt.y;
             if (i < steps) {
-                agSendSynthesizedTouchEvent(cur, YES, 0x04); // Move
+                agSendSynthesizedTouchEvent(CGPointMake(bx, by), YES, 0x04);
             } else {
-                agSendSynthesizedTouchEvent(cur, NO, 0x02);  // Up
+                agSendSynthesizedTouchEvent(CGPointMake(bx, by), NO, 0x02);
             }
         });
     }
@@ -7427,6 +7481,8 @@ static void agSimulateScreenSwipe(CGPoint startPt, CGPoint endPt, NSTimeInterval
 - (void)launchInSituFollowTranslationFromSheet;
 - (void)launchLiveAudioListenTranslationFromSheet;
 - (void)agScreenTranslateButtonTapped;
+- (void)performVisualTapWithRetry:(NSString *)targetText attempt:(NSInteger)attempt maxAttempts:(NSInteger)maxAttempts;
+- (void)performAIVisionScreenAgentWithGoal:(NSString *)goalDesc step:(NSInteger)step maxSteps:(NSInteger)maxSteps;
 - (void)updateResponseTextViewSmoothly:(NSString *)newText;
 - (void)throttledExpandAndScrollTextViewForce:(BOOL)force;
 @end
@@ -11553,7 +11609,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     }
 }
 
-// 支持单条或多条连续 [ACTION:{...}] 复合连招解析与顺序执行
+// 支持单条或多条连续 [ACTION:{...}] 复合连招解析与跨应用智能等待执行
 - (NSString *)parseAndExecuteActions:(NSString *)responseText executed:(BOOL *)outExecuted {
     if (outExecuted) *outExecuted = NO;
     if (!responseText || responseText.length == 0) return @"";
@@ -11567,7 +11623,6 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     });
     NSArray<NSTextCheckingResult *> *matches = [sActionRegex matchesInString:responseText options:0 range:NSMakeRange(0, responseText.length)];
     if (matches.count > 0) {
-        // 若本地毫秒级直通车刚刚在 3.5 秒内执行过动作，则仅剥离标记，避免小胶囊不断线时重复二次打开软件
         if ([[NSDate date] timeIntervalSince1970] - self.lastLocalActionExecTime < 3.5) {
             if (outExecuted) *outExecuted = YES;
             NSString *cleaned = [sActionRegex stringByReplacingMatchesInString:responseText options:0 range:NSMakeRange(0, responseText.length) withTemplate:@""];
@@ -11586,14 +11641,22 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         }
         if (actionList.count > 0) {
             if (outExecuted) *outExecuted = YES;
+            NSTimeInterval cumulativeDelay = 0.0;
             for (NSUInteger i = 0; i < actionList.count; i++) {
                 NSDictionary *act = actionList[i];
                 if (i == 0) {
                     [self executeActionDictionary:act];
                 } else {
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * i * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(cumulativeDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                         [self executeActionDictionary:act];
                     });
+                }
+                // 若当前动作是打开软件/跳转搜索/导航，为下一步视觉点击预留 2.0s 等待软件界面加载完成！
+                NSString *actType = act[@"type"] ?: @"";
+                if ([actType isEqualToString:@"open_app"] || [actType isEqualToString:@"search"] || [actType isEqualToString:@"navigation"] || [actType isEqualToString:@"open_url"]) {
+                    cumulativeDelay += 2.0;
+                } else {
+                    cumulativeDelay += 1.1;
                 }
             }
         }
@@ -12288,7 +12351,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         return YES;
     }
 
-    // 19. 🪄 复合场景宏 & 原位网页翻译
+    // 19. 🪄 复合场景宏 & 原位翻译 / 实时语音同传听译 / 跨应用连招操作
     if ([cmd containsString:@"晚安"] || [cmd containsString:@"我要睡了"] || [cmd containsString:@"准备睡觉"]) {
         [self executeActionDictionary:@{@"type": @"macro_scene", @"scene": @"sleep"}];
         return YES;
@@ -12297,10 +12360,49 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         [self executeActionDictionary:@{@"type": @"macro_scene", @"scene": @"drive"}];
         return YES;
     }
-    if ([cmd containsString:@"翻译"] && ([cmd containsString:@"网页"] || [cmd containsString:@"屏幕"] || [cmd containsString:@"页面"])) {
+
+    // 关闭翻译 / 听译
+    if (([cmd containsString:@"关"] || [cmd containsString:@"退"] || [cmd containsString:@"停"] || [cmd containsString:@"还原"]) &&
+        ([cmd containsString:@"翻译"] || [cmd containsString:@"听译"] || [cmd containsString:@"字幕"])) {
+        [self executeActionDictionary:@{@"type": @"close_translate"}];
+        return YES;
+    }
+    // 开启实时语音同传听译（支持说：“打开听译”、“开启听译功能”、“同传听译”、“实时字幕”、“视频听译”）
+    if ([cmd containsString:@"听译"] || [cmd containsString:@"同传"] || [cmd containsString:@"实时字幕"] ||
+        ([cmd containsString:@"翻译"] && ([cmd containsString:@"声音"] || [cmd containsString:@"语音"] || [cmd containsString:@"视频"] || [cmd containsString:@"音频"]))) {
+        [self executeActionDictionary:@{@"type": @"listen_translate"}];
+        return YES;
+    }
+    // 开启原位智能跟随翻译（支持说：“打开翻译”、“打开翻译功能”、“开启原位翻译”、“翻译屏幕”、“翻译网页”、“实时翻译”）
+    if ([cmd containsString:@"原位翻译"] || [cmd containsString:@"跟随翻译"] || [cmd containsString:@"屏幕翻译"] ||
+        [cmd containsString:@"网页翻译"] || [cmd containsString:@"实时翻译"] ||
+        ([cmd containsString:@"翻译"] && ([cmd containsString:@"打开"] || [cmd containsString:@"开启"] || [cmd containsString:@"启动"] || [cmd containsString:@"网页"] || [cmd containsString:@"屏幕"] || [cmd containsString:@"页面"] || [cmd containsString:@"当前"]))) {
         [self executeActionDictionary:@{@"type": @"in_situ_translate"}];
         return YES;
     }
+
+    // 20. 🤖 跨应用复合口语连招拆解（例如：“打开高德地图搜索海口市然后帮我点击开始导航” / “打开微信然后点击发现”）
+    if ([cleanCmd containsString:@"然后"] || [cleanCmd containsString:@"接着"] || [cleanCmd containsString:@"再帮我"] || [cleanCmd containsString:@"再去"]) {
+        NSRegularExpression *chainRe = [NSRegularExpression regularExpressionWithPattern:@"^(.+?)(?:，|,|\\s)*(?:然后|接着|再帮我|再去|再)(?:帮我)?(.+)$" options:0 error:nil];
+        NSTextCheckingResult *chainMatch = [chainRe firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
+        if (chainMatch && chainMatch.numberOfRanges >= 3) {
+            NSString *step1Str = [[cleanCmd substringWithRange:[chainMatch rangeAtIndex:1]] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            NSString *step2Str = [[cleanCmd substringWithRange:[chainMatch rangeAtIndex:2]] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (step1Str.length >= 2 && step2Str.length >= 2) {
+                BOOL step1Handled = [self tryExecuteDirectLocalCommand:step1Str];
+                if (step1Handled) {
+                    // 等第 1 步（如打开应用或跳转搜索）加载 2.0 秒后，自动在目标应用屏幕上执行第 2 步视觉点击或操作！
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        if (![self tryExecuteDirectLocalCommand:step2Str]) {
+                            [self performAIVisionScreenAgentWithGoal:step2Str step:1 maxSteps:3];
+                        }
+                    });
+                    return YES;
+                }
+            }
+        }
+    }
+
     return NO;
 }
 
@@ -12406,8 +12508,11 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         NSString *title = dict[@"title"] ?: dict[@"content"];
         if (title) [self handleAddSystemReminder:title];
     } else if ([type isEqualToString:@"ui_tap_text"]) {
-        NSString *targetText = dict[@"text"];
+        NSString *targetText = dict[@"text"] ?: dict[@"target"];
         if (targetText) [self handleVisualTapTextOnScreen:targetText];
+    } else if ([type isEqualToString:@"ui_vision_agent"]) {
+        NSString *goal = dict[@"goal"] ?: (dict[@"text"] ?: dict[@"target"]);
+        if (goal) [self performAIVisionScreenAgentWithGoal:goal step:1 maxSteps:3];
     } else if ([type isEqualToString:@"ui_gesture"]) {
         NSString *gesture = dict[@"gesture"] ?: @"swipe_up";
         [self handleSynthesizedUIGesture:gesture];
@@ -12457,10 +12562,17 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         NSString *urlStr = dict[@"url"];
         if (urlStr) [self openURLString:urlStr];
     } else if ([type isEqualToString:@"in_situ_translate"]) {
-        [self dismissOverlay];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [[AGInSituTranslationOverlay sharedOverlay] startInSituTranslation];
-        });
+        [self launchInSituFollowTranslationFromSheet];
+    } else if ([type isEqualToString:@"listen_translate"]) {
+        [self launchLiveAudioListenTranslationFromSheet];
+    } else if ([type isEqualToString:@"close_translate"]) {
+        if (![AGScreenTranslationOverlay sharedOverlay].hidden) {
+            [[AGScreenTranslationOverlay sharedOverlay] hideTranslatorFloatingBox];
+        }
+        if (![AGInSituTranslationOverlay sharedOverlay].hidden) {
+            [[AGInSituTranslationOverlay sharedOverlay] revertInSituTranslation];
+        }
+        [[AGGlobalActionPillWindow sharedPill] showActionPill:@"✅ 已关闭翻译与听译窗口"];
     }
 }
 
@@ -13396,44 +13508,214 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     } @catch (NSException *e) {}
 }
 
-// 视觉 OCR 寻找屏幕上的目标文字并自动模拟点击 (GUI Agent)
+// 视觉 OCR 寻找屏幕上的目标文字并自动模拟点击 (支持跨应用等待重试 + 模糊语义匹配 + AI视觉大脑看屏兜底)
 - (void)handleVisualTapTextOnScreen:(NSString *)targetText {
     if (!targetText || targetText.length == 0) return;
     [self dismissOverlayIfMainCardActive];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIImage *screenImg = _UICreateScreenUIImage();
+    [self performVisualTapWithRetry:targetText attempt:1 maxAttempts:4];
+}
+
+- (void)performVisualTapWithRetry:(NSString *)targetText attempt:(NSInteger)attempt maxAttempts:(NSInteger)maxAttempts {
+    NSTimeInterval waitDelay = (attempt == 1) ? 0.35 : 0.75;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(waitDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIImage *screenImg = nil;
+        @try { screenImg = _UICreateScreenUIImage(); } @catch (NSException *e) { screenImg = nil; }
         if (!screenImg || !screenImg.CGImage) return;
-        CGImageRef cgImg = screenImg.CGImage;
-        CGImageRetain(cgImg);
+        CGImageRef cgImg = CGImageCreateCopy(screenImg.CGImage);
+        if (!cgImg) return;
         CGRect sb = [UIScreen mainScreen].bounds;
 
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
             VNRecognizeTextRequest *req = [[VNRecognizeTextRequest alloc] initWithCompletionHandler:^(VNRequest * _Nonnull request, NSError * _Nullable error) {
-                NSString *cleanTarget = [targetText lowercaseString];
+                NSString *cleanTarget = [[targetText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+                cleanTarget = [cleanTarget stringByReplacingOccurrencesOfString:@"按钮" withString:@""];
+                cleanTarget = [cleanTarget stringByReplacingOccurrencesOfString:@"图标" withString:@""];
+
+                VNRecognizedTextObservation *bestObs = nil;
+                NSInteger bestScore = 0;
+
                 for (VNRecognizedTextObservation *obs in request.results) {
                     VNRecognizedText *top = [[obs topCandidates:1] firstObject];
-                    if (top && [[top.string lowercaseString] containsString:cleanTarget]) {
-                        CGRect box = obs.boundingBox;
-                        // Vision 坐标系左下角为 (0,0)，转换为 UIKit 屏幕坐标
-                        CGFloat tapX = CGRectGetMidX(box) * sb.size.width;
-                        CGFloat tapY = (1.0 - CGRectGetMidY(box)) * sb.size.height;
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"👆 已为您视觉定位并点击「%@」", targetText]];
-                            agSimulateScreenTapAtPoint(CGPointMake(tapX, tapY));
-                        });
-                        return;
+                    if (!top || top.string.length == 0) continue;
+                    NSString *candStr = [top.string lowercaseString];
+
+                    NSInteger score = 0;
+                    if ([candStr isEqualToString:cleanTarget]) {
+                        score = 100; // 完全精准匹配
+                    } else if ([candStr containsString:cleanTarget]) {
+                        score = 80 - (NSInteger)MIN(30, candStr.length - cleanTarget.length);
+                    } else if (cleanTarget.length >= 2 && [cleanTarget containsString:candStr] && candStr.length >= 2) {
+                        score = 65; // 语义子集匹配（如说“开始导航”匹配屏幕上的“导航”）
+                    }
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestObs = obs;
                     }
                 }
+
+                if (bestObs) {
+                    CGRect box = bestObs.boundingBox;
+                    CGFloat tapX = CGRectGetMidX(box) * sb.size.width;
+                    CGFloat tapY = (1.0 - CGRectGetMidY(box)) * sb.size.height;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"👆 已看懂屏幕并点击「%@」", targetText]];
+                        agSimulateScreenTapAtPoint(CGPointMake(tapX, tapY));
+                    });
+                    return;
+                }
+
+                // 若当前页面还在加载中（未达到最大重试次数），自动等待 0.75s 再看一眼屏幕！
+                if (attempt < maxAttempts) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (attempt == 1) {
+                            [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"⏳ 正在等待页面加载「%@」...", targetText]];
+                        }
+                        [self performVisualTapWithRetry:targetText attempt:(attempt + 1) maxAttempts:maxAttempts];
+                    });
+                    return;
+                }
+
+                // 若本地文字 OCR 未找到（例如目标是放大镜图标、加号图标或复杂位置描述），自动唤醒 AI 视觉大脑看图定位！
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"⚠️ 屏幕上未找到文字「%@」", targetText]];
+                    [self performAIVisionScreenAgentWithGoal:[NSString stringWithFormat:@"找到并点击「%@」", targetText] step:1 maxSteps:2];
                 });
             }];
             req.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
-            req.recognitionLanguages = @[@"zh-Hans", @"en-US"];
+            req.recognitionLanguages = @[@"zh-Hans", @"zh-Hant", @"en-US"];
             VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCGImage:cgImg options:@{}];
             [handler performRequests:@[req] error:nil];
             CGImageRelease(cgImg);
         });
+    });
+}
+
+// 🧠 AI 视觉大脑屏幕理解 Agent：看懂屏幕图标、布局并自动完成单步或多步操作
+- (void)performAIVisionScreenAgentWithGoal:(NSString *)goalDesc step:(NSInteger)step maxSteps:(NSInteger)maxSteps {
+    if (!goalDesc || goalDesc.length == 0 || step > maxSteps) return;
+    [self dismissOverlayIfMainCardActive];
+
+    NSTimeInterval waitSec = (step == 1) ? 0.45 : 1.50;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(waitSec * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIImage *rawScreen = nil;
+        @try { rawScreen = _UICreateScreenUIImage(); } @catch (NSException *e) { rawScreen = nil; }
+        if (!rawScreen) return;
+
+        // 压缩为低延迟高清视觉快照 (最大边 768px)
+        CGSize origSz = rawScreen.size;
+        CGFloat scale = MIN(1.0, 768.0 / MAX(origSz.width, origSz.height));
+        CGSize targetSz = CGSizeMake(floor(origSz.width * scale), floor(origSz.height * scale));
+        UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+        fmt.scale = 1.0;
+        fmt.opaque = YES;
+        UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:targetSz format:fmt];
+        UIImage *scaledImg = [renderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull ctx) {
+            [rawScreen drawInRect:CGRectMake(0, 0, targetSz.width, targetSz.height)];
+        }];
+        NSData *jpgData = UIImageJPEGRepresentation(scaledImg, 0.58);
+        if (!jpgData || jpgData.length < 500) return;
+
+        // 优先使用视频AI或纯文本模块已配置的 API Key 与模型进行视觉分析
+        AGConfigTab useTab = (agAPIKeyForTab(AGConfigTabVideoAI).length >= 4) ? AGConfigTabVideoAI : ((agAPIKeyForTab(AGConfigTabPureText).length >= 4) ? AGConfigTabPureText : AGConfigTabNativeLive);
+        NSString *apiKey = agAPIKeyForTab(useTab);
+        NSString *endpoint = agEndpointForTab(useTab);
+        NSString *model = agModelForTab(useTab);
+        NSString *proxy = agProxyForTab(useTab);
+        if (apiKey.length < 4) return;
+        if (model.length == 0 || [model containsString:@"native-audio"] || [model containsString:@"-live"]) {
+            model = @"models/gemini-2.5-flash";
+        }
+
+        [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"👁️ AI 正在看屏幕定位：%@...", goalDesc]];
+
+        NSString *visionPrompt = [NSString stringWithFormat:
+            @"你是一个精准的 iOS 屏幕视觉操作智能体。请观察当前手机屏幕截图，用户的操作目标是：【%@】。\n"
+            @"屏幕左上角坐标为 (0, 0)，右下角坐标为 (1000, 1000)。\n"
+            @"请仅输出一行 JSON 指令（不要输出任何解释或 Markdown）：\n"
+            @"• 若需点击屏幕上某个按钮/图标/区域：{\"act\":\"tap\",\"x\":500,\"y\":320,\"desc\":\"按钮名称\",\"done\":true}\n"
+            @"• 若需先点击输入框再打字：{\"act\":\"type\",\"x\":500,\"y\":180,\"text\":\"要输入的词\",\"desc\":\"搜索框\",\"done\":false}\n"
+            @"• 若当前屏幕找不到目标需往下滑寻找：{\"act\":\"swipe_up\",\"desc\":\"上滑寻找\",\"done\":false}\n"
+            @"• 若目标已经完成：{\"act\":\"done\",\"desc\":\"已完成\",\"done\":true}", goalDesc];
+
+        NSString *b64Img = [jpgData base64EncodedStringWithOptions:0];
+        BOOL isGoogle = agIsGoogleNativeProtocol(endpoint, model);
+        NSMutableURLRequest *req = nil;
+
+        if (isGoogle) {
+            NSString *baseEP = agSanitizeEndpoint(endpoint, useTab);
+            NSString *fullM = [model hasPrefix:@"models/"] ? model : [NSString stringWithFormat:@"models/%@", model];
+            NSString *urlStr = [NSString stringWithFormat:@"%@/v1beta/%@:generateContent?key=%@", baseEP, fullM, apiKey];
+            req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
+            req.HTTPMethod = @"POST";
+            [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+            NSDictionary *body = @{
+                @"contents": @[ @{ @"role": @"user", @"parts": @[
+                    @{ @"inlineData": @{ @"mimeType": @"image/jpeg", @"data": b64Img } },
+                    @{ @"text": visionPrompt }
+                ] } ],
+                @"generationConfig": @{ @"temperature": @0.1, @"maxOutputTokens": @150 }
+            };
+            req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+        } else {
+            NSString *urlStr = agSanitizeOpenAIEndpoint(endpoint);
+            req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
+            req.HTTPMethod = @"POST";
+            [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+            [req setValue:[NSString stringWithFormat:@"Bearer %@", apiKey] forHTTPHeaderField:@"Authorization"];
+            NSString *exactM = [model stringByReplacingOccurrencesOfString:@"models/" withString:@""];
+            NSDictionary *body = @{
+                @"model": exactM,
+                @"messages": @[ @{ @"role": @"user", @"content": @[
+                    @{ @"type": @"image_url", @"image_url": @{ @"url": [NSString stringWithFormat:@"data:image/jpeg;base64,%@", b64Img] } },
+                    @{ @"type": @"text", @"text": visionPrompt }
+                ] } ],
+                @"temperature": @0.1, @"max_tokens": @150
+            };
+            req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+        }
+        req.timeoutInterval = 8.0;
+
+        NSURLSession *sess = agCreateSessionWithProxy(proxy, nil, nil);
+        [[sess dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            if (err || !data) return;
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            NSString *reply = [[self extractTextFromDictionary:json] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (!reply || reply.length == 0) return;
+
+            NSRange lBrace = [reply rangeOfString:@"{"];
+            NSRange rBrace = [reply rangeOfString:@"}" options:NSBackwardsSearch];
+            if (lBrace.location == NSNotFound || rBrace.location == NSNotFound || rBrace.location <= lBrace.location) return;
+            NSString *jsonSub = [reply substringWithRange:NSMakeRange(lBrace.location, rBrace.location - lBrace.location + 1)];
+            NSDictionary *cmdDict = [NSJSONSerialization JSONObjectWithData:[jsonSub dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+            if (![cmdDict isKindOfClass:[NSDictionary class]]) return;
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                CGRect sb = [UIScreen mainScreen].bounds;
+                NSString *act = [cmdDict[@"act"] lowercaseString];
+                NSString *desc = cmdDict[@"desc"] ?: goalDesc;
+                BOOL isDone = [cmdDict[@"done"] boolValue];
+
+                if ([act isEqualToString:@"tap"] || [act isEqualToString:@"type"]) {
+                    CGFloat normX = [cmdDict[@"x"] doubleValue];
+                    CGFloat normY = [cmdDict[@"y"] doubleValue];
+                    CGPoint pt = CGPointMake((normX / 1000.0) * sb.size.width, (normY / 1000.0) * sb.size.height);
+                    [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"👆 AI 视觉点击：%@", desc]];
+                    agSimulateScreenTapAtPoint(pt);
+
+                    if ([act isEqualToString:@"type"] && [cmdDict[@"text"] length] > 0) {
+                        NSString *inputTxt = cmdDict[@"text"];
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.65 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            [self handleClipboardAndAutoType:inputTxt];
+                        });
+                    }
+                } else if ([act isEqualToString:@"swipe_up"]) {
+                    [self handleSynthesizedUIGesture:@"swipe_up"];
+                }
+
+                if (!isDone && step < maxSteps) {
+                    [self performAIVisionScreenAgentWithGoal:goalDesc step:(step + 1) maxSteps:maxSteps];
+                }
+            });
+        }] resume];
     });
 }
 
