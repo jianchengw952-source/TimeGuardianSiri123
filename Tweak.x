@@ -16650,8 +16650,12 @@ static NSString *agInstantLocalPreviewForSegment(NSString *segment, NSInteger la
     return hits.count > 0 ? [hits componentsJoinedByString:@"·"] : @"";
 }
 
-// ====== 最终确认替换块 2 开始（iOS 14-17 原生离线翻译 + 大白话全语种自动体检 + 原位/听译双擎天花板版） ======
+// ====== 最终确认替换块 2 开始（iOS 14-17 原生离线翻译 + 图层100%穿透不挡滑动 + 覆膜深浅/滑动延迟可调 + 直达设置） ======
 #define AGSharedTransSessionRouter _UINetworkStreamSessionRouter
+
+@interface UIApplication (AGPrefsURLRouter)
+- (BOOL)applicationOpenURL:(NSURL *)url;
+@end
 
 static NSURLSessionDataTask *gActiveTransTask = nil;
 static NSTimeInterval gActiveTransStartTime = 0;
@@ -16675,7 +16679,23 @@ static void agSetUseNativeiOSTranslator(BOOL useNative) {
     });
 }
 
-// 500 条容量 LRU 极速内存翻译缓存（滑动网页重译时已译段落 0ms 直接命中上屏，不重复耗电）
+// 网页覆膜底色浓淡档位：0=清爽浅透(70%), 1=柔和自然(82%, 默认), 2=实心遮盖(94%)
+static NSInteger agTransPatchStyleIndex(void) {
+    NSNumber *val = agReadOnlyPrefs()[@"AG_Trans_PatchStyle"];
+    if (!val) return 1;
+    return MAX(0, MIN(2, [val integerValue]));
+}
+
+// 滑动停稳后触发重译的延迟档位对应秒数
+static NSTimeInterval agCustomScrollDebounceSeconds(void) {
+    NSNumber *val = agReadOnlyPrefs()[@"AG_Trans_ScrollDebounceTime"];
+    if (val && [val doubleValue] >= 0.15 && [val doubleValue] <= 2.5) {
+        return [val doubleValue];
+    }
+    return 0.50; // 默认 0.5 秒适中档
+}
+
+// 500 条容量 LRU 极速内存翻译缓存（滑动网页重译时已译段落 0ms 直接命中上屏）
 static NSCache<NSString *, NSString *> *agSharedTranslationMemoryCache(void) {
     static NSCache<NSString *, NSString *> *sCache = nil;
     static dispatch_once_t onceToken;
@@ -16686,7 +16706,6 @@ static NSCache<NSString *, NSString *> *agSharedTranslationMemoryCache(void) {
     return sCache;
 }
 
-// 语言代码转通俗中文名称
 static NSString *agPlainChineseLanguageNameForLocale(NSString *localeStr) {
     NSString *lower = [[localeStr ?: @"en" lowercaseString] stringByReplacingOccurrencesOfString:@"-" withString:@"_"];
     if ([lower hasPrefix:@"zh"]) return @"中文";
@@ -16710,7 +16729,6 @@ static NSString *agDetectSourceLocaleForText(NSString *text, NSString *preferred
     }
     if (!text || text.length == 0) return @"en_US";
 
-    // 1. 先扫一眼明显的日文假名、韩文谚文、俄文西里尔字母、阿拉伯字母
     for (NSUInteger i = 0; i < text.length; i++) {
         unichar c = [text characterAtIndex:i];
         if ((c >= 0x3040 && c <= 0x309F) || (c >= 0x30A0 && c <= 0x30FF)) return @"ja_JP";
@@ -16719,7 +16737,6 @@ static NSString *agDetectSourceLocaleForText(NSString *text, NSString *preferred
         if (c >= 0x0600 && c <= 0x06FF) return @"ar_AE";
     }
 
-    // 2. 动态调用系统 NaturalLanguage.framework 区分英语/法语/德语/西语/意语/葡语（免改 Makefile）
     static Class sNLRecCls = Nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -16743,6 +16760,39 @@ static NSString *agDetectSourceLocaleForText(NSString *text, NSString *preferred
         } @catch (NSException *e) {}
     }
     return @"en_US";
+}
+
+// 扫描系统 MobileAsset 物理磁盘目录，毫秒级读取已下载的离线翻译语言包
+static NSSet<NSString *> *agScanDiskInstalledOfflineTranslationPrefixes(void) {
+    NSMutableSet<NSString *> *prefixes = [NSMutableSet set];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSString *> *assetDirs = @[
+        @"/var/MobileAsset/AssetsV2/com_apple_MobileAsset_TranslationLanguageModels",
+        @"/var/MobileAsset/AssetsV2/com_apple_MobileAsset_TranslationAssets",
+        @"/var/MobileAsset/AssetsV2/com_apple_MobileAsset_Trial_Siri_SiriTranslation",
+        @"/private/var/MobileAsset/AssetsV2/com_apple_MobileAsset_TranslationLanguageModels"
+    ];
+    NSArray<NSString *> *knownCodes = @[@"zh", @"en", @"ja", @"ko", @"ru", @"fr", @"de", @"es", @"it", @"pt", @"ar"];
+    for (NSString *dir in assetDirs) {
+        NSArray<NSString *> *subItems = [fm contentsOfDirectoryAtPath:dir error:nil];
+        if (!subItems) continue;
+        for (NSString *sub in subItems) {
+            if (![sub hasSuffix:@".asset"]) continue;
+            NSString *infoPath = [[dir stringByAppendingPathComponent:sub] stringByAppendingPathComponent:@"Info.plist"];
+            NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+            if (![info isKindOfClass:[NSDictionary class]]) continue;
+            NSString *desc = [[info description] lowercaseString];
+            for (NSString *code in knownCodes) {
+                if ([desc containsString:[NSString stringWithFormat:@"\"%@_", code]] ||
+                    [desc containsString:[NSString stringWithFormat:@"\"%@-", code]] ||
+                    [desc containsString:[NSString stringWithFormat:@"= %@;", code]] ||
+                    [desc containsString:[NSString stringWithFormat:@"\"%@\"", code]]) {
+                    [prefixes addObject:code];
+                }
+            }
+        }
+    }
+    return prefixes;
 }
 
 // ==================== 🍎 iOS 14-17 原生 Translation.framework + 免Key破壁兜底核心引擎 ====================
@@ -16771,7 +16821,6 @@ static NSString *agExtractStringFromLTResult(id resultObj) {
     return nil;
 }
 
-// 内置免 API Key 极速兜底通道（当某小语种未下载离线包、或者部分越狱环境限制了 translationd 权限时无缝接管，确保 100% 永远出字）
 static void agTranslateWithKeylessWebFallback(NSString *sourceText, NSString *srcLocaleStr, void (^completion)(NSString *zhText, BOOL ok)) {
     NSString *cleanSrc = [sourceText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (cleanSrc.length == 0) {
@@ -16808,7 +16857,7 @@ static void agTranslateWithKeylessWebFallback(NSString *sourceText, NSString *sr
     }
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-    req.timeoutInterval = 4.0;
+    req.timeoutInterval = 3.8;
     [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15" forHTTPHeaderField:@"User-Agent"];
     [[sFreeSess dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         if (err || !data) {
@@ -16834,7 +16883,6 @@ static void agTranslateWithKeylessWebFallback(NSString *sourceText, NSString *sr
     }] resume];
 }
 
-// 记录已提示过“未下离线包自动转联网”的语种，避免同一语种重复弹窗打扰
 static NSMutableSet<NSString *> *agRemindedMissingOfflineLocales(void) {
     static NSMutableSet<NSString *> *sSet = nil;
     static dispatch_once_t onceToken;
@@ -16842,7 +16890,6 @@ static NSMutableSet<NSString *> *agRemindedMissingOfflineLocales(void) {
     return sSet;
 }
 
-// 底层纯原生 _LTTranslator 调用（带详细错误回调，供真机体检与实际翻译共用，兼容 iOS 14 ~ iOS 17）
 static void agRawLTTranslatorInvoke(NSString *sourceText, NSString *srcLocaleStr, BOOL forceOffline, void (^completion)(NSString *zhText, NSError *error)) {
     NSString *cleanSrc = [sourceText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (cleanSrc.length == 0) {
@@ -16885,8 +16932,11 @@ static void agRawLTTranslatorInvoke(NSString *sourceText, NSString *srcLocaleStr
             if (completion) completion(nil, [NSError errorWithDomain:@"AGLTInitNil" code:-102 userInfo:nil]);
             return;
         }
-        if ([req respondsToSelector:sel_registerName("setForcedOfflineTranslation:")]) {
-            ((void(*)(id, SEL, BOOL))objc_msgSend)(req, sel_registerName("setForcedOfflineTranslation:"), forceOffline);
+        if ([req respondsToSelector:sel_registerName("setCensorSpeech:")]) {
+            ((void(*)(id, SEL, BOOL))objc_msgSend)(req, sel_registerName("setCensorSpeech:"), NO);
+        }
+        if (forceOffline && [req respondsToSelector:sel_registerName("setForcedOfflineTranslation:")]) {
+            ((void(*)(id, SEL, BOOL))objc_msgSend)(req, sel_registerName("setForcedOfflineTranslation:"), YES);
         }
         if ([req respondsToSelector:sel_registerName("setText:")]) {
             ((void(*)(id, SEL, id))objc_msgSend)(req, sel_registerName("setText:"), cleanSrc);
@@ -16928,7 +16978,7 @@ static void agRawLTTranslatorInvoke(NSString *sourceText, NSString *srcLocaleStr
             finishOnce(nil, [NSError errorWithDomain:@"AGLTNoTranslateSel" code:-103 userInfo:nil]);
         }
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             finishOnce(nil, [NSError errorWithDomain:@"AGLTTimeout" code:-104 userInfo:nil]);
         });
     } @catch (NSException *e) {
@@ -16936,7 +16986,6 @@ static void agRawLTTranslatorInvoke(NSString *sourceText, NSString *srcLocaleStr
     }
 }
 
-// 智能三层原生翻译调用：内存缓存(0ms) -> 苹果离线神经翻译(20ms) -> 苹果在线系统翻译 -> 内置免Key极速翻译兜底
 static void agTranslateWithNativeiOSFramework(NSString *sourceText, NSString *srcLocaleStr, BOOL forceOffline, void (^completion)(NSString *zhText, BOOL usedNative)) {
     NSString *cleanSrc = [sourceText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (cleanSrc.length == 0) {
@@ -16951,36 +17000,26 @@ static void agTranslateWithNativeiOSFramework(NSString *sourceText, NSString *sr
     }
 
     NSString *detectedLocale = agDetectSourceLocaleForText(cleanSrc, srcLocaleStr);
-    agRawLTTranslatorInvoke(cleanSrc, detectedLocale, forceOffline, ^(NSString *zhText, NSError *error) {
+    NSSet<NSString *> *diskPacks = agScanDiskInstalledOfflineTranslationPrefixes();
+    NSString *langPrefix = (detectedLocale.length >= 2) ? [[detectedLocale substringToIndex:2] lowercaseString] : @"en";
+    BOOL hasDiskOffline = ([diskPacks containsObject:@"zh"] && [diskPacks containsObject:langPrefix]);
+
+    if (diskPacks.count > 0 && !hasDiskOffline) {
+        NSString *langCn = agPlainChineseLanguageNameForLocale(detectedLocale);
+        if (![agRemindedMissingOfflineLocales() containsObject:langCn]) {
+            [agRemindedMissingOfflineLocales() addObject:langCn];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"💡 识别到【%@】未下离线包，已自动为您联网翻译", langCn]];
+            });
+        }
+    }
+
+    agRawLTTranslatorInvoke(cleanSrc, detectedLocale, NO, ^(NSString *zhText, NSError *error) {
         if (zhText.length > 0 && !error) {
             [agSharedTranslationMemoryCache() setObject:zhText forKey:cleanSrc];
             if (completion) completion(zhText, YES);
             return;
         }
-
-        // 若强制离线失败（说明该语种未下载离线包），自动尝试系统在线翻译并温馨提醒一次
-        if (forceOffline) {
-            NSString *langCn = agPlainChineseLanguageNameForLocale(detectedLocale);
-            if (![agRemindedMissingOfflineLocales() containsObject:langCn]) {
-                [agRemindedMissingOfflineLocales() addObject:langCn];
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"💡 检测到【%@】未下离线包，已自动为您联网翻译", langCn]];
-                });
-            }
-            agRawLTTranslatorInvoke(cleanSrc, detectedLocale, NO, ^(NSString *onlineZh, NSError *onlineErr) {
-                if (onlineZh.length > 0 && !onlineErr) {
-                    [agSharedTranslationMemoryCache() setObject:onlineZh forKey:cleanSrc];
-                    if (completion) completion(onlineZh, YES);
-                } else {
-                    // 终极破壁兜底：免 Key 极速网页翻译通道，确保 100% 永远能翻出中文字幕！
-                    agTranslateWithKeylessWebFallback(cleanSrc, detectedLocale, ^(NSString *webZh, BOOL ok) {
-                        if (completion) completion(webZh, ok);
-                    });
-                }
-            });
-            return;
-        }
-
         agTranslateWithKeylessWebFallback(cleanSrc, detectedLocale, ^(NSString *webZh, BOOL ok) {
             if (completion) completion(webZh, ok);
         });
@@ -16998,7 +17037,7 @@ static void agRunNativeOfflineTranslationDiagnostics(void (^completion)(NSString
         Class reqCls   = objc_getClass("_LTParagraphTranslationRequest") ?: objc_getClass("_LTTextTranslationRequest");
 
         if (!transCls || !reqCls) {
-            NSString *shortMsg = @"❌ 无法使用苹果离线翻译：未检测到系统自带「翻译」功能\n👉 原因：您的系统低于 iOS 14 或删掉了苹果自带的「翻译」App。请去 App Store 搜「翻译」重新下载即可。";
+            NSString *shortMsg = @"❌ 无法使用苹果离线翻译：未检测到系统自带「翻译」功能\n👉 原因：您的系统低于 iOS 14 或删掉了苹果自带的「翻译」App。";
             gLatestNativeDiagShortSummary = shortMsg;
             gLatestNativeDiagDetailedReport = shortMsg;
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -17007,7 +17046,6 @@ static void agRunNativeOfflineTranslationDiagnostics(void (^completion)(NSString
             return;
         }
 
-        // 1. 检测听译所需的 SFSpeechRecognizer 语音识别状态（英语/日语/韩语/俄语/法语/德语/西班牙语）
         NSArray<NSDictionary *> *speechLangs = @[
             @{@"id": @"en-US", @"name": @"英语", @"core": @YES},
             @{@"id": @"ja-JP", @"name": @"日语", @"core": @YES},
@@ -17020,7 +17058,6 @@ static void agRunNativeOfflineTranslationDiagnostics(void (^completion)(NSString
         BOOL anySpeechAvailable = NO;
         NSMutableArray<NSString *> *readyOfflineSpeech = [NSMutableArray array];
         NSMutableArray<NSString *> *missingCoreSpeech  = [NSMutableArray array];
-        NSMutableArray<NSString *> *missingExtSpeech   = [NSMutableArray array];
 
         for (NSDictionary *item in speechLangs) {
             SFSpeechRecognizer *rec = [[SFSpeechRecognizer alloc] initWithLocale:[NSLocale localeWithLocaleIdentifier:item[@"id"]]];
@@ -17033,13 +17070,11 @@ static void agRunNativeOfflineTranslationDiagnostics(void (^completion)(NSString
                 [readyOfflineSpeech addObject:item[@"name"]];
             } else if ([item[@"core"] boolValue]) {
                 [missingCoreSpeech addObject:item[@"name"]];
-            } else {
-                [missingExtSpeech addObject:item[@"name"]];
             }
         }
 
-        // 2. 检测系统已下载的离线翻译语言包列表 (+[_LTTranslator installedLocales:] + 真机探针双保险)
-        __block NSMutableSet<NSString *> *installedTransPrefixes = [NSMutableSet set];
+        __block NSMutableSet<NSString *> *installedTransPrefixes = [NSMutableSet setWithSet:agScanDiskInstalledOfflineTranslationPrefixes()];
+
         dispatch_semaphore_t locSem = dispatch_semaphore_create(0);
         SEL instLocSel = sel_registerName("installedLocales:");
         if ([transCls respondsToSelector:instLocSel]) {
@@ -17054,19 +17089,15 @@ static void agRunNativeOfflineTranslationDiagnostics(void (^completion)(NSString
                     dispatch_semaphore_signal(locSem);
                 };
                 ((void(*)(id, SEL, id))objc_msgSend)(transCls, instLocSel, locBlock);
-                dispatch_semaphore_wait(locSem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)));
+                dispatch_semaphore_wait(locSem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)));
             } @catch (NSException *e) {}
         }
 
-        // 3. 若 installedLocales 未返回（或需真机实测验证），并发跑英/日/韩 3 组强制离线翻译探针
         NSArray<NSDictionary *> *coreProbes = @[
             @{@"loc": @"en_US", @"prefix": @"en", @"name": @"英语", @"sample": @"Hello"},
             @{@"loc": @"ja_JP", @"prefix": @"ja", @"name": @"日语", @"sample": @"こんにちは"},
             @{@"loc": @"ko_KR", @"prefix": @"ko", @"name": @"韩语", @"sample": @"안녕하세요"}
         ];
-        __block NSError *lastProbeError = nil;
-        __block BOOL anyOfflineProbeSuccess = NO;
-
         if (installedTransPrefixes.count == 0) {
             dispatch_group_t grp = dispatch_group_create();
             for (NSDictionary *p in coreProbes) {
@@ -17074,23 +17105,16 @@ static void agRunNativeOfflineTranslationDiagnostics(void (^completion)(NSString
                 agRawLTTranslatorInvoke(p[@"sample"], p[@"loc"], YES, ^(NSString *zhText, NSError *error) {
                     @synchronized (installedTransPrefixes) {
                         if (zhText.length > 0 && !error) {
-                            anyOfflineProbeSuccess = YES;
                             [installedTransPrefixes addObject:@"zh"];
                             [installedTransPrefixes addObject:p[@"prefix"]];
-                        } else if (error) {
-                            lastProbeError = error;
                         }
                     }
                     dispatch_group_leave(grp);
                 });
             }
-            dispatch_group_wait(grp, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.2 * NSEC_PER_SEC)));
-        } else {
-            anyOfflineProbeSuccess = ([installedTransPrefixes containsObject:@"zh"] && installedTransPrefixes.count >= 2);
+            dispatch_group_wait(grp, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)));
         }
-        (void)anyOfflineProbeSuccess;
 
-        // 4. 汇总常用语种（中/英/日/韩）与扩展语种（俄/法/德/西/意/葡）状态，生成大白话报告
         BOOL hasZh = [installedTransPrefixes containsObject:@"zh"];
         NSMutableArray<NSString *> *readyCoreTrans   = [NSMutableArray array];
         NSMutableArray<NSString *> *missingCoreTrans = [NSMutableArray array];
@@ -17124,15 +17148,12 @@ static void agRunNativeOfflineTranslationDiagnostics(void (^completion)(NSString
         NSMutableString *detailReport = [NSMutableString string];
         BOOL allCoreReady = (hasZh && missingCoreTrans.count == 0 && anySpeechAvailable);
 
-        // 检查是否因越狱沙盒拦截了 translationd XPC (Code 4097/4099)
-        BOOL isXPCBlocked = (lastProbeError && [lastProbeError.domain isEqualToString:NSCocoaErrorDomain] && (lastProbeError.code == 4097 || lastProbeError.code == 4099));
-
         if (!anySpeechAvailable) {
-            [shortSummary appendString:@"❌ 听译无法识别声音：您手机的「启用听写」开关未打开！\n👉 请去手机《设置 -> 通用 -> 键盘》，滑到最底下把「启用听写」打开。"];
+            [shortSummary appendString:@"❌ 听译无法识别声音：您手机的「启用听写」开关未打开！\n👉 请去手机《设置 -> 通用 -> 键盘》滑到最底下把「启用听写」打开。"];
         } else if (allCoreReady) {
             [shortSummary appendFormat:@"✅ 常用语种已全部就绪！【中文、%@】均可断网秒译\n", [readyCoreTrans componentsJoinedByString:@"、"]];
             if (missingExtTrans.count > 0) {
-                [shortSummary appendFormat:@"💡 温馨提示：如需断网离线翻译【%@】等其他外语，可点下方「📥 去下载语言包」按需补充；未下载的语种在有网时也会自动帮您联网翻译。", [[missingExtTrans subarrayWithRange:NSMakeRange(0, MIN((NSUInteger)4, missingExtTrans.count))] componentsJoinedByString:@"、"]];
+                [shortSummary appendFormat:@"💡 温馨提示：如需离线翻译【%@】等其他外语，可点下方「📥 去下载语言包」按需下载；未下载的语种在有网时也会自动帮您联网翻译。", [[missingExtTrans subarrayWithRange:NSMakeRange(0, MIN((NSUInteger)4, missingExtTrans.count))] componentsJoinedByString:@"、"]];
             } else {
                 [shortSummary appendString:@"🌟 所有常用与扩展外语离线包均已完备，随时享受 0 延迟离线秒译！"];
             }
@@ -17140,19 +17161,16 @@ static void agRunNativeOfflineTranslationDiagnostics(void (^completion)(NSString
             [shortSummary appendFormat:@"⚠️ 部分就绪：【%@】已可离线秒译，尚未下载【%@】离线包\n",
              [readyCoreTrans componentsJoinedByString:@"、"],
              [missingCoreTrans componentsJoinedByString:@"、"]];
-            [shortSummary appendString:@"👉 未下载的语种有网时会自动联网翻译；若想断网也能秒译，请点下方「📥 去下载语言包」把缺少的语言勾上。"];
-        } else if (isXPCBlocked) {
-            [shortSummary appendString:@"🛡️ 已自动接通「免 Key 极速翻译通道」！\n💡 说明：当前越狱环境限制了苹果离线服务直连，插件已自动为您启用内置免 Key 翻译通道，无需配置即可正常翻译所有外语！"];
+            [shortSummary appendString:@"👉 未下载的语种有网时会自动帮您联网翻译；若想断网也能秒译，请点下方「📥 去下载语言包」跳转《设置 -> 翻译》勾选下载。"];
         } else {
             NSMutableArray *needDown = [NSMutableArray array];
             if (!hasZh) [needDown addObject:@"中文(简体)"];
             [needDown addObjectsFromArray:missingCoreTrans];
-            [shortSummary appendFormat:@"⚠️ 尚未下载离线语言包：缺少【%@】\n👉 现在有网也能自动帮您翻译；但若想不耗流量、不发热、断网 0 延迟秒出字幕，请点下方「📥 去下载语言包」下载。", [needDown componentsJoinedByString:@"、"]];
+            [shortSummary appendFormat:@"⚠️ 尚未下载离线语言包：缺少【%@】\n👉 现在有网也能自动帮您免费翻译；若想断网 0 延迟秒出字幕，请点下方「📥 去下载语言包」跳转《设置 -> 翻译》下载。", [needDown componentsJoinedByString:@"、"]];
         }
 
-        // 组装弹窗详细体检报告
         [detailReport appendString:@"【一、常用 4 语种离线翻译包状态】\n"];
-        [detailReport appendFormat:@"• 🇨🇳 中文(简体)：%@\n", hasZh ? @"🟢 已下载就绪" : @"⚠️ 未下载 (必装！请去设置下载)"];
+        [detailReport appendFormat:@"• 🇨🇳 中文(简体)：%@\n", hasZh ? @"🟢 已下载就绪" : @"⚠️ 未下载 (必装！请去设置->翻译下载)"];
         for (NSDictionary *p in coreProbes) {
             BOOL ok = (hasZh && [installedTransPrefixes containsObject:p[@"prefix"]]);
             [detailReport appendFormat:@"• %@：%@\n", p[@"name"], ok ? @"🟢 已下载 (支持断网秒译)" : @"⚠️ 未下载 (有网时自动转在线翻译)"];
@@ -17163,7 +17181,7 @@ static void agRunNativeOfflineTranslationDiagnostics(void (^completion)(NSString
             [detailReport appendFormat:@"• 🟢 已下载：%@\n", [readyExtTrans componentsJoinedByString:@"、"]];
         }
         if (missingExtTrans.count > 0) {
-            [detailReport appendFormat:@"• 💡 未下载：%@\n（平时不看这些语言无需下载；若需要看，有网会自动联网翻，也可点「去下载语言包」下载）\n", [missingExtTrans componentsJoinedByString:@"、"]];
+            [detailReport appendFormat:@"• 💡 未下载：%@\n（平时不看这些语言无需下载；若需要看，有网会自动联网翻，也可去设置->翻译下载）\n", [missingExtTrans componentsJoinedByString:@"、"]];
         }
 
         [detailReport appendString:@"\n【三、听译离线语音识别包状态】\n"];
@@ -17400,6 +17418,13 @@ static void agResetRealtimeTranslationState(void) {
     UIViewController *vc = [[UIViewController alloc] init];
     vc.view.backgroundColor = [UIColor clearColor];
     self.rootViewController = vc;
+
+    if ([self.layer respondsToSelector:@selector(setHitTestsAsOpaque:)]) {
+        [self.layer setHitTestsAsOpaque:NO];
+    }
+    if ([vc.view.layer respondsToSelector:@selector(setHitTestsAsOpaque:)]) {
+        [vc.view.layer setHitTestsAsOpaque:NO];
+    }
 
     AGDeviceMetrics m = agComputeDeviceMetrics();
     CGFloat initH = MAX(94.0, agTransFontSize() * 4.0 + 32.0);
@@ -17932,7 +17957,7 @@ static void agResetRealtimeTranslationState(void) {
     if (!seg || seg.length < 2 || [seg isEqualToString:self.lastRecognizedText]) return;
 
     [self.microDebounceTimer invalidate];
-    NSTimeInterval delay = agUseNativeiOSTranslator() ? 0.18 : 0.32;
+    NSTimeInterval delay = agUseNativeiOSTranslator() ? 0.16 : 0.32;
     self.microDebounceTimer = [NSTimer scheduledTimerWithTimeInterval:delay target:self selector:@selector(flushPendingSpeechSegmentTick) userInfo:nil repeats:NO];
 }
 
@@ -18339,6 +18364,19 @@ static void initInSituGlobalTouchMonitor(void) {
     return instance;
 }
 
+- (BOOL)_canBecomeKeyWindow { return NO; }
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (self.hidden || self.alpha < 0.05 || !self.revertPillView || self.revertPillView.hidden || self.revertPillView.alpha < 0.05) {
+        return nil;
+    }
+    CGPoint p = [self convertPoint:point toView:self.revertPillView];
+    if ([self.revertPillView pointInside:p withEvent:event]) {
+        return [self.revertPillView hitTest:p withEvent:event] ?: self.revertPillView;
+    }
+    return nil;
+}
+
 - (void)setupInSituUI {
     self.windowLevel = UIWindowLevelAlert + 15;
     self.backgroundColor = [UIColor clearColor];
@@ -18351,9 +18389,18 @@ static void initInSituGlobalTouchMonitor(void) {
     rootVC.view.userInteractionEnabled = YES;
     self.rootViewController = rootVC;
 
+    // 关键核心修复：向系统 backboardd (CAWindowServer) 声明窗口底板与覆膜容器完全不拦截跨进程触控，100% 穿透给底层网页！
+    if ([self.layer respondsToSelector:@selector(setHitTestsAsOpaque:)]) {
+        [self.layer setHitTestsAsOpaque:NO];
+    }
+    if ([rootVC.view.layer respondsToSelector:@selector(setHitTestsAsOpaque:)]) {
+        [rootVC.view.layer setHitTestsAsOpaque:NO];
+    }
+
     self.patchContainerView = [[UIView alloc] initWithFrame:self.bounds];
     self.patchContainerView.backgroundColor = [UIColor clearColor];
     self.patchContainerView.userInteractionEnabled = NO;
+    agDisableLayerHitTestingRecursively(self.patchContainerView.layer);
     [rootVC.view addSubview:self.patchContainerView];
 
     self.laserBeamView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.bounds.size.width, 3.0)];
@@ -18370,6 +18417,7 @@ static void initInSituGlobalTouchMonitor(void) {
     [self.laserBeamView.layer addSublayer:grad];
     self.laserBeamView.alpha = 0.0;
     self.laserBeamView.userInteractionEnabled = NO;
+    agDisableLayerHitTestingRecursively(self.laserBeamView.layer);
     [rootVC.view addSubview:self.laserBeamView];
 
     CGFloat pillW = 330.0;
@@ -18448,9 +18496,8 @@ static void initInSituGlobalTouchMonitor(void) {
         [[GeminiAssistantManager sharedManager] showActionBanner:@"⚠️ 请先在《设置 -> ✨天使守护》启用实时翻译"];
         return;
     }
-    // 关键修复：若开启了 🍎 iOS 原生翻译，完全不需要检查 API Key！仅在 ☁️ API 模式下检查 Key
     if (!agUseNativeiOSTranslator() && agTransAPIKey().length < 4) {
-        [[GeminiAssistantManager sharedManager] showActionBanner:@"⚠️ ☁️API模式未填Key，已在设置中为您自动切回「🍎iOS原生免Key翻译」"];
+        [[GeminiAssistantManager sharedManager] showActionBanner:@"⚠️ ☁️API模式未填Key，已自动切回「🍎iOS原生免Key翻译」"];
         agSetUseNativeiOSTranslator(YES);
     }
 
@@ -18481,6 +18528,7 @@ static void initInSituGlobalTouchMonitor(void) {
     self.inSituScanEpoch++;
     [self.patchContainerView.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
     self.patchContainerView.alpha = 1.0;
+    agDisableLayerHitTestingRecursively(self.patchContainerView.layer);
 
     initInSituGlobalTouchMonitor();
 
@@ -18518,11 +18566,11 @@ static void initInSituGlobalTouchMonitor(void) {
                 self.scrollSettleTimer = nil;
             }
             if (self.patchContainerView.alpha > 0.1) {
-                [UIView animateWithDuration:0.15 animations:^{
-                    self.patchContainerView.alpha = 0.05;
+                [UIView animateWithDuration:0.12 animations:^{
+                    self.patchContainerView.alpha = 0.02;
                 }];
             }
-            self.statusLabel.text = @"👆 滑动中 (松手秒译)...";
+            self.statusLabel.text = @"👆 滑动中 (松手即译)...";
             self.statusLabel.textColor = [UIColor colorWithRed:0.4 green:0.8 blue:1.0 alpha:1.0];
         } else {
             if (self.scrollSettleTimer) {
@@ -18533,13 +18581,13 @@ static void initInSituGlobalTouchMonitor(void) {
     } else {
         if (self.isFingerTouching) {
             self.isFingerTouching = NO;
-            self.statusLabel.text = @"⏳ 静止检测中...";
+            NSTimeInterval userDelay = agCustomScrollDebounceSeconds();
+            self.statusLabel.text = [NSString stringWithFormat:@"⏳ 停稳 %.1fs 后重译...", userDelay];
             self.statusLabel.textColor = [UIColor colorWithRed:1.0 green:0.85 blue:0.3 alpha:1.0];
 
             if (self.scrollSettleTimer) [self.scrollSettleTimer invalidate];
             __weak typeof(self) weakSelf = self;
-            NSTimeInterval debounce = agUseNativeiOSTranslator() ? 0.25 : agTransScrollDebounceTime();
-            self.scrollSettleTimer = [NSTimer scheduledTimerWithTimeInterval:debounce repeats:NO block:^(NSTimer * _Nonnull timer) {
+            self.scrollSettleTimer = [NSTimer scheduledTimerWithTimeInterval:userDelay repeats:NO block:^(NSTimer * _Nonnull timer) {
                 if (!weakSelf || !weakSelf.isInSituActive || weakSelf.isFingerTouching) return;
                 [weakSelf performInSituRetranslateQuietly];
             }];
@@ -18556,9 +18604,11 @@ static void initInSituGlobalTouchMonitor(void) {
     [self performInSituRetranslateQuietly];
 }
 
-// ====== 最终确认替换块 3 开始（原位智能跟随翻译：🍎原生逐框独立并发映射 + 500条内存秒贴 + ☁️API双擎） ======
+// ====== 最终确认替换块 3 开始（原位智能跟随翻译：剔除黑字墨水干扰采样 + 100%图层穿透 + 直达设置->翻译） ======
 static void agSamplePatchBackgroundStyle(CGImageRef cleanCG, CGRect screenRect, CGSize screenSize, UIColor **outBgColor, UIColor **outTextColor, UIColor **outBorderColor) {
-    BOOL isLightBackground = NO;
+    BOOL isLightBackground = YES; // 网页默认以浅色优先，防止黑字笔画拉低均值造成黑膏药色块
+    double bgR = 0.98, bgG = 0.98, bgB = 0.99;
+
     if (cleanCG && screenSize.width > 0 && screenSize.height > 0) {
         size_t imgW = CGImageGetWidth(cleanCG);
         size_t imgH = CGImageGetHeight(cleanCG);
@@ -18572,17 +18622,52 @@ static void agSamplePatchBackgroundStyle(CGImageRef cleanCG, CGRect screenRect, 
         if (!CGRectIsNull(pixelRect) && pixelRect.size.width >= 4.0 && pixelRect.size.height >= 4.0) {
             CGImageRef subCG = CGImageCreateWithImageInRect(cleanCG, pixelRect);
             if (subCG) {
-                uint8_t rgba[4 * 4 * 4] = {0};
+                uint8_t rgba[6 * 6 * 4] = {0};
                 CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-                CGContextRef ctx = CGBitmapContextCreate(rgba, 4, 4, 8, 16, cs, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+                CGContextRef ctx = CGBitmapContextCreate(rgba, 6, 6, 8, 24, cs, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
                 if (ctx) {
-                    CGContextDrawImage(ctx, CGRectMake(0, 0, 4, 4), subCG);
+                    CGContextDrawImage(ctx, CGRectMake(0, 0, 6, 6), subCG);
                     CGContextRelease(ctx);
-                    double lumSum = 0.0;
-                    for (int i = 0; i < 16; i++) {
-                        lumSum += (0.299 * rgba[i * 4 + 0] + 0.587 * rgba[i * 4 + 1] + 0.114 * rgba[i * 4 + 2]) / 255.0;
+
+                    // 统计 36 个采样点中亮度较高的像素（剔除黑色文字笔画对白底网页的干扰！）
+                    double lums[36];
+                    int lightCount = 0;
+                    double lightRSum = 0, lightGSum = 0, lightBSum = 0;
+                    double darkRSum = 0, darkGSum = 0, darkBSum = 0;
+                    int darkCount = 0;
+
+                    for (int i = 0; i < 36; i++) {
+                        double r = rgba[i * 4 + 0] / 255.0;
+                        double g = rgba[i * 4 + 1] / 255.0;
+                        double b = rgba[i * 4 + 2] / 255.0;
+                        double l = 0.299 * r + 0.587 * g + 0.114 * b;
+                        lums[i] = l;
+                        if (l >= 0.46) {
+                            lightCount++;
+                            lightRSum += r; lightGSum += g; lightBSum += b;
+                        } else {
+                            darkCount++;
+                            darkRSum += r; darkGSum += g; darkBSum += b;
+                        }
                     }
-                    if ((lumSum / 16.0) > 0.52) isLightBackground = YES;
+                    (void)lums;
+
+                    // 只要有 30% 以上像素是亮色（白底黑字网页背景部分），即判定为浅色背景并取亮色像素均值作为原位底色！
+                    if (lightCount >= 11) {
+                        isLightBackground = YES;
+                        bgR = lightRSum / lightCount;
+                        bgG = lightGSum / lightCount;
+                        bgB = lightBSum / lightCount;
+                    } else {
+                        isLightBackground = NO;
+                        if (darkCount > 0) {
+                            bgR = MAX(0.12, darkRSum / darkCount);
+                            bgG = MAX(0.13, darkGSum / darkCount);
+                            bgB = MAX(0.18, darkBSum / darkCount);
+                        } else {
+                            bgR = 0.14; bgG = 0.15; bgB = 0.20;
+                        }
+                    }
                 }
                 CGColorSpaceRelease(cs);
                 CGImageRelease(subCG);
@@ -18590,14 +18675,18 @@ static void agSamplePatchBackgroundStyle(CGImageRef cleanCG, CGRect screenRect, 
         }
     }
 
+    NSInteger styleIdx = agTransPatchStyleIndex();
+    CGFloat alphaVal = (styleIdx == 0) ? 0.72 : ((styleIdx == 2) ? 0.94 : 0.84);
+
     if (isLightBackground) {
-        if (outBgColor)     *outBgColor     = [UIColor colorWithRed:0.97 green:0.97 blue:0.99 alpha:0.96];
-        if (outTextColor)   *outTextColor   = [UIColor colorWithRed:0.10 green:0.11 blue:0.16 alpha:1.0];
-        if (outBorderColor) *outBorderColor = [UIColor colorWithWhite:0.0 alpha:0.10];
+        if (outBgColor)     *outBgColor     = [UIColor colorWithRed:MAX(0.92, bgR) green:MAX(0.92, bgG) blue:MAX(0.94, bgB) alpha:alphaVal];
+        if (outTextColor)   *outTextColor   = [UIColor colorWithRed:0.10 green:0.12 blue:0.16 alpha:1.0];
+        if (outBorderColor) *outBorderColor = [UIColor colorWithWhite:0.0 alpha:0.06];
     } else {
-        if (outBgColor)     *outBgColor     = [UIColor colorWithRed:0.08 green:0.09 blue:0.14 alpha:0.95];
-        if (outTextColor)   *outTextColor   = [UIColor colorWithRed:0.98 green:0.98 blue:1.00 alpha:1.0];
-        if (outBorderColor) *outBorderColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+        // 深色网页也采用柔和深灰蓝，绝不用死黑块
+        if (outBgColor)     *outBgColor     = [UIColor colorWithRed:MIN(0.24, bgR + 0.04) green:MIN(0.25, bgG + 0.04) blue:MIN(0.30, bgB + 0.05) alpha:alphaVal];
+        if (outTextColor)   *outTextColor   = [UIColor colorWithRed:0.96 green:0.97 blue:0.99 alpha:1.0];
+        if (outBorderColor) *outBorderColor = [UIColor colorWithWhite:1.0 alpha:0.10];
     }
 }
 
@@ -18605,24 +18694,47 @@ static void agAddPatchToContainer(UIView *container, NSDictionary *item, NSStrin
     if (!container || !item || zhLine.length == 0) return;
     CGRect rect = [item[@"rect"] CGRectValue];
     CGFloat singleLineH = [item[@"lineHeight"] doubleValue];
-    CGRect patchRect = CGRectInset(rect, -3.0, -1.5);
+    CGRect patchRect = CGRectInset(rect, -2.5, -1.0);
     UIView *patch = [[UIView alloc] initWithFrame:patchRect];
-    patch.backgroundColor = item[@"bgColor"] ?: [UIColor colorWithRed:0.08 green:0.09 blue:0.14 alpha:0.95];
-    patch.layer.cornerRadius = 5.0;
-    patch.layer.borderWidth = 0.6;
+    patch.backgroundColor = item[@"bgColor"] ?: [UIColor colorWithRed:0.96 green:0.96 blue:0.98 alpha:0.84];
+    patch.layer.cornerRadius = 4.5;
+    patch.layer.borderWidth = 0.5;
     patch.layer.borderColor = [item[@"borderColor"] CGColor];
     patch.userInteractionEnabled = NO;
 
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectInset(patch.bounds, 3.0, 1.0)];
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectInset(patch.bounds, 2.5, 0.5)];
     lbl.text = zhLine;
-    lbl.textColor = item[@"textColor"] ?: [UIColor whiteColor];
+    lbl.textColor = item[@"textColor"] ?: [UIColor colorWithRed:0.10 green:0.12 blue:0.16 alpha:1.0];
     lbl.font = [UIFont systemFontOfSize:MAX(11.0, MIN(20.0, singleLineH * 0.82)) weight:UIFontWeightMedium];
     lbl.numberOfLines = 0;
     lbl.adjustsFontSizeToFitWidth = YES;
     lbl.minimumScaleFactor = 0.55;
     lbl.userInteractionEnabled = NO;
     [patch addSubview:lbl];
+
+    // 核心：对每一个新生成的翻译覆膜禁用 CALayer 硬件点击测试，让手指在覆膜上滑动和点击网页 100% 穿透！
+    agDisableLayerHitTestingRecursively(patch.layer);
     [container addSubview:patch];
+}
+
+static BOOL agShouldTranslateOCRString(NSString *str) {
+    NSString *trim = [str stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trim.length < 2) return NO;
+    NSString *lower = [trim lowercaseString];
+    if ([lower hasPrefix:@"http://"] || [lower hasPrefix:@"https://"] || [lower hasPrefix:@"www."] || [lower containsString:@"@"]) {
+        return NO;
+    }
+    NSUInteger foreignCount = 0;
+    NSUInteger hanziCount = 0;
+    for (NSUInteger i = 0; i < trim.length; i++) {
+        unichar c = [trim characterAtIndex:i];
+        if (c >= 0x4E00 && c <= 0x9FFF) hanziCount++;
+        else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= 0x0400 && c <= 0x04FF) || (c >= 0x3040 && c <= 0x30FF) || (c >= 0xAC00 && c <= 0xD7AF)) {
+            foreignCount++;
+        }
+    }
+    if (foreignCount < 2 || hanziCount > foreignCount) return NO;
+    return YES;
 }
 
 - (void)performInSituRetranslateQuietly {
@@ -18683,18 +18795,7 @@ static void agAddPatchToContainer(UIView *container, NSDictionary *item, NSStrin
 
             for (VNRecognizedTextObservation *obs in request.results) {
                 VNRecognizedText *cand = [[obs topCandidates:1] firstObject];
-                if (cand.string.length < 2) continue;
-                if ([cand.string rangeOfCharacterFromSet:[NSCharacterSet letterCharacterSet]].location == NSNotFound) continue;
-
-                BOOL hasForeignChars = NO;
-                for (NSUInteger ci = 0; ci < cand.string.length; ci++) {
-                    unichar c = [cand.string characterAtIndex:ci];
-                    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= 0x0400 && c <= 0x04FF) || (c >= 0x3040 && c <= 0x30FF) || (c >= 0xAC00 && c <= 0xD7AF)) {
-                        hasForeignChars = YES;
-                        break;
-                    }
-                }
-                if (!hasForeignChars) continue;
+                if (!agShouldTranslateOCRString(cand.string)) continue;
 
                 CGRect box = obs.boundingBox;
                 CGRect rect = CGRectMake(box.origin.x * screenW,
@@ -18770,7 +18871,6 @@ static void agAddPatchToContainer(UIView *container, NSDictionary *item, NSStrin
                 return;
             }
 
-            // 分支 A：🍎 iOS 原生翻译模式 -> 逐框独立精准映射 + 内存缓存 0ms 秒贴（彻底告别 [1][2] 串行错位！）
             if (useNative) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (currentEpoch != weakSelf.inSituScanEpoch) return;
@@ -18782,7 +18882,6 @@ static void agAddPatchToContainer(UIView *container, NSDictionary *item, NSStrin
                         NSDictionary *blkItem = detectedBlocks[i];
                         NSString *rawBlockText = blkItem[@"text"] ?: @"";
 
-                        // 先查 500 条内存缓存，若已译过则 0ms 当场贴出！
                         NSString *cachedZh = [agSharedTranslationMemoryCache() objectForKey:rawBlockText];
                         if (cachedZh.length > 0) {
                             agAddPatchToContainer(weakSelf.patchContainerView, blkItem, cachedZh);
@@ -18794,8 +18893,7 @@ static void agAddPatchToContainer(UIView *container, NSDictionary *item, NSStrin
                             continue;
                         }
 
-                        // 未缓存的新段落调用原生离线引擎逐框独立翻译并即时贴上
-                        agTranslateWithNativeiOSFramework(rawBlockText, nil, YES, ^(NSString *zhText, BOOL usedNative) {
+                        agTranslateWithNativeiOSFramework(rawBlockText, nil, NO, ^(NSString *zhText, BOOL usedNative) {
                             if (currentEpoch != weakSelf.inSituScanEpoch) return;
                             NSString *finalZh = (zhText.length > 0) ? zhText : rawBlockText;
                             agAddPatchToContainer(weakSelf.patchContainerView, blkItem, finalZh);
@@ -18811,7 +18909,6 @@ static void agAddPatchToContainer(UIView *container, NSDictionary *item, NSStrin
                 return;
             }
 
-            // 分支 B：☁️ 专属 API 大模型模式 -> 走原本的序号对齐翻译
             NSString *fullCombined = [sourceLines componentsJoinedByString:@"\n"];
             agPerformCloudAPIGeneralTranslation(fullCombined, ^(NSString *translatedText, NSError *transError) {
                 if (currentEpoch != weakSelf.inSituScanEpoch) return;
@@ -18904,6 +19001,28 @@ static void agAddPatchToContainer(UIView *container, NSDictionary *item, NSStrin
     }
 }
 
+- (void)agOnScrollDelaySegChanged:(UISegmentedControl *)seg {
+    NSArray<NSNumber *> *delays = @[@0.20, @0.50, @0.90, @1.50];
+    NSInteger idx = MAX(0, MIN((NSInteger)delays.count - 1, seg.selectedSegmentIndex));
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_Trans_ScrollDebounceTime"] = delays[idx];
+    gIsSavingFromSettingsUI = YES;
+    saveGeminiPrefs(p);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        gIsSavingFromSettingsUI = NO;
+    });
+}
+
+- (void)agOnPatchStyleSegChanged:(UISegmentedControl *)seg {
+    NSMutableDictionary *p = loadGeminiPrefs();
+    p[@"AG_Trans_PatchStyle"] = @(seg.selectedSegmentIndex);
+    gIsSavingFromSettingsUI = YES;
+    saveGeminiPrefs(p);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        gIsSavingFromSettingsUI = NO;
+    });
+}
+
 - (void)agRunFullNativeDiagnosticsButtonTapped:(UIButton *)sender {
     [sender setTitle:@"⏳ 正在全面体检..." forState:UIControlStateNormal];
     sender.enabled = NO;
@@ -18916,7 +19035,7 @@ static void agAddPatchToContainer(UIView *container, NSDictionary *item, NSStrin
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:(allCoreReady ? @"✅ iOS 原生离线翻译体检通过" : @"🩺 iOS 原生离线翻译体检报告")
                                                                        message:fullAlertReport
                                                                 preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"📥 去系统设置下载语言包" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        [alert addAction:[UIAlertAction actionWithTitle:@"📥 去《设置->翻译》下载语言包" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
             [weakSelf agOpenSystemTranslateLanguageSettings];
         }]];
         [alert addAction:[UIAlertAction actionWithTitle:@"我知道了" style:UIAlertActionStyleCancel handler:nil]];
@@ -18924,27 +19043,79 @@ static void agAddPatchToContainer(UIView *container, NSDictionary *item, NSStrin
     });
 }
 
+// 点击「📥 去下载语言包」直接收起模态层并跳转进系统《设置 -> 翻译》
 - (void)agOpenSystemTranslateLanguageSettings {
-    NSArray<NSString *> *urls = @[
-        @"App-prefs:root=TRANSLATE",
-        @"prefs:root=TRANSLATE",
-        @"App-prefs:root=General&path=Keyboard"
-    ];
-    for (NSString *uStr in urls) {
-        NSURL *u = [NSURL URLWithString:uStr];
-        if (u && [[UIApplication sharedApplication] canOpenURL:u]) {
-            [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
-            return;
-        }
-    }
-    agSafeLaunchURL([NSURL URLWithString:@"App-prefs:root=TRANSLATE"]);
+    [self dismissViewControllerAnimated:YES completion:^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UIApplication *app = [UIApplication sharedApplication];
+            Class wsCls = objc_getClass("LSApplicationWorkspace");
+            id ws = (wsCls && [wsCls respondsToSelector:@selector(defaultWorkspace)]) ? [wsCls defaultWorkspace] : nil;
+
+            NSArray<NSString *> *prefURLs = @[
+                @"prefs:root=TRANSLATE",
+                @"App-prefs:root=TRANSLATE",
+                @"prefs:root=com.apple.Translate",
+                @"App-prefs:root=com.apple.Translate"
+            ];
+            // 1. 若当前处于系统 Preferences.app 内，优先调用 PreferencesAppController 内部原生路由方法直接跳转《设置 -> 翻译》
+            if ([app respondsToSelector:@selector(applicationOpenURL:)]) {
+                for (NSString *uStr in prefURLs) {
+                    NSURL *u = [NSURL URLWithString:uStr];
+                    if (u && [app applicationOpenURL:u]) return;
+                }
+            }
+            // 2. 通过 LSApplicationWorkspace 唤醒《设置 -> 翻译》
+            if (ws && [ws respondsToSelector:@selector(openSensitiveURL:withOptions:)]) {
+                for (NSString *uStr in prefURLs) {
+                    NSURL *u = [NSURL URLWithString:uStr];
+                    if (u && [ws openSensitiveURL:u withOptions:nil]) return;
+                }
+            }
+            // 3. 兜底：直接打开苹果自带「翻译」App
+            if (ws && [ws respondsToSelector:@selector(openApplicationWithBundleID:)]) {
+                [ws openApplicationWithBundleID:@"com.apple.Translate"];
+            }
+        });
+    }];
 }
 
 @end
 
+// 在设置卡片底部附加「滑动重译速度」与「覆膜底色深浅」调节器
+static void agAppendScrollAndPatchControlsToCard(UIView *card, AngelGuardianSettingsViewController *target, CGFloat startY, CGFloat cardW) {
+    CGFloat fieldW = cardW - 32.0;
+
+    UILabel *delayLbl = [[UILabel alloc] initWithFrame:CGRectMake(16, startY, fieldW, 18)];
+    delayLbl.text = @"⏱️ 滑动停稳后自动重译速度：";
+    delayLbl.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightSemibold];
+    delayLbl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
+    [card addSubview:delayLbl];
+
+    UISegmentedControl *delaySeg = [[UISegmentedControl alloc] initWithItems:@[@"0.2s极速", @"0.5s适中", @"0.9s从容", @"1.5s慢速"]];
+    delaySeg.frame = CGRectMake(16, startY + 20, fieldW, 28);
+    NSTimeInterval curDelay = agCustomScrollDebounceSeconds();
+    if (curDelay <= 0.30) delaySeg.selectedSegmentIndex = 0;
+    else if (curDelay <= 0.65) delaySeg.selectedSegmentIndex = 1;
+    else if (curDelay <= 1.15) delaySeg.selectedSegmentIndex = 2;
+    else delaySeg.selectedSegmentIndex = 3;
+    [delaySeg addTarget:target action:@selector(agOnScrollDelaySegChanged:) forControlEvents:UIControlEventValueChanged];
+    [card addSubview:delaySeg];
+
+    UILabel *styleLbl = [[UILabel alloc] initWithFrame:CGRectMake(16, startY + 56, fieldW, 18)];
+    styleLbl.text = @"🎨 网页翻译覆膜底色浓淡：";
+    styleLbl.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightSemibold];
+    styleLbl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
+    [card addSubview:styleLbl];
+
+    UISegmentedControl *styleSeg = [[UISegmentedControl alloc] initWithItems:@[@"清爽浅透(72%)", @"柔和自然(84%)", @"实心遮盖(94%)"]];
+    styleSeg.frame = CGRectMake(16, startY + 76, fieldW, 28);
+    styleSeg.selectedSegmentIndex = agTransPatchStyleIndex();
+    [styleSeg addTarget:target action:@selector(agOnPatchStyleSegChanged:) forControlEvents:UIControlEventValueChanged];
+    [card addSubview:styleSeg];
+}
+
 static UIView *(*orig_AGBuildModuleCard)(id self, SEL _cmd, AGConfigTab tab, CGFloat y, CGFloat cardW) = NULL;
 static UIView *hooked_AGBuildModuleCard(AngelGuardianSettingsViewController *self, SEL _cmd, AGConfigTab tab, CGFloat y, CGFloat cardW) {
-    // 铁律：前 3 个模块（🎙️纯正Live、📹视频AI、💬纯文本）100% 走原函数，绝不改动分毫！
     if (tab != AGConfigTabTranslation) {
         return orig_AGBuildModuleCard(self, _cmd, tab, y, cardW);
     }
@@ -18969,18 +19140,19 @@ static UIView *hooked_AGBuildModuleCard(AngelGuardianSettingsViewController *sel
         return collapsedCard;
     }
 
-    // 情况 A：展开且当前为「☁️ 专属 API 大模型」模式 -> 复用原 API 配置卡片并在顶部插入切换器
     if (!useNative) {
         UIView *apiCard = orig_AGBuildModuleCard(self, _cmd, tab, y, cardW);
-        CGFloat shiftY = 48.0;
+        CGFloat topShift = 48.0;
+        CGFloat bottomExtra = 114.0;
         CGRect f = apiCard.frame;
-        f.size.height += shiftY;
+        CGFloat origH = f.size.height;
+        f.size.height = origH + topShift + bottomExtra;
         apiCard.frame = f;
 
         for (UIView *sub in apiCard.subviews) {
             if (sub.frame.origin.y >= 62.0) {
                 CGRect sf = sub.frame;
-                sf.origin.y += shiftY;
+                sf.origin.y += topShift;
                 sub.frame = sf;
             }
         }
@@ -18990,13 +19162,14 @@ static UIView *hooked_AGBuildModuleCard(AngelGuardianSettingsViewController *sel
         modeSeg.selectedSegmentIndex = 1;
         [modeSeg addTarget:self action:@selector(agOnTransEngineModeSegChanged:) forControlEvents:UIControlEventValueChanged];
         [apiCard addSubview:modeSeg];
+
+        agAppendScrollAndPatchControlsToCard(apiCard, self, origH + topShift - 4.0, cardW);
         return apiCard;
     }
 
-    // 情况 B：展开且当前为「🍎 iOS 原生离线翻译」模式 -> 自动隐藏繁琐的 API 输入框，展示大白话体检看板
     UIColor *accentCol = [UIColor colorWithRed:0.22 green:0.92 blue:0.65 alpha:1.0];
     CGFloat headerH = 60.0;
-    CGFloat bodyH   = 212.0;
+    CGFloat bodyH   = 324.0;
     UIView *card = [[UIView alloc] initWithFrame:CGRectMake(16, y, cardW, headerH + bodyH)];
     card.backgroundColor = [UIColor colorWithRed:0.13 green:0.12 blue:0.22 alpha:1.0];
     card.layer.cornerRadius = 16.0;
@@ -19040,8 +19213,7 @@ static UIView *hooked_AGBuildModuleCard(AngelGuardianSettingsViewController *sel
     [modeSeg addTarget:self action:@selector(agOnTransEngineModeSegChanged:) forControlEvents:UIControlEventValueChanged];
     [card addSubview:modeSeg];
 
-    // 大白话自动体检状态框
-    UIView *diagBox = [[UIView alloc] initWithFrame:CGRectMake(16, headerH + 50, cardW - 32, 102)];
+    UIView *diagBox = [[UIView alloc] initWithFrame:CGRectMake(16, headerH + 50, cardW - 32, 100)];
     diagBox.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
     diagBox.layer.cornerRadius = 12.0;
     diagBox.layer.borderWidth = 0.8;
@@ -19068,7 +19240,7 @@ static UIView *hooked_AGBuildModuleCard(AngelGuardianSettingsViewController *sel
 
     CGFloat btnW = (cardW - 32.0 - 10.0) * 0.5;
     UIButton *recheckBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    recheckBtn.frame = CGRectMake(16, headerH + 162, btnW, 36);
+    recheckBtn.frame = CGRectMake(16, headerH + 158, btnW, 34);
     recheckBtn.backgroundColor = [accentCol colorWithAlphaComponent:0.18];
     recheckBtn.layer.cornerRadius = 10.0;
     recheckBtn.layer.borderWidth = 1.0;
@@ -19080,7 +19252,7 @@ static UIView *hooked_AGBuildModuleCard(AngelGuardianSettingsViewController *sel
     [card addSubview:recheckBtn];
 
     UIButton *dlLangBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    dlLangBtn.frame = CGRectMake(16 + btnW + 10.0, headerH + 162, btnW, 36);
+    dlLangBtn.frame = CGRectMake(16 + btnW + 10.0, headerH + 158, btnW, 34);
     dlLangBtn.backgroundColor = [UIColor colorWithRed:0.25 green:0.65 blue:1.00 alpha:0.22];
     dlLangBtn.layer.cornerRadius = 10.0;
     dlLangBtn.layer.borderWidth = 1.0;
@@ -19091,6 +19263,7 @@ static UIView *hooked_AGBuildModuleCard(AngelGuardianSettingsViewController *sel
     [dlLangBtn addTarget:self action:@selector(agOpenSystemTranslateLanguageSettings) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:dlLangBtn];
 
+    agAppendScrollAndPatchControlsToCard(card, self, headerH + 202, cardW);
     return card;
 }
 
