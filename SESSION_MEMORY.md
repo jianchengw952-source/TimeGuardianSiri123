@@ -1,6 +1,6 @@
 # TimeGuardianSiri123 项目会话记忆文件 (SESSION_MEMORY.md)
 
-> **生成时间**：2026-10-28 01:00:00 (本地时间)
+> **生成时间**：2026-10-28 03:36:00 (本地时间)
 > **会话标识**：`02de72ea-60df-4738-8977-4a4ebaf78b2f`  
 > **用途说明**：供用户切换 Google Antigravity 账号或开启新会话后，直接读取本文件无缝继承当前项目的完整开发上下文。
 
@@ -61,7 +61,7 @@
 * [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (1,075,641 字节，SHA256: `0320E70A3883FB9624EC9800A6C61C2A9D969E6C7B4309E95DAAB8054363507E`)
 * [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (50,749 字节，SHA256: `03CAC9505D0DE46612E073FC1F5606FAF65292915511D8E46C77B26EC8335B80`)
 
-### 3. 最新云端编译产物（Run #166 / Commit `ec1c060`）
+### 3. 最新云端编译产物（Run #168 / Commit `7898ec5`）
 > **本次更新（补全自定义类名隐身宏 + 彻底消除 /tmp 明文痕迹 + 恢复安全无闪退版 dladdr/dyld 隐藏钩子）**：
 > 1. 补全头部隐身宏：追加 `AGInSituTranslationOverlay`、`AGGlobalActionPillWindow`、`AGLockScreenRootViewController`、`AGCardBgCanvasView`、`AGOrbCanvasView`、`AGWaveCanvasView`、`AGScreenTranslationOverlay`、`AGStreamTranslateDelegate` 共 8 个自定义类伪装映射（全面伪装为 `_UIStatusBarFloatingPillWindow` 等 UIKit 私有类），彻底抹除 Mach-O 自定义类名特征。
 > 2. 彻底抹除 `/tmp` 痕迹：`reloadGeminiPrefsCache` 移除 `geminiPrefsFilePath()`，`saveGeminiPrefs` 剔除 `/tmp/com.custom.geminisirioverlay.plist` 并主动执行 `removeItemAtPath` 清除旧残留与日志，彻底杜绝风控扫描 `/tmp` 发现越狱插件配置。
@@ -156,6 +156,48 @@
 
 
 
+
+### Run #168 验证与交付记录 (2026-10-28 03:35)
+> **本次升级（顶级触控引擎 + 截屏显存零泄漏 + AppleSmartBattery 超容电池直读探针 + 全局动作唯一幂等网关 + 自然口语全修复 + 12项王牌新指令）**：
+> 1. **底层顶级触控引擎与截屏显存零泄漏**：
+>    - 后台异步预热读取物理屏幕 `SenderID`，彻底消除主线程点击瞬间遍历 IOKit 的卡顿与死锁风险；
+>    - 100% 穿透触控微水波纹动画：递归禁用水波纹图层 CALayer 命中测试，杜绝水波纹自身阻挡 backboardd 跨进程触控；
+>    - Hand/Finger 坐标绝对一致性：父级 Hand 事件携带与 Finger 完全匹配的归一化坐标与 index/identity，彻底消除控件偏移无法触发点击的问题；
+>    - 串行防重入点击器（`gIsTouchSynthesizing`）：严防连续两次点击的 Down/Up 乱序交叉引发 backboardd 崩溃注销；
+>    - 硬件级长按手势（`agSimulateScreenLongPressAtPoint`）：支持倍速播放、长按呼出快捷菜单；
+>    - 零显存泄漏截屏（`agCaptureSafeScreenBitmapWithMaxEdge`）：使用 `CFBridgingRelease` 严格接管 `_UICreateScreenUIImage` 的 +1 引用计数，配合 `@autoreleasepool` 当场回收 12MB IOSurface 显存，彻底解决截屏发热与显存雪崩。
+> 2. **🔋 IOKit AppleSmartBattery 超容电池 (>100%) 与全维度硬件直读探针**：
+>    - `agCollectRealHardwareAndBatteryTelemetry`：毫秒级直读底层库仑计与电源管理寄存器；
+>    - 消除 100% 封顶锁：精准识别扩容/超容电池真实健康度（如 110.9%），智能鉴定移植电芯与超容满血状态；
+>    - 读取实时快充功率 (W)、电流 (mA)、电压 (V)、电池温度 (°C)、循环次数、RAM/ROM、局域网 IP 与虚拟定位护盾状态；
+>    - 实时语音亲口播报（`agSpeakAndBroadcastHardwareResult`）：支持在 WebSocket Live 双向流与离线 TTS 中直接以亲切中文向用户汇报真实底层数据。
+> 3. **🛡️ 全局动作唯一幂等网关 + 自然口语全修复 + 12项王牌新指令**：
+>    - 全局动作幂等指纹网关：同类触控/截屏动作 1.6s 冷却期排重，彻底终结并发踩踏导致的注销；
+>    - 自然口语全剥离：彻底剥离转写中英文句尾标点，解决“帮我打开天气。”带句号匹配失败；
+>    - 丰富快捷指令：全面屏手势回到桌面、状态栏点击回到顶部、狂点连续点赞、长按屏幕、扫码、查违章、查个税、20+ 深度系统设置直达；
+>    - AI 视觉大脑与 OCR：复用全局共享 NSURLSession 连接池，OCR 识别完毕后当场调用 `malloc_zone_pressure_relief` 回收 Vision 脏内存。
+
+* **Dopamine (Rootless arm64)**：
+  - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
+  - 文件大小：`465,728` 字节
+  - SHA256: `8561770E3633A02B73FD9F489CF1936B4BA499F17F75F08DBCBC52D673E36F6A`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (788 字节), `data.tar.xz` (464,744 字节)
+  - 分发路径：
+    - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+    - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+    - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+
+* **Relaxin (RootHide arm64e)**：
+  - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
+  - 文件大小：`305,084` 字节
+  - SHA256: `CCED79F8C595125E99AC84DE9AAF0DA030EC21E68E6DE4D883CD465030CB234F`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (788 字节), `data.tar.xz` (304,100 字节)
+  - 分发路径：
+    - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+    - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+    - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+
+---
 
 ### Run #166 验证与交付记录 (2026-10-28 00:58)
 > **本次升级（顶级硬件级 HID 触控 + 跨进程无痕打字 + 独立低功耗截屏 + 实时语音看屏推帧 + 纯净意图双擎分流）**：
