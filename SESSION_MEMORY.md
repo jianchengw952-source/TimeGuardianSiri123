@@ -1,6 +1,6 @@
 # TimeGuardianSiri123 项目会话记忆文件 (SESSION_MEMORY.md)
 
-> **生成时间**：2026-10-27 21:15:00 (本地时间)
+> **生成时间**：2026-10-27 22:15:00 (本地时间)
 > **会话标识**：`02de72ea-60df-4738-8977-4a4ebaf78b2f`  
 > **用途说明**：供用户切换 Google Antigravity 账号或开启新会话后，直接读取本文件无缝继承当前项目的完整开发上下文。
 
@@ -61,7 +61,7 @@
 * [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (1,075,641 字节，SHA256: `0320E70A3883FB9624EC9800A6C61C2A9D969E6C7B4309E95DAAB8054363507E`)
 * [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (50,749 字节，SHA256: `03CAC9505D0DE46612E073FC1F5606FAF65292915511D8E46C77B26EC8335B80`)
 
-### 3. 最新云端编译产物（Run #157 / Commit `2705f0f`）
+### 3. 最新云端编译产物（Run #159 / Commit `3248fa2`）
 > **本次更新（补全自定义类名隐身宏 + 彻底消除 /tmp 明文痕迹 + 恢复安全无闪退版 dladdr/dyld 隐藏钩子）**：
 > 1. 补全头部隐身宏：追加 `AGInSituTranslationOverlay`、`AGGlobalActionPillWindow`、`AGLockScreenRootViewController`、`AGCardBgCanvasView`、`AGOrbCanvasView`、`AGWaveCanvasView`、`AGScreenTranslationOverlay`、`AGStreamTranslateDelegate` 共 8 个自定义类伪装映射（全面伪装为 `_UIStatusBarFloatingPillWindow` 等 UIKit 私有类），彻底抹除 Mach-O 自定义类名特征。
 > 2. 彻底抹除 `/tmp` 痕迹：`reloadGeminiPrefsCache` 移除 `geminiPrefsFilePath()`，`saveGeminiPrefs` 剔除 `/tmp/com.custom.geminisirioverlay.plist` 并主动执行 `removeItemAtPath` 清除旧残留与日志，彻底杜绝风控扫描 `/tmp` 发现越狱插件配置。
@@ -156,6 +156,46 @@
 
 
 
+
+### Run #159 验证与交付记录 (2026-10-27 22:15)
+> **本次更新（图层 100% 跨进程穿透不挡滑动 + 剔除墨水干扰 36 点智能底色采样 + 覆膜浓淡/滑动防抖延时可调 + 直达系统设置）**：
+> 1. **100% CALayer 跨进程触控穿透引擎**：
+>    - `AGInSituTranslationOverlay` 声明 `setHitTestsAsOpaque:NO`，并对 `patchContainerView.layer` 与 `laserBeamView.layer` 执行递归穿透处理（`agDisableLayerHitTestingRecursively`）；
+>    - 重写 `hitTest:withEvent:` 与 `pointInside:withEvent:`，仅当精准触摸到底部浮动还原胶囊（`revertPillView`）时才接管事件，其余全屏所有区域 100% 直透底层网页与 App，翻页、快速滚屏、超链接点击丝毫没有任何遮挡卡顿；
+> 2. **36点像素级网页底色采样（彻底剔除黑字墨水干扰）**：
+>    - 采集 6x6=36 点高频网格，针对每个像素计算感知亮度，智能过滤文字墨水笔画的深色像素，精确提炼网页真实底色，彻底终结黑膏药色块；
+> 3. **三种覆膜浓淡风格切换**：
+>    - 新增清爽浅透 (72%)、柔和自然 (84%)、实心遮盖 (94%) 三档原位翻译覆膜风格，在《设置》中点选即可实时保存生效；
+> 4. **四档滑动重译停稳防抖延时调节**：
+>    - 提供 0.2s 极速、0.5s 适中、0.9s 从容、1.5s 慢速四档停稳防抖延时（`agCustomScrollDebounceSeconds`），彻底防止滑动过程中频繁触发闪烁；
+> 5. **MobileAsset 磁盘离线语言包秒级直扫**：
+>    - 直接扫描 `/var/MobileAsset/AssetsV2/...` 目录，精准毫秒级探测系统已下载的离线翻译模型文件；
+> 6. **直达系统《设置 -> 翻译》**：
+>    - 「📥 去下载语言包」按钮通过 `LSApplicationWorkspace` sensitive URL 与 `applicationOpenURL:` 直接跳转进入 iOS 系统级自带翻译语言包管理页面；
+> 7. **无损设置面板扩展**：
+>    - `hooked_AGBuildModuleCard` 仅对 `AGConfigTabTranslation` 挂钩，前三大模块（🎙️纯正Live、📹视频AI、💬纯文本）完全保持原生实现不变。
+
+* **Dopamine (Rootless arm64)**：
+  - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
+  - 文件大小：`442,048` 字节
+  - SHA256: `5E32286C297AEF3C84B9D02EFC53919F8120CA6454593201E01643B94F5F0E0C`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (784 字节), `data.tar.xz` (441,076 字节)
+  - 分发路径：
+    - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+    - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+    - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+
+* **Relaxin (RootHide arm64e)**：
+  - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
+  - 文件大小：`288,656` 字节
+  - SHA256: `EF9A91F8E7163F254E1C9B460D558DD0936962830F9B5501B50E54E66DE676EC`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (788 字节), `data.tar.xz` (287,676 字节)
+  - 分发路径：
+    - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+    - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+    - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+
+---
 
 ### Run #157 验证与交付记录 (2026-10-27 21:15)
 > **本次更新（统一整合块天花板版：iOS 14-17 原生离线翻译 + 大白话全语种自动体检 + 原位500条缓存逐框映射 + 设置面板无损扩展）**：
