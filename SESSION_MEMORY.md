@@ -644,3 +644,34 @@
 - **生成的 Pure XZ .deb 包**:
   - Rootless (arm64): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb` (420,356 字节, SHA256: `618BB0F5F4D99A3D7968E62E583DA47F1B4F35D71005B47455A0D2105D28A284`)
   - RootHide (arm64e): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb` (274,956 字节, SHA256: `10FCEB86D563222498C033C8540CAD65DE9756DADC25D5D25A6CA4942132D858`)
+
+
+### Run #170 验证与交付记录 (2026-10-28 04:34)
+- **Commit**: `71b05be` (*feat: upgrade real-touch HID engine, zero-crash screen capture, audio thread-safety, and agent combo action system*)
+- **GitHub Actions Run ID**: `40577939311` (Run #170, 双架构 build 成功)
+- **3大升级修改落地**:
+  1. **升级「真机触控引擎 + 零崩溃截屏 + IOKit 超容电池(>100%)底层硬件探针」**：
+     - 通过 `AG_IOHIDEventSystemClientSetMatchingFunc` 从 IOKit 驱动树与 HID 服务（`AppleMultitouchDevice`, `AppleEmbeddedTouchEEPROM`, `IOHIDEventDriver`）双重提取真实屏幕 SenderID；
+     - 触控波纹动画延至松手后展示（`agShowTouchRippleAtPoint`），手势事件采用 `(transducerType=3, index=0, identity=0)` 与真实归一化坐标；
+     - 移除 `_UICreateScreenUIImage` 中的 `CFBridgingRelease`，彻底消除 ARC 重复释放导致的闪退；
+     - 挂载 IOKit `AppleSmartBattery` 底层硬件直读探针，支持真实容量突破 100% 的超容电池检测与数据播报。
+  2. **修复「多线程音频停止撞车注销 & 语音包堆积卡慢」**：
+     - 推帧防抖延迟恢复至 `0.32s` 极速响应；
+     - 执行本地指令时，递增 `currentTurnPlaybackID`、归零 `pendingPlayBuffersCount`、清空 `pcm24kStagingBuffer`，并在 `self.audioPlayQueue` 派发线程安全停止与重启音频，彻底消除 `pendingBuffers=51` 堆积与多线程撞车注销。
+  3. **升级「第1优先级连招引擎 + 本地 40ms 价格比大小/第N项秒点 + 超容电池亲口播报」**：
+     - 提权第 0 最高优先级紧凑连招与多步“然后”连招拆解，支持诸如“打开淘宝搜索手机帮我点击最贵的”等连招一气呵成；
+     - 内置 40ms 极速本地 OCR 价格比大小（模式 A：最贵/价格最高/最便宜/最低价）与按序点击列表第 N 项（模式 B：第一个/第二个/第三个/最后一个）；
+     - 硬件与电池自检状态全面对接 `agSpeakAndBroadcastHardwareResult`，支持 WebSocket Live 双向流与本地语音播报。
+- **5 份镜像哈希统一 (1,184,078 字节)**:
+  - SHA256: `C5E972F9270E763DB15F483FC95C111CA8704E342F91F1374DD0BEF94E85D9C9`
+- **D:\定位与防检测底部代码.txt (50,243 字节)**
+- **生成的 Pure XZ .deb 包**:
+  - Rootless (arm64): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb` (474,684 字节, SHA256: `D0BB1DA7C5A0FE6C6EE0056866121D7579DBE307761B70C560A62A842E1CE9B1`)
+  - RootHide (arm64e): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb` (308,048 字节, SHA256: `0D028E2EA021F8C1FAC1ADD15F38CFCACE77CEBB50287C610B5625282E3819B7`)
+- **已同步分发至目标目录**:
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
