@@ -1,6 +1,6 @@
 # TimeGuardianSiri123 项目会话记忆文件 (SESSION_MEMORY.md)
 
-> **生成时间**：2026-10-27 22:15:00 (本地时间)
+> **生成时间**：2026-10-27 22:50:00 (本地时间)
 > **会话标识**：`02de72ea-60df-4738-8977-4a4ebaf78b2f`  
 > **用途说明**：供用户切换 Google Antigravity 账号或开启新会话后，直接读取本文件无缝继承当前项目的完整开发上下文。
 
@@ -61,7 +61,7 @@
 * [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (1,075,641 字节，SHA256: `0320E70A3883FB9624EC9800A6C61C2A9D969E6C7B4309E95DAAB8054363507E`)
 * [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (50,749 字节，SHA256: `03CAC9505D0DE46612E073FC1F5606FAF65292915511D8E46C77B26EC8335B80`)
 
-### 3. 最新云端编译产物（Run #159 / Commit `3248fa2`）
+### 3. 最新云端编译产物（Run #163 / Commit `8d185c9`）
 > **本次更新（补全自定义类名隐身宏 + 彻底消除 /tmp 明文痕迹 + 恢复安全无闪退版 dladdr/dyld 隐藏钩子）**：
 > 1. 补全头部隐身宏：追加 `AGInSituTranslationOverlay`、`AGGlobalActionPillWindow`、`AGLockScreenRootViewController`、`AGCardBgCanvasView`、`AGOrbCanvasView`、`AGWaveCanvasView`、`AGScreenTranslationOverlay`、`AGStreamTranslateDelegate` 共 8 个自定义类伪装映射（全面伪装为 `_UIStatusBarFloatingPillWindow` 等 UIKit 私有类），彻底抹除 Mach-O 自定义类名特征。
 > 2. 彻底抹除 `/tmp` 痕迹：`reloadGeminiPrefsCache` 移除 `geminiPrefsFilePath()`，`saveGeminiPrefs` 剔除 `/tmp/com.custom.geminisirioverlay.plist` 并主动执行 `removeItemAtPath` 清除旧残留与日志，彻底杜绝风控扫描 `/tmp` 发现越狱插件配置。
@@ -156,6 +156,45 @@
 
 
 
+
+### Run #163 验证与交付记录 (2026-10-27 22:50)
+> **本次更新（零风控硬件级拟人触控 + 贝塞尔手势 + 跨应用视觉看屏 Agent + 复合连招智能等待 + 语音听译/翻译快捷指令）**：
+> 1. **零风控硬件级拟人触控与贝塞尔曲线滑动引擎**：
+>    - `agSendSynthesizedTouchEventWithRadius` 注入真人手指接触电容屏的椭圆面积半径（`MajorRadius` / `MinorRadius`）与密度参数（0.65），随机化微小按压力度，彻底告别 `radius=0` 的机械脚本破绽；
+>    - `agSimulateScreenTapAtPoint` 引入二维高斯随机落点偏移（±2.5pt），并在 52ms ~ 88ms 随机按压期间模拟指腹肉垫按下到抬起的 0.4~1.0pt 自然微滚动；
+>    - `agSimulateScreenSwipe` 构造模拟人类大拇指自然生理弧度的二阶贝塞尔控制点，结合 Ease-In-Out 加减速曲线（起步加速 -> 中段快速 -> 末尾减速），彻底消除数学死板直线；
+> 2. **跨应用智能等待 OCR 点击 + 模糊语义匹配**：
+>    - `performVisualTapWithRetry:attempt:maxAttempts:` 针对跳转新应用页面加载，支持多轮递增等待（0.35s / 0.75s），支持精准匹配（100分）、子串匹配（80分）与语义子集匹配（65分）；
+> 3. **🧠 AI 视觉大脑看屏 Agent 引擎（图标与复杂界面全自动看懂定位）**：
+>    - `performAIVisionScreenAgentWithGoal:step:maxSteps:` 当本地文字 OCR 未匹配到图标（如放大镜、加号、方向箭头等）时，自动截屏压缩为高清轻量快照，调用 Gemini / OpenAI 视觉模型定位坐标并下发 JSON 动作指令，支持点击、打字输入、上滑多步自动闭环；
+> 4. **多步连招时序等待 + 复合口语自动拆解**：
+>    - `parseAndExecuteActions:executed:` 智能识别首个动作为打开 App / 搜索 / 导航时，为后续点击动作自动预留 2.0s 界面渲染启动时间；
+>    - `tryExecuteDirectLocalCommand:` 新增复合口语拆解（如“打开高德地图搜索海口市然后帮我点击开始导航”），自动分步执行；
+>    - 新增「打开翻译 / 打开听译 / 同传听译 / 实时字幕 / 关闭翻译」秒响应口令；
+> 5. **头文件前置声明架构对齐**：
+>    - 将 `AGScreenTranslationOverlay`（`_UISystemSubtitlesOverlayWindow`）前置至全局头，确保在 `executeActionDictionary:` 中调用无任何符号警告与编译阻碍。
+
+* **Dopamine (Rootless arm64)**：
+  - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
+  - 文件大小：`443,992` 字节
+  - SHA256: `77B9FEB678756765E4369735E4342C4FAB0B80F412A8EAA653A1588F82BF190D`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (788 字节), `data.tar.xz` (443,008 字节)
+  - 分发路径：
+    - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+    - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+    - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+
+* **Relaxin (RootHide arm64e)**：
+  - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
+  - 文件大小：`293,012` 字节
+  - SHA256: `9DE782EBE36A4494DE4C3D81CB073CB3AD16E04E914F808EE4B67CDF2EAFBC7B`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (788 字节), `data.tar.xz` (292,028 字节)
+  - 分发路径：
+    - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+    - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+    - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+
+---
 
 ### Run #159 验证与交付记录 (2026-10-27 22:15)
 > **本次更新（图层 100% 跨进程穿透不挡滑动 + 剔除墨水干扰 36 点智能底色采样 + 覆膜浓淡/滑动防抖延时可调 + 直达系统设置）**：
