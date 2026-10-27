@@ -7776,6 +7776,8 @@ static UIImage *agCaptureSafeScreenBitmapWithMaxEdge(CGFloat maxEdge, UIWindow *
 - (void)performAIVisionScreenAgentWithGoal:(NSString *)goalDesc step:(NSInteger)step maxSteps:(NSInteger)maxSteps;
 - (void)updateResponseTextViewSmoothly:(NSString *)newText;
 - (void)throttledExpandAndScrollTextViewForce:(BOOL)force;
+- (void)handleSynthesizedUIGesture:(NSString *)gesture;
+- (void)handleClipboardAndAutoType:(NSString *)text;
 @end
 
 static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -11996,7 +11998,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     if (!cmdText || cmdText.length == 0) return NO;
 
     static NSRegularExpression *wxPat1 = nil, *wxPat2 = nil, *wxPat3 = nil;
-    static NSRegularExpression *numRe = nil, *timerRe = nil, *alarmRe = nil, *tapTextRe = nil;
+    static NSRegularExpression *numRe = nil, *timerRe = nil, *alarmRe = nil;
     static NSRegularExpression *searchRegex = nil, *naviRegex = nil, *musicRegex = nil;
     static NSRegularExpression *openRegex = nil, *callRegex = nil, *smsRegex = nil;
     static dispatch_once_t onceToken;
@@ -12007,7 +12009,6 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
         numRe = [NSRegularExpression regularExpressionWithPattern:@"(\\d{1,3})" options:0 error:nil];
         timerRe = [NSRegularExpression regularExpressionWithPattern:@"(?:定个|设个|设置|开启|来个)?(\\d{1,3})(?:分钟|分|秒)(?:的)?(?:倒计时|计时器)" options:0 error:nil];
         alarmRe = [NSRegularExpression regularExpressionWithPattern:@"(?:定个|设个|设置|定一个)?(?:明天|明早|早上|上午|下午|晚上)?(\\d{1,2})(?:点|时|:|：)(?:(\\d{1,2})分?)?(?:的)?闹钟" options:0 error:nil];
-        tapTextRe = [NSRegularExpression regularExpressionWithPattern:@"(?:点击|点一下)(?:屏幕上的|按钮)?[“\"'「]?([^”\"'」，。！？,.!?\\s]+)[”\"'」]?" options:0 error:nil];
         searchRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:在|去|用|打开)(淘宝|京东|拼多多|美团|抖音|b站|哔哩哔哩|小红书|知乎|微博|百度)(?:里|上|app)?(?:帮我)?(?:搜一下|搜索一下|查找一下|找一下|搜索|搜|找|买|看)(?:一下)?(.+)$" options:0 error:nil];
         naviRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:打开|用|使用)?(?:高德地图|百度地图|苹果地图|高德|百度|地图)?(?:帮我)?(?:导航|驾车|骑行|步行)?(?:到|去|前往|去往)(.+?)(?:怎么走|怎么去|吧|呢)?$" options:0 error:nil];
         musicRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:在网易云|在qq音乐|听|播放)(?:搜|播|听)?([^，。！？,.!?\\s]+)" options:0 error:nil];
