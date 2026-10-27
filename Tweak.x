@@ -7184,7 +7184,6 @@ static void agSetLowPowerMode(BOOL enable) {
 #include <ifaddrs.h>
 #include <arpa/inet.h>
 
-// 底层 IOHIDEvent 硬件级零风控拟人触控、跨进程无痕打字、安全零泄漏截屏与 AppleSmartBattery 超容电池硬件探针
 #ifdef __LP64__
 typedef double AGIOHIDFloat;
 #else
@@ -7193,6 +7192,7 @@ typedef float AGIOHIDFloat;
 
 typedef CFTypeRef (*AG_IOHIDEventSystemClientCreateFunc)(CFAllocatorRef allocator);
 typedef void (*AG_IOHIDEventSystemClientDispatchEventFunc)(CFTypeRef client, CFTypeRef event);
+typedef void (*AG_IOHIDEventSystemClientSetMatchingFunc)(CFTypeRef client, CFDictionaryRef match);
 typedef CFArrayRef (*AG_IOHIDEventSystemClientCopyServicesFunc)(CFTypeRef client);
 typedef CFTypeRef (*AG_IOHIDServiceClientCopyPropertyFunc)(CFTypeRef service, CFStringRef key);
 typedef CFTypeRef (*AG_IOHIDServiceClientGetRegistryIDFunc)(CFTypeRef service);
@@ -7203,71 +7203,109 @@ typedef void (*IOHIDEventAppendEventFunc)(CFTypeRef, CFTypeRef, uint32_t);
 typedef void (*IOHIDEventSetIntegerValueFunc)(CFTypeRef, uint32_t, CFIndex);
 typedef void (*IOHIDEventSetFloatValueFunc)(CFTypeRef, uint32_t, AGIOHIDFloat);
 typedef void (*IOHIDEventSetSenderIDFunc)(CFTypeRef, uint64_t);
+typedef uint64_t (*AG_IOHIDEventGetSenderIDFunc)(CFTypeRef);
 typedef void (*AG_BKSHIDEventSendToFocusedProcessFunc)(CFTypeRef);
 
-static uint64_t gCachedRealTouchScreenSenderID = 0;
+static volatile uint64_t gCachedRealTouchScreenSenderID = 0;
 static CFTypeRef gSharedTouchHIDClient = NULL;
 static volatile BOOL gIsScreenVisionAgentBusy = NO;
 static volatile BOOL gIsTouchSynthesizing = NO;
 
-// 后台异步预热获取真实屏幕 SenderID（避免在主线程点击瞬间遍历 IOKit 服务造成卡顿或死锁）
+// 从 IOKit 驱动树与 HID 服务双重提取本机真实触摸屏 SenderID（配合 agInSituHIDCallback 真机手指触摸实时更新）
 static uint64_t agResolveHardwareTouchScreenSenderID(CFTypeRef hidClient) {
     if (gCachedRealTouchScreenSenderID != 0) {
         return gCachedRealTouchScreenSenderID;
     }
-    gCachedRealTouchScreenSenderID = 0x8000000817319372ULL; // 先赋予安全硬件默认值，0阻塞返回
-    if (!hidClient) return gCachedRealTouchScreenSenderID;
 
+    typedef CFMutableDictionaryRef (*AG_IOServiceMatchingFunc)(const char *name);
+    typedef uint32_t (*AG_IOServiceGetMatchingServiceFunc)(uint32_t masterPort, CFDictionaryRef matching);
+    typedef int (*AG_IORegistryEntryGetRegistryEntryIDFunc)(uint32_t entry, uint64_t *entryID);
+    typedef int (*AG_IOObjectReleaseFunc)(uint32_t object);
+
+    static AG_IOHIDEventSystemClientSetMatchingFunc setMatching = NULL;
+    static AG_IOHIDEventSystemClientCopyServicesFunc copyServices = NULL;
+    static AG_IOHIDServiceClientCopyPropertyFunc copyProp = NULL;
+    static AG_IOHIDServiceClientGetRegistryIDFunc getRegID = NULL;
+    static AG_IOServiceMatchingFunc ioMatching = NULL;
+    static AG_IOServiceGetMatchingServiceFunc ioGetService = NULL;
+    static AG_IORegistryEntryGetRegistryEntryIDFunc ioGetEntryID = NULL;
+    static AG_IOObjectReleaseFunc ioRelease = NULL;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-            void *ioHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
-            if (!ioHandle) return;
-            AG_IOHIDEventSystemClientCopyServicesFunc copyServices = (AG_IOHIDEventSystemClientCopyServicesFunc)dlsym(ioHandle, "IOHIDEventSystemClientCopyServices");
-            AG_IOHIDServiceClientCopyPropertyFunc copyProp = (AG_IOHIDServiceClientCopyPropertyFunc)dlsym(ioHandle, "IOHIDServiceClientCopyProperty");
-            AG_IOHIDServiceClientGetRegistryIDFunc getRegID = (AG_IOHIDServiceClientGetRegistryIDFunc)dlsym(ioHandle, "IOHIDServiceClientGetRegistryID");
-            if (!copyServices || !getRegID) return;
+        void *ioHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
+        if (ioHandle) {
+            setMatching  = (AG_IOHIDEventSystemClientSetMatchingFunc)dlsym(ioHandle, "IOHIDEventSystemClientSetMatching");
+            copyServices = (AG_IOHIDEventSystemClientCopyServicesFunc)dlsym(ioHandle, "IOHIDEventSystemClientCopyServices");
+            copyProp     = (AG_IOHIDServiceClientCopyPropertyFunc)dlsym(ioHandle, "IOHIDServiceClientCopyProperty");
+            getRegID     = (AG_IOHIDServiceClientGetRegistryIDFunc)dlsym(ioHandle, "IOHIDServiceClientGetRegistryID");
+            ioMatching   = (AG_IOServiceMatchingFunc)dlsym(ioHandle, "IOServiceMatching");
+            ioGetService = (AG_IOServiceGetMatchingServiceFunc)dlsym(ioHandle, "IOServiceGetMatchingService");
+            ioGetEntryID = (AG_IORegistryEntryGetRegistryEntryIDFunc)dlsym(ioHandle, "IORegistryEntryGetRegistryEntryID");
+            ioRelease    = (AG_IOObjectReleaseFunc)dlsym(ioHandle, "IOObjectRelease");
+        }
+    });
 
-            CFArrayRef services = copyServices(hidClient);
-            if (!services) return;
+    if (hidClient && setMatching && copyServices && getRegID) {
+        NSDictionary *matchDict = @{@"PrimaryUsagePage": @(0x0D), @"PrimaryUsage": @(0x04)};
+        setMatching(hidClient, (__bridge CFDictionaryRef)matchDict);
+        CFArrayRef services = copyServices(hidClient);
+        if (services) {
             CFIndex count = CFArrayGetCount(services);
+            uint64_t fallbackID = 0;
             for (CFIndex i = 0; i < count; i++) {
                 CFTypeRef srv = CFArrayGetValueAtIndex(services, i);
                 if (!srv) continue;
-                BOOL isDigitizer = NO;
-                BOOL isBuiltIn = NO;
-                if (copyProp) {
-                    CFTypeRef upObj = copyProp(srv, CFSTR("PrimaryUsagePage"));
-                    CFTypeRef uObj  = copyProp(srv, CFSTR("PrimaryUsage"));
-                    CFTypeRef biObj = copyProp(srv, CFSTR("Built-In"));
-                    int upVal = 0, uVal = 0;
-                    if (upObj && CFGetTypeID(upObj) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)upObj, kCFNumberIntType, &upVal);
-                    if (uObj && CFGetTypeID(uObj) == CFNumberGetTypeID())  CFNumberGetValue((CFNumberRef)uObj, kCFNumberIntType, &uVal);
-                    if (biObj && CFGetTypeID(biObj) == CFBooleanGetTypeID()) isBuiltIn = CFBooleanGetValue((CFBooleanRef)biObj);
-                    if (upObj) CFRelease(upObj);
-                    if (uObj)  CFRelease(uObj);
-                    if (biObj) CFRelease(biObj);
-                    if (upVal == 0x0D && (uVal == 0x04 || uVal == 0x05)) isDigitizer = YES;
+                CFTypeRef regObj = getRegID(srv);
+                uint64_t sid = 0;
+                if (regObj && CFGetTypeID(regObj) == CFNumberGetTypeID()) {
+                    CFNumberGetValue((CFNumberRef)regObj, kCFNumberSInt64Type, &sid);
                 }
-                if (isDigitizer) {
-                    CFTypeRef regObj = getRegID(srv);
-                    if (regObj && CFGetTypeID(regObj) == CFNumberGetTypeID()) {
-                        uint64_t sid = 0;
-                        CFNumberGetValue((CFNumberRef)regObj, kCFNumberSInt64Type, &sid);
-                        if (sid != 0 && isBuiltIn) {
-                            gCachedRealTouchScreenSenderID = sid;
-                            break;
+                if (sid != 0) {
+                    BOOL isBuiltIn = NO;
+                    if (copyProp) {
+                        CFTypeRef biObj = copyProp(srv, CFSTR("Built-In"));
+                        if (biObj) {
+                            if (CFGetTypeID(biObj) == CFBooleanGetTypeID()) isBuiltIn = CFBooleanGetValue((CFBooleanRef)biObj);
+                            else if (CFGetTypeID(biObj) == CFNumberGetTypeID()) isBuiltIn = [(__bridge NSNumber *)biObj boolValue];
+                            CFRelease(biObj);
                         }
+                    }
+                    if (isBuiltIn) {
+                        gCachedRealTouchScreenSenderID = sid;
+                        break;
+                    } else if (fallbackID == 0) {
+                        fallbackID = sid;
                     }
                 }
             }
+            if (gCachedRealTouchScreenSenderID == 0 && fallbackID != 0) {
+                gCachedRealTouchScreenSenderID = fallbackID;
+            }
             CFRelease(services);
-        });
-    });
-    return gCachedRealTouchScreenSenderID;
+        }
+        setMatching(hidClient, NULL);
+    }
+
+    if (gCachedRealTouchScreenSenderID == 0 && ioMatching && ioGetService && ioGetEntryID && ioRelease) {
+        const char *driverNames[] = {"AppleMultitouchDevice", "AppleEmbeddedTouchEEPROM", "IOHIDEventDriver"};
+        for (int i = 0; i < 3; i++) {
+            uint32_t srv = ioGetService(0, ioMatching(driverNames[i]));
+            if (srv != 0) {
+                uint64_t eid = 0;
+                if (ioGetEntryID(srv, &eid) == 0 && eid != 0) {
+                    gCachedRealTouchScreenSenderID = eid;
+                    ioRelease(srv);
+                    break;
+                }
+                ioRelease(srv);
+            }
+        }
+    }
+
+    return (gCachedRealTouchScreenSenderID != 0) ? gCachedRealTouchScreenSenderID : 0x8000000817319372ULL;
 }
 
-// 100% 硬件穿透的点击水波纹（禁用 CALayer 命中测试，彻底防止水波纹自身拦截 backboardd 跨进程点击！）
+// 100% 硬件穿透水波纹（在手指抬起后才展示，绝不在点击瞬间遮挡 backboardd 命中测试！）
 static void agShowTouchRippleAtPoint(CGPoint pt) {
     dispatch_async(dispatch_get_main_queue(), ^{
         AGGlobalActionPillWindow *hostWin = [AGGlobalActionPillWindow sharedPill];
@@ -7285,7 +7323,7 @@ static void agShowTouchRippleAtPoint(CGPoint pt) {
         ring.transform = CGAffineTransformMakeScale(0.45, 0.45);
         [hostWin.rootViewController.view addSubview:ring];
 
-        [UIView animateWithDuration:0.32 delay:0 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction animations:^{
+        [UIView animateWithDuration:0.30 delay:0 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction animations:^{
             ring.transform = CGAffineTransformMakeScale(1.35, 1.35);
             ring.alpha = 0.0;
         } completion:^(BOOL finished) {
@@ -7303,11 +7341,9 @@ static void agSendSynthesizedTouchEventWithRadius(CGPoint pt, BOOL isTouching, u
     static IOHIDEventSetIntegerValueFunc setIntVal = NULL;
     static IOHIDEventSetFloatValueFunc setFloatVal = NULL;
     static IOHIDEventSetSenderIDFunc setSenderID = NULL;
-    static AG_BKSHIDEventSendToFocusedProcessFunc sendFocused = NULL;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         void *ioHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
-        void *bksHandle = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_LAZY);
         if (ioHandle) {
             createClient = (AG_IOHIDEventSystemClientCreateFunc)dlsym(ioHandle, "IOHIDEventSystemClientCreate");
             dispatchEv   = (AG_IOHIDEventSystemClientDispatchEventFunc)dlsym(ioHandle, "IOHIDEventSystemClientDispatchEvent");
@@ -7319,11 +7355,7 @@ static void agSendSynthesizedTouchEventWithRadius(CGPoint pt, BOOL isTouching, u
             setSenderID  = (IOHIDEventSetSenderIDFunc)dlsym(ioHandle, "IOHIDEventSetSenderID");
             if (createClient) {
                 gSharedTouchHIDClient = createClient(kCFAllocatorDefault);
-                agResolveHardwareTouchScreenSenderID(gSharedTouchHIDClient);
             }
-        }
-        if (bksHandle) {
-            sendFocused = (AG_BKSHIDEventSendToFocusedProcessFunc)dlsym(bksHandle, "BKSHIDEventSendToFocusedProcess");
         }
     });
     if (!gSharedTouchHIDClient || !dispatchEv || !createHand || !createFinger || !appendEv) return;
@@ -7338,14 +7370,9 @@ static void agSendSynthesizedTouchEventWithRadius(CGPoint pt, BOOL isTouching, u
     uint32_t childMask  = (eventMask == 0x04) ? 0x04 : 0x03;
     uint32_t parentMask = (eventMask == 0x04) ? 0x04 : 0x23;
 
-    // 关键修复：父级 Hand 事件必须携带与 Finger 一致的 (normX, normY) 坐标及匹配的 index/identity，确保 100% 命中目标 App 控件！
-    CFTypeRef handEv = createHand(kCFAllocatorDefault, abTime, 3, 1, 2, parentMask, 0, normX, normY, 0.0, pressure, 0.0, rangeAndTouch, rangeAndTouch, 0);
+    // 关键：父级 Hand 事件 (transducerType=3, index=0, identity=0) 必须携带真实的 (normX, normY)
+    CFTypeRef handEv = createHand(kCFAllocatorDefault, abTime, 3, 0, 0, parentMask, 0, normX, normY, 0.0, pressure, 0.0, rangeAndTouch, rangeAndTouch, 0);
     if (!handEv) return;
-
-    if (setIntVal) {
-        setIntVal(handEv, 0xB0019, 1); // kIOHIDEventFieldDigitizerIsDisplayIntegrated = 1
-        setIntVal(handEv, 0x00004, 1); // kIOHIDEventFieldIsBuiltIn = 1
-    }
 
     CFTypeRef fingerEv = createFinger(kCFAllocatorDefault, abTime, 1, 2, childMask, normX, normY, 0.0, pressure, 0.0, rangeAndTouch, rangeAndTouch, 0);
     if (fingerEv) {
@@ -7359,18 +7386,18 @@ static void agSendSynthesizedTouchEventWithRadius(CGPoint pt, BOOL isTouching, u
     }
 
     if (setIntVal) {
+        setIntVal(handEv, 0xB0019, 1); // kIOHIDEventFieldDigitizerIsDisplayIntegrated = 1
+        setIntVal(handEv, 0x00004, 1); // kIOHIDEventFieldIsBuiltIn = 1
         setIntVal(handEv, 0xB0007, parentMask);
         setIntVal(handEv, 0xB0008, isTouching ? 1 : 0);
         setIntVal(handEv, 0xB0009, isTouching ? 1 : 0);
     }
     if (setSenderID) {
-        setSenderID(handEv, agResolveHardwareTouchScreenSenderID(gSharedTouchHIDClient));
+        uint64_t realSid = agResolveHardwareTouchScreenSenderID(gSharedTouchHIDClient);
+        setSenderID(handEv, realSid);
     }
 
     dispatchEv(gSharedTouchHIDClient, handEv);
-    if (sendFocused) {
-        sendFocused(handEv);
-    }
     CFRelease(handEv);
 }
 
@@ -7380,52 +7407,51 @@ static void agSendSynthesizedTouchEvent(CGPoint pt, BOOL isTouching, uint32_t ev
     agSendSynthesizedTouchEventWithRadius(pt, isTouching, eventMask, radius, pressure);
 }
 
-// 串行防重入点击器（杜绝两次点击的 Down/Up 交错重叠搞崩 backboardd 引发注销）
+// 串行防重入点击器（先完成硬件点击按下与抬起，再展示水波纹，确保 100% 穿透点中底层淘宝/设置）
 static void agSimulateScreenTapAtPoint(CGPoint pt) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (gIsTouchSynthesizing) return;
         gIsTouchSynthesizing = YES;
 
         CGRect sb = [UIScreen mainScreen].bounds;
-        CGFloat jx = MAX(-2.0, MIN(2.0, (CGFloat)(agGaussianRandom() * 1.1)));
-        CGFloat jy = MAX(-2.0, MIN(2.0, (CGFloat)(agGaussianRandom() * 1.1)));
+        CGFloat jx = MAX(-1.5, MIN(1.5, (CGFloat)(agGaussianRandom() * 0.8)));
+        CGFloat jy = MAX(-1.5, MIN(1.5, (CGFloat)(agGaussianRandom() * 0.8)));
 
         CGPoint downPt = CGPointMake(MAX(6.0, MIN(sb.size.width - 6.0, pt.x + jx)),
                                      MAX(6.0, MIN(sb.size.height - 6.0, pt.y + jy)));
-        CGPoint movePt = CGPointMake(downPt.x + ((CGFloat)arc4random_uniform(9) - 4.0) * 0.08,
-                                     downPt.y + ((CGFloat)arc4random_uniform(9) - 4.0) * 0.08);
-        float baseRadius = 4.65f + ((float)arc4random_uniform(110)) * 0.01f;
-        float basePress  = 0.26f + ((float)arc4random_uniform(16)) * 0.01f;
+        CGPoint movePt = CGPointMake(downPt.x + 0.15, downPt.y + 0.15);
+        float baseRadius = 4.75f;
+        float basePress  = 0.30f;
+
+        agLiveDiagLog(@"TOUCH_SYNTH", @"Tapping screen at (%.1f, %.1f) with senderID=0x%llx", downPt.x, downPt.y, (unsigned long long)agResolveHardwareTouchScreenSenderID(gSharedTouchHIDClient));
 
         agSendSynthesizedTouchEventWithRadius(downPt, YES, 0x03, baseRadius, basePress);
-        agShowTouchRippleAtPoint(downPt);
 
-        NSTimeInterval holdDur = 0.056 + ((double)arc4random_uniform(24)) * 0.001;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(holdDur * 0.50 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            agSendSynthesizedTouchEventWithRadius(movePt, YES, 0x04, baseRadius * 1.06f, basePress * 1.10f);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.025 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            agSendSynthesizedTouchEventWithRadius(movePt, YES, 0x04, baseRadius * 1.05f, basePress * 1.08f);
         });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(holdDur * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.055 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             agSendSynthesizedTouchEventWithRadius(movePt, NO, 0x03, 0.0f, 0.0f);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            agShowTouchRippleAtPoint(downPt); // 抬起手指后再弹水波纹视觉反馈，绝不挡点击！
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.045 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 gIsTouchSynthesizing = NO;
             });
         });
     });
 }
 
-// 硬件级长按手势（支持抖音倍速、长按保存、长按呼出菜单）
 static void agSimulateScreenLongPressAtPoint(CGPoint pt, NSTimeInterval duration) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (gIsTouchSynthesizing) return;
         gIsTouchSynthesizing = YES;
         NSTimeInterval holdDur = MAX(0.6, MIN(3.0, duration));
-        agShowTouchRippleAtPoint(pt);
         agSendSynthesizedTouchEventWithRadius(pt, YES, 0x03, 5.2f, 0.38f);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(holdDur * 0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            agSendSynthesizedTouchEventWithRadius(CGPointMake(pt.x + 0.3, pt.y + 0.3), YES, 0x04, 5.4f, 0.42f);
+            agSendSynthesizedTouchEventWithRadius(CGPointMake(pt.x + 0.2, pt.y + 0.2), YES, 0x04, 5.4f, 0.42f);
         });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(holdDur * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             agSendSynthesizedTouchEventWithRadius(pt, NO, 0x03, 0.0f, 0.0f);
+            agShowTouchRippleAtPoint(pt);
             gIsTouchSynthesizing = NO;
         });
     });
@@ -7527,7 +7553,7 @@ static void agInjectTextIntoFocusedInput(NSString *text, BOOL autoSubmit) {
     });
 }
 
-// 零显存泄漏的独立位图截屏器：使用 CFBridgingRelease 接管 _UICreateScreenUIImage 的 +1 引用计数，当场释放 12MB IOSurface 显存！
+// 安全、零双重释放、零显存残留的截屏函数（纯 ARC @autoreleasepool 管理，彻底杜绝 Double-Free 注销！）
 static UIImage *agCaptureSafeScreenBitmapWithMaxEdge(CGFloat maxEdge, UIWindow *overlayToHide) {
     __block UIImage *safeBitmap = nil;
     @autoreleasepool {
@@ -7535,7 +7561,7 @@ static UIImage *agCaptureSafeScreenBitmapWithMaxEdge(CGFloat maxEdge, UIWindow *
         if ([overlayToHide isKindOfClass:[GeminiPassthroughWindow class]]) {
             GeminiPassthroughWindow *gWin = (GeminiPassthroughWindow *)overlayToHide;
             if (gWin.miniSummonWrapper && !gWin.miniSummonWrapper.hidden && gWin.capsuleWrapper.hidden) {
-                needHideFullCard = NO; // 小胶囊形态无需闪烁隐藏主窗口
+                needHideFullCard = NO;
             }
         }
         CGFloat savedAlpha = needHideFullCard ? overlayToHide.alpha : 1.0;
@@ -7543,11 +7569,7 @@ static UIImage *agCaptureSafeScreenBitmapWithMaxEdge(CGFloat maxEdge, UIWindow *
 
         UIImage *rawImg = nil;
         @try {
-            // 关键核心修复：_UICreateScreenUIImage 返回 +1 引用计数，必须用 CFBridgingRelease 接管，否则每次截屏永久泄漏 12MB 硬件显存！
-            CFTypeRef rawRef = (__bridge CFTypeRef)_UICreateScreenUIImage();
-            if (rawRef) {
-                rawImg = (UIImage *)CFBridgingRelease(rawRef);
-            }
+            rawImg = _UICreateScreenUIImage();
         } @catch (NSException *e) {
             rawImg = nil;
         }
@@ -7647,7 +7669,6 @@ static NSString *agGetCurrentLocalIPAddress(NSString **outNetType) {
     return @"无IP";
 }
 
-// 一次性读取 IOKit AppleSmartBattery 底层寄存器与全机状态（耗时 < 0.2ms，0内存泄漏，支持超容电池 >100% 识别）
 static void agCollectRealHardwareAndBatteryTelemetry(NSString **outPillText, NSString **outFullCardText, NSString **outVoiceSpeechText, NSString **outSystemPromptInject) {
     typedef CFMutableDictionaryRef (*AG_IOServiceMatchingFunc)(const char *name);
     typedef uint32_t (*AG_IOServiceGetMatchingServiceFunc)(uint32_t masterPort, CFDictionaryRef matching);
@@ -7712,7 +7733,6 @@ static void agCollectRealHardwareAndBatteryTelemetry(NSString **outPillText, NSS
                             else if ([qm isKindOfClass:[NSArray class]] && [qm count] > 0) qmaxVal = [[qm firstObject] integerValue];
                         }
 
-                        // 优先采用库仑计未过滤的底层物理实测最大容量
                         if (rawMax > 800 && rawMax < 12000) realMaxMAH = rawMax;
                         else if (nomMax > 800 && nomMax < 12000) realMaxMAH = nomMax;
                         else if (qmaxVal > 800 && qmaxVal < 12000) realMaxMAH = qmaxVal;
@@ -7732,12 +7752,8 @@ static void agCollectRealHardwareAndBatteryTelemetry(NSString **outPillText, NSS
 
                         NSInteger rawTemp = [bat[@"Temperature"] integerValue];
                         if (rawTemp > 2500 && rawTemp < 3500) {
-                            // 开尔文 0.1K 转摄氏度 或 0.01°C
-                            if (rawTemp > 2600 && rawTemp < 3300) {
-                                tempCelsius = (rawTemp / 100.0);
-                            } else {
-                                tempCelsius = (rawTemp - 2731.5) / 10.0;
-                            }
+                            if (rawTemp > 2600 && rawTemp < 3300) tempCelsius = (rawTemp / 100.0);
+                            else tempCelsius = (rawTemp - 2731.5) / 10.0;
                         } else if (rawTemp > 500 && rawTemp <= 2500) {
                             tempCelsius = rawTemp / 100.0;
                         }
@@ -7765,7 +7781,6 @@ static void agCollectRealHardwareAndBatteryTelemetry(NSString **outPillText, NSS
         rawCurrentMAH = (NSInteger)round((double)realMaxMAH * uiBatPct / 100.0);
     }
 
-    // 核心：不设 100% 封顶锁！精准计算对比苹果原厂设计容量的真实物理健康度（如超容电池 110.9%）
     double realPhysicalHealthPct = ((double)realMaxMAH / (double)MAX(1, baseDesignMAH)) * 100.0;
     double bmsRelativeHealthPct  = ((double)realMaxMAH / (double)MAX(1, bmsDesignMAH)) * 100.0;
     NSInteger extraMAHOverOfficial = realMaxMAH - baseDesignMAH;
@@ -7778,7 +7793,7 @@ static void agCollectRealHardwareAndBatteryTelemetry(NSString **outPillText, NSS
     } else if (realPhysicalHealthPct >= 99.0) {
         batteryGradeNote = @"🌟 满血巅峰状态";
     } else if (realPhysicalHealthPct < 80.0) {
-        batteryGradeNote = @"⚠️ 電池明显老化 (建议更换超容电芯)";
+        batteryGradeNote = @"⚠️ 电池明显老化 (建议更换超容电芯)";
     }
 
     double watts = (voltageMV > 0 && amperageMA != 0) ? ((double)voltageMV * fabs((double)amperageMA) / 1000000.0) : 0.0;
@@ -7833,24 +7848,24 @@ static void agCollectRealHardwareAndBatteryTelemetry(NSString **outPillText, NSS
 
     if (outVoiceSpeechText) {
         if (realPhysicalHealthPct > 100.5 && extraMAHOverOfficial >= 20) {
-            *outVoiceSpeechText = [NSString stringWithFormat:@"已为您读取底层硬件数据：当前电量还剩 %d%%，剩余 %ld 毫安时。检测到您更换了超容电池，苹果官方原厂容量为 %ld 毫安时，您这块电池底层实测满电容量高达 %ld 毫安时，真实物理健康度为 %.1f%%，比官方原厂多出 %ld 毫安时！已循环充电 %@，当前电池温度 %@，剩余存储空间 %.1f GB。",
+            *outVoiceSpeechText = [NSString stringWithFormat:@"已读取底层硬件数据：当前电量 %d%%，剩余 %ld 毫安时。检测到您更换了超容电池，苹果官方原厂容量 %ld 毫安时，底层实测满电容量高达 %ld 毫安时，真实物理健康度为 %.1f%%，比官方原厂多出 %ld 毫安时！已循环充电 %@，电池温度 %@，剩余存储 %.1f GB。",
                                    uiBatPct, (long)rawCurrentMAH, (long)baseDesignMAH, (long)realMaxMAH, realPhysicalHealthPct, (long)extraMAHOverOfficial, cycleStr, tempStr, freeROM];
         } else {
-            *outVoiceSpeechText = [NSString stringWithFormat:@"已为您读取底层硬件数据：当前电量还剩 %d%%，剩余 %ld 毫安时。底层实测最大容量 %ld 毫安时，官方原厂设计容量 %ld 毫安时，真实物理健康度为 %.1f%%，系统表显 %@，已循环充电 %@，当前电池温度 %@，剩余存储空间 %.1f GB。",
+            *outVoiceSpeechText = [NSString stringWithFormat:@"已读取底层硬件数据：当前电量 %d%%，剩余 %ld 毫安时。底层实测最大容量 %ld 毫安时，官方原厂容量 %ld 毫安时，真实物理健康度为 %.1f%%，系统表显 %@，已循环充电 %@，电池温度 %@，剩余存储 %.1f GB。",
                                    uiBatPct, (long)rawCurrentMAH, (long)realMaxMAH, (long)baseDesignMAH, realPhysicalHealthPct, surfStr, cycleStr, tempStr, freeROM];
         }
     }
 
     if (outSystemPromptInject) {
         *outSystemPromptInject = [NSString stringWithFormat:
-            @"\n【本机 IOKit AppleSmartBattery 实时底层硬件真实数据（当用户询问电池、电量、健康度、是否超容、循环次数、手机温度、充电快慢、内存、存储、IP、音量、亮度或定位时，请直接用亲切自然的中文口语汇报以下真实底层数值，严禁说自己看不到）】\n"
+            @"\n【本机 IOKit AppleSmartBattery 实时底层硬件真实数据（当用户询问电池、电量、健康度、是否超容、循环次数、手机温度、充电快慢、内存、存储、IP、音量、亮度或定位时，请直接用中文口语汇报以下真实数值）】\n"
             @"- 机型：%@ (iOS %@)\n"
-            @"- 当前电量：%d%% (当前实时剩余物理容量：%ld mAh)\n"
-            @"- 底层库仑计实测满电最大容量：%ld mAh (苹果官方原厂设计容量：%ld mAh，排线标称容量：%ld mAh)\n"
-            @"- 真实物理电池健康度（未封顶）：%.1f%% (系统表面显示最大容量：%@，状态鉴定：%@)\n"
-            @"- 真实充电循环次数：%@ | 电池实时物理温度：%@ | 充放电状态：%@\n"
-            @"- 运行内存 (RAM)：已用 %.2f GB / 总计 %.2f GB (%d%%) | 机身存储 (ROM)：剩余可用 %.1f GB / 总计 %.0f GB\n"
-            @"- 当前网络：%@ (局域网 IP：%@) | 当前音量：%d%% | 当前屏幕亮度：%d%% | 当前定位状态：%@\n",
+            @"- 当前电量：%d%% (实时剩余容量：%ld mAh)\n"
+            @"- 底层库仑计实测满电容量：%ld mAh (苹果官方原厂容量：%ld mAh，排线标称：%ld mAh)\n"
+            @"- 真实物理电池健康度（未封顶）：%.1f%% (系统表显：%@，状态：%@)\n"
+            @"- 循环次数：%@ | 电池温度：%@ | 充放电：%@\n"
+            @"- 运存 RAM：已用 %.2fG/%.2fG (%d%%) | 存储 ROM：剩余 %.1fG/%.0fG\n"
+            @"- 网络：%@ (IP：%@) | 音量：%d%% | 亮度：%d%% | 定位：%@\n",
             modelName, [[UIDevice currentDevice] systemVersion],
             uiBatPct, (long)rawCurrentMAH,
             (long)realMaxMAH, (long)baseDesignMAH, (long)bmsDesignMAH,
@@ -8096,7 +8111,7 @@ static void agCollectRealHardwareAndBatteryTelemetry(NSString **outPillText, NSS
 - (void)handleClipboardAndAutoType:(NSString *)text;
 @end
 
-// ====== 全场景 Agent 幂等防重、超容电池直读与双擎视觉替换块 3 开始 ======
+// ====== 全场景 Agent 连招提权、价格比大小秒点与超容电池替换块 3 开始 ======
 @interface GeminiAssistantManager (AGSystemAgentUpgrades)
 - (void)openApplicationByName:(NSString *)appName;
 - (void)sendWeChatMessageToTarget:(NSString *)target content:(NSString *)content;
@@ -11297,9 +11312,8 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 [self throttledExpandAndScrollTextViewForce:NO];
 
                 // ====== 实时看屏推帧与防重复执行替换块 2 开始 ======
-                // 当用户在实时语音中询问当前屏幕/页面内容（且非“点击/点一下”操作指令）时，静默截取当前屏幕推给 Live 视觉流，避免与点击 OCR 重复截屏撞车！
                 NSString *curSpoken = self.currentVoiceQueryBuffer;
-                BOOL isTapIntent = ([curSpoken containsString:@"点击"] || [curSpoken containsString:@"点一下"] || [curSpoken containsString:@"点开"] || [curSpoken containsString:@"点选"]);
+                BOOL isTapIntent = ([curSpoken containsString:@"点击"] || [curSpoken containsString:@"点一下"] || [curSpoken containsString:@"点开"] || [curSpoken containsString:@"点选"] || [curSpoken containsString:@"最贵"] || [curSpoken containsString:@"第"]);
                 if (!isTapIntent && curSpoken.length >= 3 &&
                     ([curSpoken containsString:@"屏幕"] || [curSpoken containsString:@"页面"] ||
                      [curSpoken containsString:@"界面"] || [curSpoken containsString:@"看下"] ||
@@ -11331,9 +11345,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                     }
                 }
 
-                // 延长语音中途防抖至 0.75s，防止用户说话半途换气停顿被提前截断抢跑
+                // 0.32s 极速触发：话音刚落立即执行本地指令，绝不拖泥带水！
                 [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(checkDeferredVoiceLocalCommand) object:nil];
-                [self performSelector:@selector(checkDeferredVoiceLocalCommand) withObject:nil afterDelay:0.75];
+                [self performSelector:@selector(checkDeferredVoiceLocalCommand) withObject:nil afterDelay:0.32];
             }
         }
 
@@ -11346,18 +11360,17 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 [self.currentVoiceQueryBuffer setString:@""];
                 if ([self tryExecuteDirectLocalCommand:fullVoiceCmd]) {
                     self.lastLocalActionExecTime = [[NSDate date] timeIntervalSince1970];
-                    // 若是查询电池/健康度/温度/内存/歌名等播报类指令，不掐断扬声器，让语音完整报出真实底层数据！
-                    BOOL isReadAloudQuery = ([fullVoiceCmd containsString:@"电池"] || [fullVoiceCmd containsString:@"电量"] ||
-                                             [fullVoiceCmd containsString:@"健康"] || [fullVoiceCmd containsString:@"寿命"] ||
-                                             [fullVoiceCmd containsString:@"循环"] || [fullVoiceCmd containsString:@"温度"] ||
-                                             [fullVoiceCmd containsString:@"多少度"] || [fullVoiceCmd containsString:@"内存"] ||
-                                             [fullVoiceCmd containsString:@"运存"] || [fullVoiceCmd containsString:@"存储"] ||
-                                             [fullVoiceCmd containsString:@"空间"] || [fullVoiceCmd containsString:@"什么歌"] ||
-                                             [fullVoiceCmd containsString:@"ip"] || [fullVoiceCmd containsString:@"IP"] ||
-                                             [fullVoiceCmd containsString:@"复制的内容"] || [fullVoiceCmd containsString:@"剪贴板"]);
-                    if (!isReadAloudQuery && self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
-                        [self.pcmPlayerNode stop];
-                    }
+                    // 关键修复：递增 currentTurnPlaybackID 并归零 pendingPlayBuffersCount，派发到 audioPlayQueue 线程安全停止音频，彻底消除多线程崩溃与 51 包积压卡慢！
+                    self.currentTurnPlaybackID++;
+                    self.pendingPlayBuffersCount = 0;
+                    self.aiPlaybackEndTime = 0;
+                    if (self.pcm24kStagingBuffer) [self.pcm24kStagingBuffer setLength:0];
+                    dispatch_async(self.audioPlayQueue, ^{
+                        if (self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
+                            [self.pcmPlayerNode stop];
+                            [self.pcmPlayerNode play];
+                        }
+                    });
                     return;
                 }
             }
@@ -12296,9 +12309,16 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     if ([self tryExecuteDirectLocalCommand:fullCmd]) {
         self.lastLocalActionExecTime = [[NSDate date] timeIntervalSince1970];
         [self.currentVoiceQueryBuffer setString:@""];
-        if (self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
-            [self.pcmPlayerNode stop];
-        }
+        self.currentTurnPlaybackID++;
+        self.pendingPlayBuffersCount = 0;
+        self.aiPlaybackEndTime = 0;
+        if (self.pcm24kStagingBuffer) [self.pcm24kStagingBuffer setLength:0];
+        dispatch_async(self.audioPlayQueue, ^{
+            if (self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
+                [self.pcmPlayerNode stop];
+                [self.pcmPlayerNode play];
+            }
+        });
         return;
     }
 }
@@ -12307,8 +12327,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
 
 static NSString *gLastExecutedActionSignature = nil;
 static NSTimeInterval gLastExecutedActionTimestamp = 0;
+static NSString *gLastOpenedSearchPlatform = nil;
+static NSTimeInterval gLastOpenedPlatformTime = 0;
 
-// 播报并向实时语音流同步真实硬件结果（无论在 WebSocket Live 还是离线模式都能亲口说出来）
 static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSString *speechText) {
     if (!mgr || !speechText || speechText.length == 0) return;
     if (mgr.isWebSocketConnected && mgr.liveWebSocketTask && mgr.activeModeTab != AGConfigTabPureText) {
@@ -12364,7 +12385,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         }
         if (actionList.count > 0) {
             if (outExecuted) *outExecuted = YES;
-            self.lastLocalActionExecTime = now; // 关键修复：立即更新执行时间戳，杜绝 parts / delta / turnComplete 连环重复触发！
+            self.lastLocalActionExecTime = now;
             NSTimeInterval cumulativeDelay = 0.0;
             for (NSUInteger i = 0; i < actionList.count; i++) {
                 NSDictionary *act = actionList[i];
@@ -12377,9 +12398,9 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
                 }
                 NSString *actType = act[@"type"] ?: @"";
                 if ([actType isEqualToString:@"open_app"] || [actType isEqualToString:@"search"] || [actType isEqualToString:@"navigation"] || [actType isEqualToString:@"open_url"]) {
-                    cumulativeDelay += 2.0;
+                    cumulativeDelay += 2.3;
                 } else {
-                    cumulativeDelay += 1.1;
+                    cumulativeDelay += 1.2;
                 }
             }
         }
@@ -12394,26 +12415,33 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
 
     static NSRegularExpression *wxPat1 = nil, *wxPat2 = nil, *wxPat3 = nil;
     static NSRegularExpression *numRe = nil, *timerRe = nil, *alarmRe = nil;
-    static NSRegularExpression *searchRegex = nil, *naviRegex = nil, *musicRegex = nil;
+    static NSRegularExpression *searchRegex = nil, *directSearchRe = nil, *naviRegex = nil, *musicRegex = nil;
     static NSRegularExpression *openRegex = nil, *callRegex = nil, *smsRegex = nil;
+    static NSRegularExpression *compactComboRe = nil, *multiChainRe = nil, *invertedTapRe = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        // 1. 一气呵成紧凑三连招正则（如：“打开淘宝搜索手机帮我点击最贵的” / “打开京东搜充电宝点第三个”）
+        compactComboRe = [NSRegularExpression regularExpressionWithPattern:@"(?:在|去|用|打开|启动)?(淘宝|京东|拼多多|美团|抖音|b站|哔哩哔哩|小红书|知乎|微博|百度|闲鱼)(?:里|上|app)?(?:，|,|\\s)*(?:然后|接着|再)?(?:帮我|给我)?(?:搜一下|搜索一下|查找一下|找一下|搜索|搜|找|买)(?:一下)?(.+?)(?:，|,|\\s)*(?:然后|接着|再)?(?:帮我|给我|再去)?(?:点击|点一下|点开|点选|点|选择|选)(.+)$" options:0 error:nil];
+        // 2. 通用多步“然后/接着/再”连招切分正则（置于最高优先级，支持2步或3步连招！）
+        multiChainRe = [NSRegularExpression regularExpressionWithPattern:@"^(.+?)(?:，|,|。|\\s)+(?:然后|接着|再帮我|再去|然后再|接着再)(?:帮我|给我)?(.+)$" options:0 error:nil];
+        // 3. 倒装点击句式正则（如：“打开我屏幕上面现在有一个按钮是电池。让我点击”）
+        invertedTapRe = [NSRegularExpression regularExpressionWithPattern:@"(?:按钮|图标|选项|文字|数字|地方)(?:是|叫|为)[“\"'「]?([^”\"'」，。！？,.!?]+?)[”\"'」]?(?:，|,|。|\\s)*(?:让我|帮我|给我|你)?(?:点击|点一下|点开|点选|点|打开)" options:0 error:nil];
+
         wxPat1 = [NSRegularExpression regularExpressionWithPattern:@"(?:打开微信|在微信|用微信|微信)(?:里|中)?(?:给|向|跟|发给|告诉|对)(.+?)(?:发消息|发信息|发一句话|发个消息|发条微信|发微信|发|说|留言)(?:说|内容是|：|:)?(.+)$" options:0 error:nil];
         wxPat2 = [NSRegularExpression regularExpressionWithPattern:@"(?:给|向|跟|对)(.+?)(?:发微信|发条微信|发个微信|发微信消息|微信留言|微信说)(?:说|内容是|：|:)?(.+)$" options:0 error:nil];
         wxPat3 = [NSRegularExpression regularExpressionWithPattern:@"(?:发微信|发条微信|微信发消息)(?:给|发给|向)(.+?)(?:说|内容是|：|:)?(.+)$" options:0 error:nil];
         numRe = [NSRegularExpression regularExpressionWithPattern:@"(\\d{1,3})" options:0 error:nil];
         timerRe = [NSRegularExpression regularExpressionWithPattern:@"(?:定个|设个|设置|开启|来个)?(\\d{1,3})(?:分钟|分|秒)(?:的)?(?:倒计时|计时器)" options:0 error:nil];
         alarmRe = [NSRegularExpression regularExpressionWithPattern:@"(?:定个|设个|设置|定一个)?(?:明天|明早|早上|上午|下午|晚上)?(\\d{1,2})(?:点|时|:|：)(?:(\\d{1,2})分?)?(?:的)?闹钟" options:0 error:nil];
-        searchRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:在|去|用|打开)(淘宝|京东|拼多多|美团|抖音|b站|哔哩哔哩|小红书|知乎|微博|百度)(?:里|上|app)?(?:帮我)?(?:搜一下|搜索一下|查找一下|找一下|搜索|搜|找|买|看)(?:一下)?(.+)$" options:0 error:nil];
+        searchRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:在|去|用|打开|启动)(淘宝|京东|拼多多|美团|抖音|b站|哔哩哔哩|小红书|知乎|微博|百度|闲鱼)(?:里|上|app)?(?:，|,|\\s)*(?:帮我)?(?:搜一下|搜索一下|查找一下|找一下|搜索|搜|找|买|看)(?:一下)?(.+)$" options:0 error:nil];
+        directSearchRe = [NSRegularExpression regularExpressionWithPattern:@"^(?:再|帮我|给我)?(?:搜一下|搜索一下|查找一下|找一下|搜索|搜)(?:一下)?([^，。！？,.!?\\s]+)$" options:0 error:nil];
         naviRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:打开|用|使用)?(?:高德地图|百度地图|苹果地图|高德|百度|地图)?(?:帮我)?(?:导航|驾车|骑行|步行)?(?:到|去|前往|去往)(.+?)(?:怎么走|怎么去|吧|呢)?$" options:0 error:nil];
         musicRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:在网易云|在qq音乐|听|播放)(?:搜|播|听)?([^，。！？,.!?\\s]+)" options:0 error:nil];
-        // 关键修复：允许句中带口语前缀，并剥离句尾标点，彻底解决“帮我打开天气。”、“你直接帮我打开百度输入法。”带句号匹配失败的 Bug！
-        openRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:^|你|直接|先|现在|麻烦|快)(?:打开|启动|开启|进入|进一下|进到|跳到|切到|切换到|调出|运行|唤起|我想看|开一下)([^，。！？,.!?\\s”\"\']+?)(?:吧|呢|啊|呀|哦)?$" options:0 error:nil];
+        openRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:^|你|直接|先|现在|麻烦|快|我)(?:打开|启动|开启|进入|进一下|进到|跳到|切到|切换到|调出|运行|唤起|我想看|开一下)([^，。！？,.!?\\s”\"\']+?)(?:吧|呢|啊|呀|哦)?$" options:0 error:nil];
         callRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:给|拨打)([^，。！？,.!?\\s]+?)(?:打电话|呼叫|的电话)" options:0 error:nil];
         smsRegex = [NSRegularExpression regularExpressionWithPattern:@"给(.+?)发(?:短信|信息)(?:说|内容是)?(.+)$" options:0 error:nil];
     });
 
-    // 彻底剥离首尾空白与中英文句号、问号、感叹号，消除语音转写标点干扰
     NSMutableCharacterSet *trimSet = [NSMutableCharacterSet whitespaceAndNewlineCharacterSet];
     [trimSet formUnionWithCharacterSet:[NSCharacterSet characterSetWithCharactersInString:@"。！？，、,.!?；;：:“”\"'"]];
     NSString *cmd = [[cmdText stringByTrimmingCharactersInSet:trimSet] lowercaseString];
@@ -12430,19 +12458,88 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         ];
     });
     for (NSString *negKw in sQueryNegativeKeywords) {
-        if ([cmd containsString:negKw]) {
-            return NO;
-        }
+        if ([cmd containsString:negKw]) return NO;
     }
 
-    NSString *cleanCmd = [cmd stringByReplacingOccurrencesOfString:@"帮我" withString:@""];
+    NSString *cleanCmd = [cmd stringByReplacingOccurrencesOfString:@"把我" withString:@""];
+    cleanCmd = [cleanCmd stringByReplacingOccurrencesOfString:@"帮我" withString:@""];
     cleanCmd = [cleanCmd stringByReplacingOccurrencesOfString:@"请你" withString:@""];
     cleanCmd = [cleanCmd stringByReplacingOccurrencesOfString:@"麻烦" withString:@""];
     cleanCmd = [cleanCmd stringByReplacingOccurrencesOfString:@"请" withString:@""];
     cleanCmd = [cleanCmd stringByReplacingOccurrencesOfString:@"把" withString:@""];
     cleanCmd = [cleanCmd stringByTrimmingCharactersInSet:trimSet];
 
-    // --- 虚拟定位与反检测中心自然语言毫秒直通车 ---
+    // 剥离单步句子开头的“然后再 / 然后 / 接着”（解决“[03:45:21] 然后再帮我搜索手机”开头带连词的问题）
+    NSArray<NSString *> *leadingConnectors = @[@"然后再", @"接着再", @"然后", @"接着", @"再"];
+    for (NSString *lc in leadingConnectors) {
+        if ([cleanCmd hasPrefix:lc] && cleanCmd.length > lc.length) {
+            cleanCmd = [[cleanCmd substringFromIndex:lc.length] stringByTrimmingCharactersInSet:trimSet];
+            break;
+        }
+    }
+
+    // ==================== 【第 0 最高优先级】一气呵成紧凑连招与多步“然后”连招拆解 ====================
+    // 0.1 匹配“打开淘宝搜索手机帮我点击最贵的” / “打开淘宝，然后搜索手机，然后再点第三个”
+    NSTextCheckingResult *comboMatch = [compactComboRe firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
+    if (comboMatch && comboMatch.numberOfRanges >= 4) {
+        NSString *pltName = [[cleanCmd substringWithRange:[comboMatch rangeAtIndex:1]] stringByTrimmingCharactersInSet:trimSet];
+        NSString *searchKw = [[cleanCmd substringWithRange:[comboMatch rangeAtIndex:2]] stringByTrimmingCharactersInSet:trimSet];
+        NSString *tapTarget = [[cleanCmd substringWithRange:[comboMatch rangeAtIndex:3]] stringByTrimmingCharactersInSet:trimSet];
+        if (pltName.length > 0 && searchKw.length > 0 && tapTarget.length > 0) {
+            agLiveDiagLog(@"COMBO_EXEC", @"Step1: Search [%@] for [%@] -> Step2 (2.4s later): Tap [%@]", pltName, searchKw, tapTarget);
+            gLastOpenedSearchPlatform = pltName;
+            gLastOpenedPlatformTime = [[NSDate date] timeIntervalSince1970];
+            [self executeActionDictionary:@{@"type": @"search", @"keyword": searchKw, @"platform": pltName}];
+            // 等待 2.4 秒让淘宝/京东搜索结果页商品加载出来，然后自动执行点击（如“最贵的”或“第三个”）！
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                gLastExecutedActionSignature = nil; // 允许连招第 2 步立即通过幂等网关
+                [self executeActionDictionary:@{@"type": @"ui_tap_text", @"text": tapTarget}];
+            });
+            return YES;
+        }
+    }
+
+    // 0.2 匹配任意含“然后 / 接着 / 再去”的多步复合连招（绝不再被后面的单步点击截胡！）
+    NSTextCheckingResult *chainMatch = [multiChainRe firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
+    if (chainMatch && chainMatch.numberOfRanges >= 3) {
+        NSString *step1Str = [[cleanCmd substringWithRange:[chainMatch rangeAtIndex:1]] stringByTrimmingCharactersInSet:trimSet];
+        NSString *step2Str = [[cleanCmd substringWithRange:[chainMatch rangeAtIndex:2]] stringByTrimmingCharactersInSet:trimSet];
+        if (step1Str.length >= 2 && step2Str.length >= 2) {
+            // 若第1步是“打开淘宝”、第2步开头是“搜索手机...”，直接合并成一步跳转淘宝搜索页，省去中间冷启动等待！
+            NSRegularExpression *openOnlyRe = [NSRegularExpression regularExpressionWithPattern:@"(?:打开|启动|去)(淘宝|京东|拼多多|美团|抖音|b站|哔哩哔哩|小红书|知乎|微博|百度|闲鱼)$" options:0 error:nil];
+            NSTextCheckingResult *m1 = [openOnlyRe firstMatchInString:step1Str options:0 range:NSMakeRange(0, step1Str.length)];
+            if (m1 && ([step2Str hasPrefix:@"搜索"] || [step2Str hasPrefix:@"搜"])) {
+                NSString *plt = [step1Str substringWithRange:[m1 rangeAtIndex:1]];
+                NSString *mergedCmd = [NSString stringWithFormat:@"在%@%@", plt, step2Str];
+                return [self tryExecuteDirectLocalCommand:mergedCmd];
+            }
+
+            BOOL step1Handled = [self tryExecuteDirectLocalCommand:step1Str];
+            if (step1Handled) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    gLastExecutedActionSignature = nil;
+                    if (![self tryExecuteDirectLocalCommand:step2Str]) {
+                        [self performAIVisionScreenAgentWithGoal:step2Str step:1 maxSteps:2];
+                    }
+                });
+                return YES;
+            } else {
+                return [self tryExecuteDirectLocalCommand:step2Str];
+            }
+        }
+    }
+
+    // 0.3 匹配倒装点击句式（如日志 [03:47:15]：“打开我屏幕上面现在有一个按钮是电池。让我点击”）
+    NSTextCheckingResult *invMatch = [invertedTapRe firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
+    if (invMatch && invMatch.numberOfRanges >= 2) {
+        NSString *invTarget = [[cleanCmd substringWithRange:[invMatch rangeAtIndex:1]] stringByTrimmingCharactersInSet:trimSet];
+        if (invTarget.length > 0) {
+            [self executeActionDictionary:@{@"type": @"ui_tap_text", @"text": invTarget}];
+            return YES;
+        }
+    }
+
+    // --- 虚拟定位与反检测中心 ---
     if ([cleanCmd containsString:@"恢复真实定位"] || [cleanCmd containsString:@"关闭虚拟定位"] ||
         [cleanCmd containsString:@"还原定位"] || [cleanCmd containsString:@"取消虚拟定位"] ||
         [cleanCmd containsString:@"恢复定位"]) {
@@ -12450,7 +12547,6 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         [self showActionBanner:@"🛰️ 已恢复真实硬件 GPS 定位"];
         return YES;
     }
-
     if ([cleanCmd containsString:@"打开虚拟定位设置"] || [cleanCmd containsString:@"定位设置中心"] || [cleanCmd containsString:@"反检测中心"]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             AGLocationSpoofSettingsViewController *vc = [[AGLocationSpoofSettingsViewController alloc] init];
@@ -12459,7 +12555,6 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         });
         return YES;
     }
-
     if ([cleanCmd containsString:@"考勤防检测"] || [cleanCmd containsString:@"打卡防检测"]) {
         [[AGLocationSpoofManager sharedSpoofer] enableAttendanceStealthPreset];
         return YES;
@@ -12469,10 +12564,6 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
     NSTextCheckingResult *locMatch = [locPinRegex firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
     if (locMatch && locMatch.numberOfRanges > 1) {
         NSString *targetPlace = [[cleanCmd substringWithRange:[locMatch rangeAtIndex:1]] stringByTrimmingCharactersInSet:trimSet];
-        NSRange thenRange = [targetPlace rangeOfString:@"然后"];
-        if (thenRange.location != NSNotFound) targetPlace = [targetPlace substringToIndex:thenRange.location];
-        NSRange andRange = [targetPlace rangeOfString:@"并"];
-        if (andRange.location != NSNotFound) targetPlace = [targetPlace substringToIndex:andRange.location];
         if (targetPlace.length >= 2) {
             [self showActionBanner:[NSString stringWithFormat:@"📍 正在锁定虚拟定位：%@...", targetPlace]];
             [[AGLocationSpoofManager sharedSpoofer] resolvePlaceAndPin:targetPlace completion:nil];
@@ -12721,7 +12812,35 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         return YES;
     }
 
-    // 10. 👆 自然口语全向滑动手势、长按、连点、回到顶部、指定位置打字与双擎智能点击
+    // 10. 🛍️ 平台搜索与当前已打开 App 内直接搜索（置于单步点击之前，防止被误拦截！）
+    NSTextCheckingResult *searchMatch = [searchRegex firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
+    if (searchMatch && searchMatch.numberOfRanges >= 3) {
+        NSString *pltName = [cleanCmd substringWithRange:[searchMatch rangeAtIndex:1]];
+        NSString *kw = [[cleanCmd substringWithRange:[searchMatch rangeAtIndex:2]] stringByTrimmingCharactersInSet:trimSet];
+        if (kw.length > 0) {
+            gLastOpenedSearchPlatform = pltName;
+            gLastOpenedPlatformTime = [[NSDate date] timeIntervalSince1970];
+            [self executeActionDictionary:@{@"type": @"search", @"keyword": kw, @"platform": pltName}];
+            return YES;
+        }
+    }
+    // 支持在刚打开的淘宝/京东等 App 内直接说“搜索手机” / “然后再帮我搜索手机”！
+    NSTextCheckingResult *directSearchMatch = [directSearchRe firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
+    if (directSearchMatch && directSearchMatch.numberOfRanges >= 2) {
+        NSString *kw = [[cleanCmd substringWithRange:[directSearchMatch rangeAtIndex:1]] stringByTrimmingCharactersInSet:trimSet];
+        if (kw.length > 0) {
+            NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+            if (gLastOpenedSearchPlatform.length > 0 && (now - gLastOpenedPlatformTime < 120.0)) {
+                [self executeActionDictionary:@{@"type": @"search", @"keyword": kw, @"platform": gLastOpenedSearchPlatform}];
+            } else {
+                NSString *goalStr = [NSString stringWithFormat:@"点击搜索框并输入「%@」并回车提交", kw];
+                [self executeActionDictionary:@{@"type": @"ui_vision_agent", @"goal": goalStr}];
+            }
+            return YES;
+        }
+    }
+
+    // 10A. 👆 自然口语全向滑动手势、长按、连点、回到顶部、指定位置打字与双擎智能点击
     if ([cleanCmd containsString:@"下一个视频"] || [cleanCmd containsString:@"刷下一个"] || [cleanCmd containsString:@"往下滑"] || [cleanCmd containsString:@"往下翻"] || [cleanCmd containsString:@"往下刷"] || [cleanCmd containsString:@"向上滑"]) {
         [self executeActionDictionary:@{@"type": @"ui_gesture", @"gesture": @"swipe_up"}];
         return YES;
@@ -12755,7 +12874,6 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         return YES;
     }
 
-    // 10A. ⌨️ 在屏幕指定位置/输入框打字
     NSRegularExpression *visualTypeRe = [NSRegularExpression regularExpressionWithPattern:@"(?:在|到|点|点击)?(?:当前页面|屏幕|页面)?(?:的|上|里)?(搜索框|搜索栏|输入框|聊天框|文本框|地址栏|评论框)?(?:里|中|上)?(?:打字|输入|填入|填写|键入)[“\"'「：:]?([^”\"'」，。！？,.!?]+)[”\"'」]?" options:0 error:nil];
     NSTextCheckingResult *vTypeMatch = [visualTypeRe firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
     if (vTypeMatch && vTypeMatch.numberOfRanges >= 3) {
@@ -12777,13 +12895,15 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         }
     }
 
-    // 10B. 👆 点击屏幕上的文字、按钮或方位图标（同时支持“打开左下角的第一个按钮”、“选第一个XX”）
+    // 10B. 👆 点击屏幕上的文字、价格（最贵的/最便宜的）、第N个结果或数字（如“点 4999 这个数字的”）
     BOOL hasSpatialButtonHint = (([cleanCmd containsString:@"左上角"] || [cleanCmd containsString:@"右上角"] ||
                                   [cleanCmd containsString:@"左下角"] || [cleanCmd containsString:@"右下角"] ||
                                   [cleanCmd containsString:@"第一个"] || [cleanCmd containsString:@"第二个"] ||
-                                  [cleanCmd containsString:@"第三个"] || [cleanCmd containsString:@"最后一个"]) &&
-                                 ([cleanCmd containsString:@"打开"] || [cleanCmd containsString:@"选"] || [cleanCmd containsString:@"按钮"] || [cleanCmd containsString:@"图标"]));
-    NSRegularExpression *smartTapRe = [NSRegularExpression regularExpressionWithPattern:@"(?:在当前页面|在当全页面|在当前屏幕|在屏幕上|在页面上|现在页面的|现在屏幕上的|屏幕上现在的)?(?:点击|点一下|点开|点选|按下|按一下|点|选择|选)[“\"'「]?([^”\"'」，。！？,.!?]+)[”\"'」]?" options:0 error:nil];
+                                  [cleanCmd containsString:@"第三个"] || [cleanCmd containsString:@"第四个"] ||
+                                  [cleanCmd containsString:@"最后一个"] || [cleanCmd containsString:@"最贵"] ||
+                                  [cleanCmd containsString:@"最便宜"]) &&
+                                 ([cleanCmd containsString:@"打开"] || [cleanCmd containsString:@"选"] || [cleanCmd containsString:@"按钮"] || [cleanCmd containsString:@"图标"] || [cleanCmd containsString:@"结果"] || [cleanCmd containsString:@"商品"]));
+    NSRegularExpression *smartTapRe = [NSRegularExpression regularExpressionWithPattern:@"^(?:你|我|先|再|现在)?(?:在当前页面|在当全页面|在当前屏幕|在屏幕上|在页面上|现在页面的|现在屏幕上的|屏幕上现在的)?(?:点击|点一下|点开|点选|按下|按一下|点|选择|选)[“\"'「]?([^”\"'」，。！？,.!?]+)[”\"'」]?" options:0 error:nil];
     NSTextCheckingResult *smartTapMatch = [smartTapRe firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
     if (smartTapMatch && smartTapMatch.numberOfRanges > 1) {
         NSString *rawTarget = [[cleanCmd substringWithRange:[smartTapMatch rangeAtIndex:1]] stringByTrimmingCharactersInSet:trimSet];
@@ -12798,7 +12918,10 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
             }
         }
         NSArray<NSString *> *stripSuffixes = @[
+            @"这个数字的按钮", @"这个数字的", @"这个数字", @"这几个字的按钮", @"这几个字的", @"这几个字",
+            @"那几个字的", @"那几个字", @"这个词的", @"这个词",
             @"两个字的按钮", @"三个字的按钮", @"四个字的按钮", @"两个字", @"三个字", @"四个字",
+            @"的搜索结果", @"搜索结果", @"的结果", @"结果",
             @"的那个按钮", @"那个按钮", @"的按钮", @"按钮", @"的选项", @"选项", @"的"
         ];
         for (NSString *sfx in stripSuffixes) {
@@ -12812,22 +12935,24 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
             return YES;
         }
     } else if (hasSpatialButtonHint) {
-        [self executeActionDictionary:@{@"type": @"ui_vision_agent", @"goal": cleanCmd}];
+        [self executeActionDictionary:@{@"type": @"ui_tap_text", @"text": cleanCmd}];
         return YES;
     }
 
     // 11. 🔋 超容电池真实健康度(>100%)、循环次数、实时温度、快充功率、运存、存储、IP、当前定位全维度查询
-    if ([cmd containsString:@"电池"] || [cmd containsString:@"电量"] || [cmd containsString:@"健康度"] ||
-        [cmd containsString:@"电池健康"] || [cmd containsString:@"电池寿命"] || [cmd containsString:@"最大容量"] ||
-        [cmd containsString:@"循环次数"] || [cmd containsString:@"循环多少次"] || [cmd containsString:@"超容"] ||
-        [cmd containsString:@"多少毫安"] || [cmd containsString:@"多少电"] || [cmd containsString:@"剩余电量"] ||
-        [cmd containsString:@"充电功率"] || [cmd containsString:@"充电多快"] || [cmd containsString:@"多少瓦"] ||
-        [cmd containsString:@"多少度"] || [cmd containsString:@"烫不烫"] || [cmd containsString:@"手机温度"] ||
-        [cmd containsString:@"电池温度"] || [cmd containsString:@"内存"] || [cmd containsString:@"运存"] ||
-        [cmd containsString:@"存储"] || [cmd containsString:@"空间"] || [cmd containsString:@"容量"] ||
-        [cmd containsString:@"手机状态"] || [cmd containsString:@"手机体检"] || [cmd containsString:@"机身存储"] ||
-        [cmd containsString:@"还剩多少g"] || [cmd containsString:@"ip地址"] || [cmd containsString:@"连的什么wifi"] ||
-        ([cmd containsString:@"定位"] && ([cmd containsString:@"在哪"] || [cmd containsString:@"开了吗"] || [cmd containsString:@"状态"]))) {
+    BOOL isScreenButtonContext = ([cmd containsString:@"屏幕"] || [cmd containsString:@"页面"] || [cmd containsString:@"按钮"] || [cmd containsString:@"图标"] || [cmd containsString:@"点击"]);
+    if (!isScreenButtonContext &&
+        ([cmd containsString:@"电池"] || [cmd containsString:@"电量"] || [cmd containsString:@"健康度"] ||
+         [cmd containsString:@"电池健康"] || [cmd containsString:@"电池寿命"] || [cmd containsString:@"最大容量"] ||
+         [cmd containsString:@"循环次数"] || [cmd containsString:@"循环多少次"] || [cmd containsString:@"超容"] ||
+         [cmd containsString:@"多少毫安"] || [cmd containsString:@"多少电"] || [cmd containsString:@"剩余电量"] ||
+         [cmd containsString:@"充电功率"] || [cmd containsString:@"充电多快"] || [cmd containsString:@"多少瓦"] ||
+         [cmd containsString:@"多少度"] || [cmd containsString:@"烫不烫"] || [cmd containsString:@"手机温度"] ||
+         [cmd containsString:@"电池温度"] || [cmd containsString:@"内存"] || [cmd containsString:@"运存"] ||
+         [cmd containsString:@"存储"] || [cmd containsString:@"空间"] || [cmd containsString:@"容量"] ||
+         [cmd containsString:@"手机状态"] || [cmd containsString:@"手机体检"] || [cmd containsString:@"机身存储"] ||
+         [cmd containsString:@"还剩多少g"] || [cmd containsString:@"ip地址"] || [cmd containsString:@"连的什么wifi"] ||
+         ([cmd containsString:@"定位"] && ([cmd containsString:@"在哪"] || [cmd containsString:@"开了吗"] || [cmd containsString:@"状态"])))) {
         [self executeActionDictionary:@{@"type": @"device_status"}];
         return YES;
     }
@@ -12863,167 +12988,127 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
 
     // 14. 🟢 移动支付、扫码、乘车码与生活服务深度直达
     if ([cmd containsString:@"微信"] && [cmd containsString:@"扫"]) {
-        [self executeActionDictionary:@{@"type": @"wechat_shortcut", @"feature": @"scan"}];
-        return YES;
+        [self executeActionDictionary:@{@"type": @"wechat_shortcut", @"feature": @"scan"}]; return YES;
     }
     if ([cmd containsString:@"微信"] && ([cmd containsString:@"付"] || [cmd containsString:@"买单"])) {
-        [self executeActionDictionary:@{@"type": @"wechat_shortcut", @"feature": @"pay"}];
-        return YES;
+        [self executeActionDictionary:@{@"type": @"wechat_shortcut", @"feature": @"pay"}]; return YES;
     }
     if ([cmd containsString:@"微信"] && [cmd containsString:@"收"]) {
-        [self executeActionDictionary:@{@"type": @"wechat_shortcut", @"feature": @"receipt"}];
-        return YES;
+        [self executeActionDictionary:@{@"type": @"wechat_shortcut", @"feature": @"receipt"}]; return YES;
     }
     if ([cmd containsString:@"微信"] && [cmd containsString:@"圈"]) {
-        [self executeActionDictionary:@{@"type": @"wechat_shortcut", @"feature": @"moments"}];
-        return YES;
+        [self executeActionDictionary:@{@"type": @"wechat_shortcut", @"feature": @"moments"}]; return YES;
     }
     if ([cmd isEqualToString:@"扫一扫"] || [cmd isEqualToString:@"扫码"]) {
-        [self executeActionDictionary:@{@"type": @"wechat_shortcut", @"feature": @"scan"}];
-        return YES;
+        [self executeActionDictionary:@{@"type": @"wechat_shortcut", @"feature": @"scan"}]; return YES;
     }
     if ([cmd containsString:@"支付宝"] && [cmd containsString:@"扫"]) {
-        [self executeActionDictionary:@{@"type": @"alipay_shortcut", @"feature": @"scan"}];
-        return YES;
+        [self executeActionDictionary:@{@"type": @"alipay_shortcut", @"feature": @"scan"}]; return YES;
     }
     if ([cmd containsString:@"乘车码"] || ([cmd containsString:@"支付宝"] && ([cmd containsString:@"公交"] || [cmd containsString:@"地铁"] || [cmd containsString:@"乘车"]))) {
-        [self executeActionDictionary:@{@"type": @"alipay_shortcut", @"feature": @"bus"}];
-        return YES;
+        [self executeActionDictionary:@{@"type": @"alipay_shortcut", @"feature": @"bus"}]; return YES;
     }
     if ([cmd containsString:@"支付宝"] && ([cmd containsString:@"付"] || [cmd containsString:@"买单"])) {
-        [self executeActionDictionary:@{@"type": @"alipay_shortcut", @"feature": @"pay"}];
-        return YES;
+        [self executeActionDictionary:@{@"type": @"alipay_shortcut", @"feature": @"pay"}]; return YES;
     }
     if ([cmd containsString:@"支付宝"] && [cmd containsString:@"收"]) {
-        [self executeActionDictionary:@{@"type": @"alipay_shortcut", @"feature": @"receipt"}];
-        return YES;
+        [self executeActionDictionary:@{@"type": @"alipay_shortcut", @"feature": @"receipt"}]; return YES;
     }
     if ([cmd containsString:@"蚂蚁森林"] || [cmd containsString:@"收能量"] || [cmd containsString:@"收取能量"]) {
-        [self openURLString:@"alipays://platformapi/startapp?appId=60000002"];
-        return YES;
+        [self openURLString:@"alipays://platformapi/startapp?appId=60000002"]; return YES;
     }
     if ([cmd containsString:@"蚂蚁庄园"] || [cmd containsString:@"喂小鸡"] || [cmd containsString:@"喂鸡"]) {
-        [self openURLString:@"alipays://platformapi/startapp?appId=66666674"];
-        return YES;
+        [self openURLString:@"alipays://platformapi/startapp?appId=66666674"]; return YES;
     }
     if ([cmd containsString:@"支付宝"] && ([cmd containsString:@"快递"] || [cmd containsString:@"查件"])) {
-        [self openURLString:@"alipays://platformapi/startapp?appId=20000754"];
-        return YES;
+        [self openURLString:@"alipays://platformapi/startapp?appId=20000754"]; return YES;
     }
     if ([cmd containsString:@"医保"] && ([cmd containsString:@"码"] || [cmd containsString:@"凭证"])) {
-        [self openURLString:@"alipays://platformapi/startapp?appId=20000067"];
-        return YES;
+        [self openURLString:@"alipays://platformapi/startapp?appId=20000067"]; return YES;
     }
     if ([cmd containsString:@"云闪付"] && [cmd containsString:@"扫"]) {
-        [self openURLString:@"upwallet://native/scanCode"];
-        return YES;
+        [self openURLString:@"upwallet://native/scanCode"]; return YES;
     }
     if ([cmd containsString:@"云闪付"] && ([cmd containsString:@"付"] || [cmd containsString:@"买单"])) {
-        [self openURLString:@"upwallet://pay"];
-        return YES;
+        [self openURLString:@"upwallet://pay"]; return YES;
     }
     if ([cmd containsString:@"云闪付"] && ([cmd containsString:@"乘车"] || [cmd containsString:@"公交"] || [cmd containsString:@"地铁"])) {
-        [self openURLString:@"upwallet://rn/rnhtmlridingcode"];
-        return YES;
+        [self openURLString:@"upwallet://rn/rnhtmlridingcode"]; return YES;
     }
     if ([cmd containsString:@"淘宝"] && [cmd containsString:@"扫"]) {
-        [self openURLString:@"taobao://tb.cn/n/scancode"];
-        return YES;
+        [self openURLString:@"taobao://tb.cn/n/scancode"]; return YES;
     }
     if ([cmd containsString:@"淘宝"] && [cmd containsString:@"购物车"]) {
-        [self openURLString:@"taobao://m.taobao.com/cart"];
-        return YES;
+        [self openURLString:@"taobao://m.taobao.com/cart"]; return YES;
     }
     if ([cmd containsString:@"京东"] && [cmd containsString:@"扫"]) {
-        [self openURLString:@"openapp.jdmobile://virtual?params=%7B%22category%22%3A%22jump%22%2C%22des%22%3A%22saoasao%22%7D"];
-        return YES;
+        [self openURLString:@"openapp.jdmobile://virtual?params=%7B%22category%22%3A%22jump%22%2C%22des%22%3A%22saoasao%22%7D"]; return YES;
     }
     if ([cmd containsString:@"京东"] && [cmd containsString:@"购物车"]) {
-        [self openURLString:@"openapp.jdmobile://virtual?params=%7B%22category%22%3A%22jump%22%2C%22des%22%3A%22cart%22%7D"];
-        return YES;
+        [self openURLString:@"openapp.jdmobile://virtual?params=%7B%22category%22%3A%22jump%22%2C%22des%22%3A%22cart%22%7D"]; return YES;
     }
     if ([cmd containsString:@"闲鱼"] && ([cmd containsString:@"发布"] || [cmd containsString:@"卖闲置"])) {
-        [self openURLString:@"fleamarket://publish"];
-        return YES;
+        [self openURLString:@"fleamarket://publish"]; return YES;
     }
     if ([cmd containsString:@"微博"] && [cmd containsString:@"扫"]) {
-        [self openURLString:@"sinaweibo://qrcode"];
-        return YES;
+        [self openURLString:@"sinaweibo://qrcode"]; return YES;
     }
     if ([cmd containsString:@"钉钉"] && [cmd containsString:@"扫"]) {
-        [self openURLString:@"dingtalk://dingtalkclient/page/scan"];
-        return YES;
+        [self openURLString:@"dingtalk://dingtalkclient/page/scan"]; return YES;
     }
     if ([cmd containsString:@"飞书"] && [cmd containsString:@"扫"]) {
-        [self openURLString:@"feishu://applink.feishu.cn/client/qrcode"];
-        return YES;
+        [self openURLString:@"feishu://applink.feishu.cn/client/qrcode"]; return YES;
     }
     if ([cmd containsString:@"58同城"] && [cmd containsString:@"扫"]) {
-        [self openURLString:@"wbmain://jump/core/capture"];
-        return YES;
+        [self openURLString:@"wbmain://jump/core/capture"]; return YES;
     }
     if ([cmd containsString:@"菜鸟"] && ([cmd containsString:@"取件码"] || [cmd containsString:@"身份码"] || [cmd containsString:@"查件"])) {
-        [self openURLString:@"cainiao://desktop/station_code"];
-        return YES;
+        [self openURLString:@"cainiao://desktop/station_code"]; return YES;
     }
     if (([cmd containsString:@"网易云"] || [cmd containsString:@"音乐"]) && [cmd containsString:@"听歌识曲"]) {
-        [self openURLString:@"orpheuswidget://recognize"];
-        return YES;
+        [self openURLString:@"orpheuswidget://recognize"]; return YES;
     }
     if ([cmd containsString:@"网易云"] && [cmd containsString:@"私人fm"]) {
-        [self openURLString:@"orpheuswidget://radio"];
-        return YES;
+        [self openURLString:@"orpheuswidget://radio"]; return YES;
     }
     if ([cmd containsString:@"qq音乐"] && [cmd containsString:@"听歌识曲"]) {
-        [self openURLString:@"qqmusic://qq.com/ui/recognize"];
-        return YES;
+        [self openURLString:@"qqmusic://qq.com/ui/recognize"]; return YES;
     }
     if ([cmd containsString:@"滴答清单"] && ([cmd containsString:@"今天"] || [cmd containsString:@"今日"] || [cmd containsString:@"查看待办"])) {
-        [self openURLString:@"ticktick://v1/show?smartlist=today"];
-        return YES;
+        [self openURLString:@"ticktick://v1/show?smartlist=today"]; return YES;
     }
     if ([cmd containsString:@"查违章"] || [cmd containsString:@"处理违章"] || [cmd containsString:@"驾照扣分"]) {
-        [self openURLString:@"tmri12123://"];
-        return YES;
+        [self openURLString:@"tmri12123://"]; return YES;
     }
     if ([cmd containsString:@"个人所得税"] || [cmd containsString:@"个税汇算"] || [cmd containsString:@"查个税"]) {
-        [self openURLString:@"taxpayer://"];
-        return YES;
+        [self openURLString:@"taxpayer://"]; return YES;
     }
     if ([cmd containsString:@"随申办"] || [cmd containsString:@"上海随申办"]) {
-        [self openURLString:@"suishenban://"];
-        return YES;
+        [self openURLString:@"suishenban://"]; return YES;
     }
     if ([cmd containsString:@"浙里办"]) {
-        [self openURLString:@"zheliban://"];
-        return YES;
+        [self openURLString:@"zheliban://"]; return YES;
     }
     if ([cmd containsString:@"大都会"] && ([cmd containsString:@"地铁"] || [cmd containsString:@"刷码"])) {
-        [self openURLString:@"metrodadouhui://"];
-        return YES;
+        [self openURLString:@"metrodadouhui://"]; return YES;
     }
     if ([cmd containsString:@"亿通行"] && ([cmd containsString:@"地铁"] || [cmd containsString:@"乘车"])) {
-        [self openURLString:@"yitongxing://"];
-        return YES;
+        [self openURLString:@"yitongxing://"]; return YES;
     }
     if ([cmd containsString:@"知乎"] && [cmd containsString:@"热榜"]) {
-        [self openURLString:@"zhihu://billboard"];
-        return YES;
+        [self openURLString:@"zhihu://billboard"]; return YES;
     }
     if ([cmd containsString:@"b站"] && [cmd containsString:@"动态"]) {
-        [self openURLString:@"bilibili://following/home"];
-        return YES;
+        [self openURLString:@"bilibili://following/home"]; return YES;
     }
     if ([cmd containsString:@"拍抖音"] || ([cmd containsString:@"抖音"] && [cmd containsString:@"拍视频"])) {
-        [self openURLString:@"snssdk1128://openRecord"];
-        return YES;
+        [self openURLString:@"snssdk1128://openRecord"]; return YES;
     }
     if ([cmd containsString:@"发小红书"] || ([cmd containsString:@"小红书"] && [cmd containsString:@"发笔记"])) {
-        [self openURLString:@"xhsdiscover://post"];
-        return YES;
+        [self openURLString:@"xhsdiscover://post"]; return YES;
     }
 
-    // 14B. ⚙️ iOS 深度系统设置直达（注意：若仅说“打开手机设置/打开设置”，优先打开设置主界面！）
+    // 14B. ⚙️ iOS 深度系统设置直达
     if (([cmd containsString:@"设置"] || [cmd containsString:@"开关"]) &&
         ![cleanCmd isEqualToString:@"打开设置"] && ![cleanCmd isEqualToString:@"打开手机设置"] && ![cleanCmd isEqualToString:@"打开系统设置"]) {
         if ([cmd containsString:@"wifi"] || [cmd containsString:@"wi-fi"] || [cmd containsString:@"无线网"] || [cmd containsString:@"局域网"]) {
@@ -13106,16 +13191,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         }
     }
 
-    // 🛍️ 平台搜索、🗺️ 地图导航、🎵 音乐搜索
-    NSTextCheckingResult *searchMatch = [searchRegex firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
-    if (searchMatch && searchMatch.numberOfRanges >= 3) {
-        NSString *pltName = [cleanCmd substringWithRange:[searchMatch rangeAtIndex:1]];
-        NSString *kw = [[cleanCmd substringWithRange:[searchMatch rangeAtIndex:2]] stringByTrimmingCharactersInSet:trimSet];
-        if (kw.length > 0) {
-            [self executeActionDictionary:@{@"type": @"search", @"keyword": kw, @"platform": pltName}];
-            return YES;
-        }
-    }
+    // 🗺️ 地图导航、🎵 音乐搜索
     NSTextCheckingResult *naviMatch = [naviRegex firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
     if (naviMatch && ([cleanCmd containsString:@"导航"] || [cleanCmd containsString:@"地图"] || [cleanCmd containsString:@"带我去"] || [cleanCmd containsString:@"怎么走"])) {
         NSString *dest = [[cleanCmd substringWithRange:[naviMatch rangeAtIndex:1]] stringByTrimmingCharactersInSet:trimSet];
@@ -13135,7 +13211,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         }
     }
 
-    // 17. 📱 语音秒开任意应用（已剥离句尾标点，支持“打开手机设置”、“你直接帮我打开百度输入法”等全部自然口语）
+    // 17. 📱 语音秒开任意应用（同时记录最近打开的搜索平台，方便下一句直接说“搜索XX”）
     if (![cleanCmd containsString:@"给"] && ![cleanCmd containsString:@"发"] && ![cleanCmd containsString:@"向"] && ![cleanCmd containsString:@"告诉"] && !hasSpatialButtonHint) {
         NSTextCheckingResult *openMatch = [openRegex firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
         NSString *targetApp = nil;
@@ -13150,6 +13226,8 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
             targetApp = cleanCmd;
         }
         if (targetApp.length > 0) {
+            gLastOpenedSearchPlatform = targetApp;
+            gLastOpenedPlatformTime = [[NSDate date] timeIntervalSince1970];
             [self executeActionDictionary:@{@"type": @"open_app", @"app": targetApp}];
             return YES;
         }
@@ -13196,30 +13274,6 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         return YES;
     }
 
-    // 20. 🤖 跨应用复合口语连招拆解（支持前半句是普通对话、后半句是手机指令，如：“用中文跟我交流，然后帮我返回桌面”）
-    if ([cleanCmd containsString:@"然后"] || [cleanCmd containsString:@"接着"] || [cleanCmd containsString:@"再帮我"] || [cleanCmd containsString:@"再去"]) {
-        NSRegularExpression *chainRe = [NSRegularExpression regularExpressionWithPattern:@"^(.+?)(?:，|,|\\s)*(?:然后|接着|再帮我|再去|再)(?:帮我)?(.+)$" options:0 error:nil];
-        NSTextCheckingResult *chainMatch = [chainRe firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
-        if (chainMatch && chainMatch.numberOfRanges >= 3) {
-            NSString *step1Str = [[cleanCmd substringWithRange:[chainMatch rangeAtIndex:1]] stringByTrimmingCharactersInSet:trimSet];
-            NSString *step2Str = [[cleanCmd substringWithRange:[chainMatch rangeAtIndex:2]] stringByTrimmingCharactersInSet:trimSet];
-            if (step1Str.length >= 2 && step2Str.length >= 2) {
-                BOOL step1Handled = [self tryExecuteDirectLocalCommand:step1Str];
-                if (step1Handled) {
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        if (![self tryExecuteDirectLocalCommand:step2Str]) {
-                            [self performAIVisionScreenAgentWithGoal:step2Str step:1 maxSteps:2];
-                        }
-                    });
-                    return YES;
-                } else {
-                    // 若前半句只是日常寒暄（如“用中文跟我交流”），直接立即执行后半句动作指令！
-                    return [self tryExecuteDirectLocalCommand:step2Str];
-                }
-            }
-        }
-    }
-
     return NO;
 }
 
@@ -13228,18 +13282,11 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
     NSString *type = dict[@"type"] ?: @"";
     if (type.length == 0) return;
 
-    // 🛡️ 全局动作唯一幂等网关：相同或同类触控/截屏动作在 1.6s 冷却期内严禁重复进入，彻底终结并发踩踏注销！
     NSString *sigParam = dict[@"text"] ?: (dict[@"goal"] ?: (dict[@"app"] ?: (dict[@"action"] ?: (dict[@"gesture"] ?: @""))));
     NSString *actionSig = [NSString stringWithFormat:@"%@|%@", type, sigParam];
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    if (gLastExecutedActionSignature && [gLastExecutedActionSignature isEqualToString:actionSig] && (now - gLastExecutedActionTimestamp < 1.6)) {
-        agLiveDiagLog(@"ACTION_DEDUP", @"Blocked duplicate action within 1.6s: %@", actionSig);
-        return;
-    }
-    if (([type isEqualToString:@"ui_tap_text"] || [type isEqualToString:@"ui_vision_agent"]) &&
-        ([gLastExecutedActionSignature hasPrefix:@"ui_tap_text|"] || [gLastExecutedActionSignature hasPrefix:@"ui_vision_agent|"]) &&
-        (now - gLastExecutedActionTimestamp < 1.5)) {
-        agLiveDiagLog(@"ACTION_DEDUP", @"Blocked overlapping visual tap within 1.5s: %@", actionSig);
+    if (gLastExecutedActionSignature && [gLastExecutedActionSignature isEqualToString:actionSig] && (now - gLastExecutedActionTimestamp < 1.5)) {
+        agLiveDiagLog(@"ACTION_DEDUP", @"Blocked duplicate action within 1.5s: %@", actionSig);
         return;
     }
     gLastExecutedActionSignature = [actionSig copy];
@@ -13332,6 +13379,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
             if (!snap || !snap.CGImage) return;
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
                 @autoreleasepool {
+                    UIImage *holdImg = snap;
                     VNDetectBarcodesRequest *qrReq = [[VNDetectBarcodesRequest alloc] initWithCompletionHandler:^(VNRequest * _Nonnull request, NSError * _Nullable error) {
                         for (VNBarcodeObservation *obs in request.results) {
                             if ([obs isKindOfClass:[VNBarcodeObservation class]] && obs.payloadStringValue.length > 0) {
@@ -13352,8 +13400,9 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
                             [[AGGlobalActionPillWindow sharedPill] showActionPill:@"⚠️ 当前屏幕上未识别到二维码"];
                         });
                     }];
-                    VNImageRequestHandler *h = [[VNImageRequestHandler alloc] initWithCGImage:snap.CGImage options:@{}];
+                    VNImageRequestHandler *h = [[VNImageRequestHandler alloc] initWithCGImage:holdImg.CGImage options:@{}];
                     [h performRequests:@[qrReq] error:nil];
+                    holdImg = nil;
                 }
             });
         });
@@ -13364,6 +13413,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
             if (!snap || !snap.CGImage) return;
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
                 @autoreleasepool {
+                    UIImage *holdImg = snap;
                     VNRecognizeTextRequest *txtReq = [[VNRecognizeTextRequest alloc] initWithCompletionHandler:^(VNRequest * _Nonnull request, NSError * _Nullable error) {
                         NSMutableArray<NSString *> *lines = [NSMutableArray array];
                         for (VNRecognizedTextObservation *obs in request.results) {
@@ -13380,10 +13430,12 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
                             }
                         });
                     }];
-                    txtReq.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
+                    txtReq.recognitionLevel = VNRequestTextRecognitionLevelFast;
+                    txtReq.usesLanguageCorrection = NO;
                     txtReq.recognitionLanguages = @[@"zh-Hans", @"zh-Hant", @"en-US"];
-                    VNImageRequestHandler *h = [[VNImageRequestHandler alloc] initWithCGImage:snap.CGImage options:@{}];
+                    VNImageRequestHandler *h = [[VNImageRequestHandler alloc] initWithCGImage:holdImg.CGImage options:@{}];
                     [h performRequests:@[txtReq] error:nil];
+                    holdImg = nil;
                 }
             });
         });
@@ -13871,8 +13923,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @autoreleasepool {
-            CFTypeRef rawRef = (__bridge CFTypeRef)_UICreateScreenUIImage();
-            UIImage *screenshot = rawRef ? (UIImage *)CFBridgingRelease(rawRef) : nil;
+            UIImage *screenshot = _UICreateScreenUIImage();
             if (keepMini && !self.isDismissed) {
                 [UIView animateWithDuration:0.20 animations:^{ self.overlayWindow.alpha = 1.0; }];
             }
@@ -13945,8 +13996,8 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
                 id bl = [client respondsToSelector:@selector(blueLightClient)] ? [client valueForKey:@"blueLightClient"] : nil;
                 if (bl && [bl respondsToSelector:@selector(setEnabled:)]) {
                     typedef BOOL (*SetBLFunc)(id, SEL, BOOL);
-                    SetBLFunc fn = (SetBLFunc)[bl methodForSelector:@selector(setEnabled:)];
-                    if (fn) fn(bl, @selector(setEnabled:), enable);
+                    SetBLFunc fn = (SetBLFunc)[bl methodForSelector:sel_registerName("setEnabled:")];
+                    if (fn) fn(bl, sel_registerName("setEnabled:"), enable);
                 }
             }
             [[AGGlobalActionPillWindow sharedPill] showActionPill:enable ? @"🌅 夜览护眼模式已开启" : @"🌅 夜览护眼模式已关闭"];
@@ -14257,24 +14308,37 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
     } @catch (NSException *e) {}
 }
 
-// 视觉双擎定位：单次 60ms 极速 OCR（强引用防野指针 + 内存当场回收）+ 多模态 AI 视觉大脑（复用连接池防泄漏）
+// 视觉双擎定位：40ms 本地极速 OCR（支持直接算“最贵的/最便宜的”、“第N个结果”、文字与数字）+ 几何方位点击
 - (void)handleVisualTapTextOnScreen:(NSString *)targetText {
     if (!targetText || targetText.length == 0) return;
     [self dismissOverlayIfMainCardActive];
 
     NSString *cleanT = [targetText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    BOOL isGraphicalOrSpatialTarget = ([cleanT containsString:@"图标"] || [cleanT containsString:@"拍照"] ||
-                                       [cleanT containsString:@"相机"] || [cleanT containsString:@"放大镜"] ||
-                                       [cleanT containsString:@"加号"] || [cleanT containsString:@"叉号"] ||
-                                       [cleanT containsString:@"搜索框"] || [cleanT containsString:@"输入框"] ||
-                                       [cleanT containsString:@"左上"] || [cleanT containsString:@"右上"] ||
-                                       [cleanT containsString:@"左下"] || [cleanT containsString:@"右下"] ||
-                                       [cleanT containsString:@"第一个"] || [cleanT containsString:@"第二个"] ||
-                                       [cleanT containsString:@"第三个"] || [cleanT containsString:@"最后一个"]);
-    if (isGraphicalOrSpatialTarget) {
-        [self performAIVisionScreenAgentWithGoal:[NSString stringWithFormat:@"点击屏幕上的「%@」", cleanT] step:1 maxSteps:2];
+    CGRect sb = [UIScreen mainScreen].bounds;
+
+    // 1. 屏幕四角方位词 0ms 瞬时直点
+    if ([cleanT containsString:@"左上角"]) {
+        [[AGGlobalActionPillWindow sharedPill] showActionPill:@"👆 已点击左上角区域"];
+        agSimulateScreenTapAtPoint(CGPointMake(36.0, MAX(64.0, agComputeDeviceMetrics().safeTop + 22.0)));
         return;
     }
+    if ([cleanT containsString:@"右上角"]) {
+        [[AGGlobalActionPillWindow sharedPill] showActionPill:@"👆 已点击右上角区域"];
+        agSimulateScreenTapAtPoint(CGPointMake(sb.size.width - 36.0, MAX(64.0, agComputeDeviceMetrics().safeTop + 22.0)));
+        return;
+    }
+    if ([cleanT containsString:@"左下角"]) {
+        [[AGGlobalActionPillWindow sharedPill] showActionPill:@"👆 已点击左下角按钮"];
+        agSimulateScreenTapAtPoint(CGPointMake(48.0, sb.size.height - 48.0));
+        return;
+    }
+    if ([cleanT containsString:@"右下角"]) {
+        [[AGGlobalActionPillWindow sharedPill] showActionPill:@"👆 已点击右下角按钮"];
+        agSimulateScreenTapAtPoint(CGPointMake(sb.size.width - 48.0, sb.size.height - 48.0));
+        return;
+    }
+
+    // 2. 交由本地 40ms 极速 OCR 引擎处理（支持“最贵的”、“最便宜的”、“第一个/第二个/第三个”、数字及任意文字）
     [self performVisualTapWithRetry:cleanT attempt:1 maxAttempts:1];
 }
 
@@ -14283,7 +14347,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
     if (gIsScreenVisionAgentBusy && attempt == 1) return;
     gIsScreenVisionAgentBusy = YES;
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.24 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIImage *safeScreenImg = agCaptureSafeScreenBitmapWithMaxEdge(800.0, self.overlayWindow);
         if (!safeScreenImg || !safeScreenImg.CGImage) {
             gIsScreenVisionAgentBusy = NO;
@@ -14292,17 +14356,123 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         CGRect sb = [UIScreen mainScreen].bounds;
 
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-            // 关键修复：在 @autoreleasepool 内强持有 safeScreenImg 直至 OCR 结束，并在结束后立即执行 malloc_zone_pressure_relief 回收 Vision 脏内存！
             @autoreleasepool {
                 UIImage *strongImgHold = safeScreenImg;
                 CGImageRef cgImg = strongImgHold.CGImage;
                 VNRecognizeTextRequest *req = [[VNRecognizeTextRequest alloc] initWithCompletionHandler:^(VNRequest * _Nonnull request, NSError * _Nullable error) {
                     NSString *cleanTarget = [[targetText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
-                    cleanTarget = [cleanTarget stringByReplacingOccurrencesOfString:@"按钮" withString:@""];
-                    cleanTarget = [cleanTarget stringByReplacingOccurrencesOfString:@"选项" withString:@""];
-                    cleanTarget = [cleanTarget stringByReplacingOccurrencesOfString:@"那个" withString:@""];
+                    NSArray<NSString *> *noiseWords = @[@"这个数字的", @"这个数字", @"这几个字的", @"这几个字", @"搜索结果", @"的结果", @"结果", @"按钮", @"选项", @"那个", @"商品", @"的"];
+                    for (NSString *nw in noiseWords) {
+                        if ([cleanTarget hasSuffix:nw] && cleanTarget.length > nw.length) {
+                            cleanTarget = [cleanTarget substringToIndex:cleanTarget.length - nw.length];
+                        }
+                    }
                     cleanTarget = [cleanTarget stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 
+                    // 模式 A：智能价格比大小（“最贵 / 价格最高” 或 “最便宜 / 价格最低 / 最低价”）
+                    BOOL wantMostExpensive = ([cleanTarget containsString:@"最贵"] || [cleanTarget containsString:@"最高价"] || [cleanTarget containsString:@"价格最高"]);
+                    BOOL wantCheapest      = ([cleanTarget containsString:@"最便宜"] || [cleanTarget containsString:@"最低价"] || [cleanTarget containsString:@"价格最低"]);
+                    if (wantMostExpensive || wantCheapest) {
+                        NSRegularExpression *priceRe = [NSRegularExpression regularExpressionWithPattern:@"(?:¥|￥|\\$)?\\s*(\\d{2,6}(?:\\.\\d{1,2})?)" options:0 error:nil];
+                        VNRecognizedTextObservation *extremePriceObs = nil;
+                        double extremePriceVal = wantMostExpensive ? -1.0 : 1e12;
+
+                        for (VNRecognizedTextObservation *obs in request.results) {
+                            CGRect box = obs.boundingBox;
+                            CGFloat screenY = (1.0 - CGRectGetMidY(box)) * sb.size.height;
+                            // 仅在商品列表主区域 (135pt ~ 底部栏上方 70pt) 提取价格
+                            if (screenY < 135.0 || screenY > sb.size.height - 70.0) continue;
+
+                            VNRecognizedText *top = [[obs topCandidates:1] firstObject];
+                            NSString *s = top.string ?: @"";
+                            // 过滤付款人数、评价数、好评率、折扣、年份等非价格数字
+                            if ([s containsString:@"人"] || [s containsString:@"付款"] || [s containsString:@"已售"] ||
+                                [s containsString:@"评价"] || [s containsString:@"条"] || [s containsString:@"%"] ||
+                                [s containsString:@"折"] || [s containsString:@"km"] || [s containsString:@"万"]) {
+                                continue;
+                            }
+                            BOOL hasCurrencySign = ([s containsString:@"¥"] || [s containsString:@"￥"] || [s containsString:@"元"] || [s containsString:@"到手"] || [s containsString:@"起"]);
+                            NSArray<NSTextCheckingResult *> *pMatches = [priceRe matchesInString:s options:0 range:NSMakeRange(0, s.length)];
+                            for (NSTextCheckingResult *pm in pMatches) {
+                                if (pm.numberOfRanges > 1) {
+                                    double val = [[s substringWithRange:[pm rangeAtIndex:1]] doubleValue];
+                                    // 若无货币符号，仅采纳合理商品价格区间 (50 ~ 99999) 且排除类似型号年份 (2023/2024/2025/2026)
+                                    if (!hasCurrencySign && (val < 50.0 || val > 99999.0 || (val >= 2020.0 && val <= 2027.0))) continue;
+                                    if (val <= 1.0 || val > 200000.0) continue;
+
+                                    if (wantMostExpensive && val > extremePriceVal) {
+                                        extremePriceVal = val;
+                                        extremePriceObs = obs;
+                                    } else if (wantCheapest && val < extremePriceVal) {
+                                        extremePriceVal = val;
+                                        extremePriceObs = obs;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (extremePriceObs) {
+                            CGRect box = extremePriceObs.boundingBox;
+                            CGFloat tapX = CGRectGetMidX(box) * sb.size.width;
+                            CGFloat tapY = (1.0 - CGRectGetMidY(box)) * sb.size.height;
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                gIsScreenVisionAgentBusy = NO;
+                                [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"💰 已找到%@商品 (¥%.0f) 并点击", (wantMostExpensive ? @"最贵" : @"最便宜"), extremePriceVal]];
+                                agSimulateScreenTapAtPoint(CGPointMake(tapX, tapY));
+                            });
+                            return;
+                        }
+                    }
+
+                    // 模式 B：按序点击列表第 N 项（“第一个 / 第二个 / 第三个 / 第四个 / 最后一个”）
+                    NSInteger targetOrdinal = 0;
+                    if ([cleanTarget containsString:@"第一"] || [cleanTarget containsString:@"第1"]) targetOrdinal = 1;
+                    else if ([cleanTarget containsString:@"第二"] || [cleanTarget containsString:@"第2"]) targetOrdinal = 2;
+                    else if ([cleanTarget containsString:@"第三"] || [cleanTarget containsString:@"第3"]) targetOrdinal = 3;
+                    else if ([cleanTarget containsString:@"第四"] || [cleanTarget containsString:@"第4"]) targetOrdinal = 4;
+                    else if ([cleanTarget containsString:@"最后"]) targetOrdinal = 99;
+
+                    if (targetOrdinal > 0) {
+                        // 收集主内容区 (145pt ~ screenH - 75pt) 内长度 >= 4 的商品标题行，按从上到下排序并按 58pt 间距聚类为独立商品卡片
+                        NSMutableArray<VNRecognizedTextObservation *> *contentObs = [NSMutableArray array];
+                        for (VNRecognizedTextObservation *obs in request.results) {
+                            VNRecognizedText *top = [[obs topCandidates:1] firstObject];
+                            if (!top || top.string.length < 4) continue;
+                            CGFloat sy = (1.0 - CGRectGetMidY(obs.boundingBox)) * sb.size.height;
+                            if (sy >= 145.0 && sy <= sb.size.height - 75.0) {
+                                [contentObs addObject:obs];
+                            }
+                        }
+                        [contentObs sortUsingComparator:^NSComparisonResult(VNRecognizedTextObservation *a, VNRecognizedTextObservation *b) {
+                            CGFloat ya = (1.0 - CGRectGetMidY(a.boundingBox)) * sb.size.height;
+                            CGFloat yb = (1.0 - CGRectGetMidY(b.boundingBox)) * sb.size.height;
+                            return (ya < yb) ? NSOrderedAscending : NSOrderedDescending;
+                        }];
+
+                        NSMutableArray<NSValue *> *cardCenters = [NSMutableArray array];
+                        CGFloat lastRowY = -999.0;
+                        for (VNRecognizedTextObservation *obs in contentObs) {
+                            CGFloat sy = (1.0 - CGRectGetMidY(obs.boundingBox)) * sb.size.height;
+                            CGFloat sx = CGRectGetMidX(obs.boundingBox) * sb.size.width;
+                            if (sy - lastRowY >= 62.0) {
+                                [cardCenters addObject:[NSValue valueWithCGPoint:CGPointMake(sx, sy)]];
+                                lastRowY = sy;
+                            }
+                        }
+
+                        if (cardCenters.count > 0) {
+                            NSUInteger pickIdx = (targetOrdinal == 99) ? (cardCenters.count - 1) : MIN((NSUInteger)(targetOrdinal - 1), cardCenters.count - 1);
+                            CGPoint pt = [cardCenters[pickIdx] CGPointValue];
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                gIsScreenVisionAgentBusy = NO;
+                                [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"👆 已精准点击第 %lu 项结果", (unsigned long)(pickIdx + 1)]];
+                                agSimulateScreenTapAtPoint(pt);
+                            });
+                            return;
+                        }
+                    }
+
+                    // 模式 C：文字与数字精确匹配（如“4999”、“电池”、“个人热点”、“通知”）
                     VNRecognizedTextObservation *bestObs = nil;
                     NSInteger bestScore = 0;
 
@@ -14315,7 +14485,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
                         if ([candStr isEqualToString:cleanTarget]) {
                             score = 100;
                         } else if ([candStr containsString:cleanTarget]) {
-                            score = 82 - (NSInteger)MIN(30, (NSInteger)candStr.length - (NSInteger)cleanTarget.length);
+                            score = 85 - (NSInteger)MIN(30, (NSInteger)candStr.length - (NSInteger)cleanTarget.length);
                         } else if (cleanTarget.length >= 2 && [cleanTarget containsString:candStr] && candStr.length >= 2) {
                             score = 68;
                         }
@@ -14331,7 +14501,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
                         CGFloat tapY = (1.0 - CGRectGetMidY(box)) * sb.size.height;
                         dispatch_async(dispatch_get_main_queue(), ^{
                             gIsScreenVisionAgentBusy = NO;
-                            [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"👆 已精准定位并点击「%@」", targetText]];
+                            [[AGGlobalActionPillWindow sharedPill] showActionPill:[NSString stringWithFormat:@"👆 已精准定位并点击「%@」", cleanTarget]];
                             agSimulateScreenTapAtPoint(CGPointMake(tapX, tapY));
                         });
                     } else {
@@ -14341,6 +14511,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
                         });
                     }
                 }];
+                // 采用 Accurate 识别中文与数字，配合 @autoreleasepool 与 malloc_zone_pressure_relief 即用即清
                 req.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
                 req.usesLanguageCorrection = NO;
                 req.recognitionLanguages = @[@"zh-Hans", @"zh-Hant", @"en-US"];
@@ -14602,7 +14773,9 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         }
     });
 }
-// ====== 全场景 Agent 幂等防重、超容电池直读与双擎视觉替换块 3 结束 ======
+// ====== 全场景 Agent 连招提权、价格比大小秒点与超容电池替换块 3 结束 ======
+
+
 
 
 - (void)handleOrientationLock:(BOOL)lock {
