@@ -28,6 +28,7 @@
 #import <VideoToolbox/VideoToolbox.h>
 #import <ImageIO/ImageIO.h>
 #import <Speech/Speech.h>
+#import <ReplayKit/ReplayKit.h>
 #import <fcntl.h>
 #import <unistd.h>
 #import <sys/stat.h>
@@ -172,6 +173,58 @@ extern char **environ;
 - (void)manualRetranslateTapped;
 - (void)performInSituRetranslateQuietly;
 - (void)handleGlobalTouchStateChanged:(BOOL)isTouching eventMask:(uint32_t)mask;
+@end
+
+@interface AGScreenTranslationOverlay : UIWindow <SFSpeechRecognizerDelegate, NSURLSessionDataDelegate>
+@property (nonatomic, strong) UIView *cropBoxView;
+@property (nonatomic, strong) UIVisualEffectView *subtitleGlassBg;
+@property (nonatomic, strong) UILabel *liveOriginalPreviewLabel; // 顶行：20ms 实时原声逐词跳字条
+@property (nonatomic, strong) UITextView *translatedTextView;    // 主区域：微切片流式追加中文字幕
+@property (nonatomic, strong) UIView *resizeCornerHandle;
+
+@property (nonatomic, strong) UIButton *compactLangBtn;
+@property (nonatomic, strong) UIButton *compactCloseBtn;
+@property (nonatomic, strong) UIButton *audioSourceToggleBtn;
+@property (nonatomic, assign) BOOL isInternalRecordingMode;
+@property (nonatomic, assign) BOOL isAudioTranslatingActive;
+@property (nonatomic, assign) NSTimeInterval lastAppAudioTime;
+@property (nonatomic, assign) float savedSystemVolume;
+@property (nonatomic, assign) BOOL isReplayKitCapturing;
+@property (nonatomic, strong) NSTimer *silentFallbackTimer;
+@property (nonatomic, strong) NSTimer *audioKeepAliveTimer;
+@property (nonatomic, copy) NSString *lastOcrRecognizedText;
+
+// 识别源语种切换 (0=英语, 1=日语, 2=韩语)
+@property (nonatomic, assign) NSInteger sourceLangIndex;
+
+// 四级零延迟微切片与双通道并发流水线状态
+@property (nonatomic, copy) NSString *lastRecognizedText;
+@property (nonatomic, copy) NSString *lastTranslatedChunkText;   // 当前微切片的最新流式译文
+@property (nonatomic, strong) NSMutableString *committedHistoryText; // 已定稿锁定的历史译文流
+@property (nonatomic, copy) NSString *committedSourceContext;    // 上一微切片原文（仅作上文语境参考）
+@property (nonatomic, assign) NSUInteger latestTranslationSeq;
+@property (nonatomic, assign) NSUInteger highestDisplayedSeq;
+@property (nonatomic, strong) NSURLSession *transStreamSession;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSMutableDictionary *> *pipelineTasksMap;
+@property (nonatomic, copy) NSString *queuedNextChunkText;
+@property (nonatomic, assign) BOOL queuedNextChunkShouldCommit;
+
+// 硬件级低延迟无损收音与混合识别引擎
+@property (nonatomic, strong) SFSpeechRecognizer *speechRecognizer;
+@property (nonatomic, strong) SFSpeechAudioBufferRecognitionRequest *speechRequest;
+@property (nonatomic, strong) SFSpeechRecognitionTask *speechTask;
+@property (nonatomic, strong) AVAudioEngine *voiceFallbackEngine;
+@property (nonatomic, assign) NSUInteger committedTranscriptLength;
+@property (nonatomic, copy) NSString *latestPartialSegment;
+@property (nonatomic, strong) NSTimer *microDebounceTimer;
+@property (nonatomic, assign) NSTimeInterval lastSpeechTranslateTime;
+
++ (instancetype)sharedOverlay;
+- (void)toggleTranslatorFloatingBox;
+- (void)showTranslatorFloatingBox;
+- (void)hideTranslatorFloatingBox;
+- (void)applySavedFontSizeAndStyle;
+- (void)resetAllTranslationHistoryAndUI;
 @end
 
 @interface AGGlobalActionPillWindow : UIWindow
@@ -16736,57 +16789,7 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
 
 UIKIT_EXTERN UIImage *_UICreateScreenUIImage(void);
 
-@interface AGScreenTranslationOverlay : UIWindow <SFSpeechRecognizerDelegate, NSURLSessionDataDelegate>
-@property (nonatomic, strong) UIView *cropBoxView;
-@property (nonatomic, strong) UIVisualEffectView *subtitleGlassBg;
-@property (nonatomic, strong) UILabel *liveOriginalPreviewLabel; // 顶行：20ms 实时原声逐词跳字条
-@property (nonatomic, strong) UITextView *translatedTextView;    // 主区域：微切片流式追加中文字幕
-@property (nonatomic, strong) UIView *resizeCornerHandle;
 
-@property (nonatomic, strong) UIButton *compactLangBtn;
-@property (nonatomic, strong) UIButton *compactCloseBtn;
-@property (nonatomic, strong) UIButton *audioSourceToggleBtn;
-@property (nonatomic, assign) BOOL isInternalRecordingMode;
-@property (nonatomic, assign) BOOL isAudioTranslatingActive;
-@property (nonatomic, assign) NSTimeInterval lastAppAudioTime;
-@property (nonatomic, assign) float savedSystemVolume;
-@property (nonatomic, assign) BOOL isReplayKitCapturing;
-@property (nonatomic, strong) NSTimer *silentFallbackTimer;
-@property (nonatomic, strong) NSTimer *audioKeepAliveTimer;
-@property (nonatomic, copy) NSString *lastOcrRecognizedText;
-
-// 识别源语种切换 (0=英语, 1=日语, 2=韩语)
-@property (nonatomic, assign) NSInteger sourceLangIndex;
-
-// 四级零延迟微切片与双通道并发流水线状态
-@property (nonatomic, copy) NSString *lastRecognizedText;
-@property (nonatomic, copy) NSString *lastTranslatedChunkText;   // 当前微切片的最新流式译文
-@property (nonatomic, strong) NSMutableString *committedHistoryText; // 已定稿锁定的历史译文流
-@property (nonatomic, copy) NSString *committedSourceContext;    // 上一微切片原文（仅作上文语境参考）
-@property (nonatomic, assign) NSUInteger latestTranslationSeq;
-@property (nonatomic, assign) NSUInteger highestDisplayedSeq;
-@property (nonatomic, strong) NSURLSession *transStreamSession;
-@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSMutableDictionary *> *pipelineTasksMap;
-@property (nonatomic, copy) NSString *queuedNextChunkText;
-@property (nonatomic, assign) BOOL queuedNextChunkShouldCommit;
-
-// 硬件级低延迟无损收音与混合识别引擎
-@property (nonatomic, strong) SFSpeechRecognizer *speechRecognizer;
-@property (nonatomic, strong) SFSpeechAudioBufferRecognitionRequest *speechRequest;
-@property (nonatomic, strong) SFSpeechRecognitionTask *speechTask;
-@property (nonatomic, strong) AVAudioEngine *voiceFallbackEngine;
-@property (nonatomic, assign) NSUInteger committedTranscriptLength;
-@property (nonatomic, copy) NSString *latestPartialSegment;
-@property (nonatomic, strong) NSTimer *microDebounceTimer;
-@property (nonatomic, assign) NSTimeInterval lastSpeechTranslateTime;
-
-+ (instancetype)sharedOverlay;
-- (void)toggleTranslatorFloatingBox;
-- (void)showTranslatorFloatingBox;
-- (void)hideTranslatorFloatingBox;
-- (void)applySavedFontSizeAndStyle;
-- (void)resetAllTranslationHistoryAndUI;
-@end
 
 // ==================== 翻译配置读写（100% 通用，绝不绑定单一平台） ====================
 static BOOL agTransIsEnabled(void) {
