@@ -853,3 +853,46 @@
   - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
   - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
   - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+
+---
+
+## 2026-10-28: 14 处界面文字与排版精简美化（Run #183 编译与全量分发）
+
+### 1. 核心特性升级
+- **定位与防检测面板精简美化**：
+  1. 页面标题升级为 `📍虚拟定位与防检测`（原“📍 虚拟定位中心”）。
+  2. 防检测底部说明小字优化更新为：“防检测功能适用考勤类，所有软件使用建议暂时，长期需仅选中生效。伪装参数很多容易导致有些软件断网打不开页面。”
+  3. 生效范围行简写为 `范围`。
+  4. 伪装 Wi-Fi 名称与伪装路由器 MAC 地址 placeholder 去除“选填”，精简为 `(如: Office-5G)` 与 `(如: a4:50:46:12:34:56)`。
+- **主设置中心面板精简美化**：
+  5. 顶部标题简化为 `天使守护1.0.0测试版`。
+  6. 跑马灯标题去除版本号冗余，精简为 `🌈 启用「呼吸跑马灯边框」`。
+  7. 唤出形态卡片标题去除小尾巴，精简为 `✨ 唤出灵动形态与停靠位置`。
+  8. 唤出形态分段控件精简名称：`水晶`、`极光`、`天际`、`全息`、`大界面`。
+  9. 停靠位置控件去除冗余括号，精简为 `👆 停在顶部`。
+  10. 模块引导标题精简提示：“🛠️ 四大独立功能模块 (独立 API·可重复填写需确认API具备该模型)：”，增加自适应字号缩放。
+  11. 独立模块 1 标题精简为 `🎙️ 实时语音`，副标题精简为 `WebSocket语音通话`。
+  12. 独立模块 2 标题精简为 `📹语音视觉`。
+  13. 独立模块 3 标题精简为 `💬文本交流`，副标题精简为 `纯文本`。
+  14. 独立模块 4（含设置卡片头部）标题精简为 `🌐 屏幕翻译与听译`，副标题精简为 `跟随翻译与同传听译`。
+
+### 2. 源码镜像与哈希校验 (100% 同步)
+- **Tweak.x 源码 (1,247,729 字节)**:
+  - SHA256: `1F28A82AB26690FF7225B7CD20C43B547C03DD81453ADF84DB09D76BD1A0F145`
+- **同步镜像 (1,247,729 字节, SHA256 100% 一致)**:
+  - [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt)
+  - [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt)
+  - [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x)
+  - [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt)
+
+### 3. CI 编译产物验证与全量分发 (Run #183, Commit: faf351d)
+- **Deb 校验 (Pure XZ, 0% Zstandard)**:
+  - **Rootless (arm64)**: `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb` (493,452 字节, SHA256: `212D9122B537ADA6343FE7B7ECE471FE35164950F7FE1FED7B5EAC91DC7E7CE2`, valid: true)
+  - **RootHide (arm64e)**: `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb` (323,008 字节, SHA256: `97EC8113FCF2948C8FAC47A01135791644BC85A45E54CB04E90B997B51B52BCC`, valid: true)
+- **全量分发路径**:
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
