@@ -3150,7 +3150,7 @@ static void agSettingsPanelTickDarwinCallback(CFNotificationCenterRef center, vo
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"📍 虚拟定位中心";
+    self.title = @"📍虚拟定位与防检测";
     self.view.backgroundColor = [UIColor colorWithRed:0.05 green:0.06 blue:0.11 alpha:1.0];
     if (@available(iOS 13.0, *)) {
         self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
@@ -3556,7 +3556,7 @@ static void agSettingsPanelTickDarwinCallback(CFNotificationCenterRef center, vo
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section == 0) return @"提示：地图上的绿色圆点 🟢 代表你当前已生效的虚拟位置；打开受控软件时，屏幕顶部会弹出绿色胶囊提示定位已接管。";
     if (section == 1) return @"• 选「所有软件」时全机生效；选「仅选中的软件」时只对你勾选的软件生效。\n• 选「走路过去」或「开车过去」再点击地图定位按钮，可在地图上直观看到你的位置沿虚线走向终点。";
-    if (section == 2) return @"开启「防检测保护」后，系统将自动隐藏虚拟定位痕迹、模拟真实卫星微抖动并防止周围真实 Wi-Fi 暴露真实位置。";
+    if (section == 2) return @"防检测功能适用考勤类，所有软件使用建议暂时，长期需仅选中生效。伪装参数很多容易导致有些软件断网打不开页面。";
     return nil;
 }
 
@@ -3671,7 +3671,7 @@ static void agSettingsPanelTickDarwinCallback(CFNotificationCenterRef center, vo
 
         if (indexPath.row == 0) {
             UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S1R0"];
-            cell.textLabel.text = @"生效范围";
+            cell.textLabel.text = @"范围";
             UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"所有软件", @"仅选中的软件", @"排除选中软件"]];
             seg.selectedSegmentIndex = scopeMode;
             [seg addTarget:self action:@selector(scopeModeSegChanged:) forControlEvents:UIControlEventValueChanged];
@@ -3754,7 +3754,7 @@ static void agSettingsPanelTickDarwinCallback(CFNotificationCenterRef center, vo
             UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S2R2"];
             cell.textLabel.text = @"伪装 Wi-Fi 名称";
             self.ssidInputField = [[UITextField alloc] initWithFrame:CGRectMake(0, 0, 175, 30)];
-            self.ssidInputField.placeholder = @"选填 (如: Office-5G)";
+            self.ssidInputField.placeholder = @"(如: Office-5G)";
             self.ssidInputField.textAlignment = NSTextAlignmentRight;
             self.ssidInputField.textColor = [UIColor colorWithRed:0.45 green:0.92 blue:1.0 alpha:1.0];
             self.ssidInputField.returnKeyType = UIReturnKeyDone;
@@ -3768,7 +3768,7 @@ static void agSettingsPanelTickDarwinCallback(CFNotificationCenterRef center, vo
             UITableViewCell *cell = [self makeBaseCellWithStyle:UITableViewCellStyleDefault reuseID:@"S2R3"];
             cell.textLabel.text = @"伪装路由器地址 (MAC)";
             self.bssidInputField = [[UITextField alloc] initWithFrame:CGRectMake(0, 0, 175, 30)];
-            self.bssidInputField.placeholder = @"选填 (如: a4:50:46:12:34:56)";
+            self.bssidInputField.placeholder = @"(如: a4:50:46:12:34:56)";
             self.bssidInputField.textAlignment = NSTextAlignmentRight;
             self.bssidInputField.textColor = [UIColor colorWithRed:0.45 green:0.92 blue:1.0 alpha:1.0];
             self.bssidInputField.returnKeyType = UIReturnKeyDone;
@@ -17751,7 +17751,7 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"✨ 天使守护 v5.8.0 配置中心";
+    self.title = @"天使守护1.0.0测试版";
     self.view.backgroundColor = [UIColor colorWithRed:0.07 green:0.06 blue:0.13 alpha:1.0];
     self.expandedModuleTab = -1;
 
@@ -17980,7 +17980,7 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
     [self.scrollView addSubview:marqueeSwitchCard];
 
     UILabel *mqTitleLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 9, cardW - 85, 22)];
-    mqTitleLbl.text = @"🌈 启用「iOS 27 呼吸跑马灯边框」";
+    mqTitleLbl.text = @"🌈 启用「呼吸跑马灯边框」";
     mqTitleLbl.textColor = [UIColor whiteColor];
     mqTitleLbl.font = [UIFont boldSystemFontOfSize:13.5];
     [marqueeSwitchCard addSubview:mqTitleLbl];
@@ -17998,7 +17998,7 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
 
     y += 68.0;
 
-    // ✨ 新增：唤出灵动形态（①水晶/②水滴/③极光/④丝绸）与（底部/顶部）位置选择卡片
+    // ✨ 唤出灵动形态与停靠位置选择卡片
     UIView *miniSummonCard = [[UIView alloc] initWithFrame:CGRectMake(pad, y, cardW, 114)];
     miniSummonCard.backgroundColor = [UIColor colorWithRed:0.13 green:0.12 blue:0.22 alpha:1.0];
     miniSummonCard.layer.cornerRadius = 16.0;
@@ -18007,19 +18007,19 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
     [self.scrollView addSubview:miniSummonCard];
 
     UILabel *msTitleLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 9, cardW - 28, 20)];
-    msTitleLbl.text = @"✨ 唤出灵动形态与停靠位置 (轻点即展开原主界面)";
+    msTitleLbl.text = @"✨ 唤出灵动形态与停靠位置";
     msTitleLbl.textColor = [UIColor whiteColor];
     msTitleLbl.font = [UIFont boldSystemFontOfSize:13.0];
     [miniSummonCard addSubview:msTitleLbl];
 
-    UISegmentedControl *styleSeg = [[UISegmentedControl alloc] initWithItems:@[@"①水晶胶囊", @"②极光水滴", @"③极光天际", @"④全息丝绸", @"大界面"]];
+    UISegmentedControl *styleSeg = [[UISegmentedControl alloc] initWithItems:@[@"水晶", @"极光", @"天际", @"全息", @"大界面"]];
     styleSeg.frame = CGRectMake(12, 34, cardW - 24, 30);
     NSInteger savedStyle = agMiniSummonStyle();
     styleSeg.selectedSegmentIndex = (savedStyle >= 1 && savedStyle <= 4) ? (savedStyle - 1) : 4;
     [styleSeg addTarget:self action:@selector(onMiniSummonStyleChanged:) forControlEvents:UIControlEventValueChanged];
     [miniSummonCard addSubview:styleSeg];
 
-    UISegmentedControl *posSeg = [[UISegmentedControl alloc] initWithItems:@[@"👇 停在底部悬浮", @"👆 停在顶部 (自动适配灵动岛/刘海)"]];
+    UISegmentedControl *posSeg = [[UISegmentedControl alloc] initWithItems:@[@"👇 停在底部悬浮", @"👆 停在顶部"]];
     posSeg.frame = CGRectMake(12, 72, cardW - 24, 30);
     posSeg.selectedSegmentIndex = agMiniSummonIsTop() ? 1 : 0;
     [posSeg addTarget:self action:@selector(onMiniSummonPosChanged:) forControlEvents:UIControlEventValueChanged];
@@ -18028,9 +18028,11 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
     y += 124.0;
 
     UILabel *tabHeader = [[UILabel alloc] initWithFrame:CGRectMake(pad + 4, y, cardW, 20)];
-    tabHeader.text = @"🛠️ 四大独立功能模块 (独立 API·手风琴折叠)：";
+    tabHeader.text = @"🛠️ 四大独立功能模块 (独立 API·可重复填写需确认API具备该模型)：";
     tabHeader.textColor = [UIColor colorWithWhite:0.86 alpha:1.0];
-    tabHeader.font = [UIFont boldSystemFontOfSize:12.5];
+    tabHeader.font = [UIFont boldSystemFontOfSize:12.0];
+    tabHeader.adjustsFontSizeToFitWidth = YES;
+    tabHeader.minimumScaleFactor = 0.78;
     [self.scrollView addSubview:tabHeader];
     y += 26.0;
 
@@ -18072,23 +18074,23 @@ static NSString *agSanitizeInternalModelTags(NSString *text) {
     UIColor *accentCol  = nil;
     switch (tab) {
         case AGConfigTabNativeLive:
-            iconTitle = @"🎙️ 纯正 Live 实时语音";
-            subDesc   = @"独立 API · WebSocket 全双工语音通话";
+            iconTitle = @"🎙️ 实时语音";
+            subDesc   = @"WebSocket语音通话";
             accentCol = [UIColor colorWithRed:0.25 green:0.68 blue:1.00 alpha:1.0];
             break;
         case AGConfigTabVideoAI:
-            iconTitle = @"📹 独立视频 AI 视觉";
-            subDesc   = @"独立 API · 实时镜头画面 + 语音交互";
+            iconTitle = @"📹语音视觉";
+            subDesc   = @"实时镜头画面 + 语音交互";
             accentCol = [UIColor colorWithRed:0.18 green:0.86 blue:0.65 alpha:1.0];
             break;
         case AGConfigTabPureText:
-            iconTitle = @"💬 纯文本打字交流";
-            subDesc   = @"独立 API · 支持任意 OpenAI/DeepSeek/中转";
+            iconTitle = @"💬文本交流";
+            subDesc   = @"纯文本";
             accentCol = [UIColor colorWithRed:0.62 green:0.45 blue:1.00 alpha:1.0];
             break;
         case AGConfigTabTranslation:
-            iconTitle = @"🌐 实时字幕与翻译";
-            subDesc   = @"独立 API · 原位跟随翻译与同传听译";
+            iconTitle = @"🌐 屏幕翻译与听译";
+            subDesc   = @"跟随翻译与同传听译";
             accentCol = [UIColor colorWithRed:0.96 green:0.62 blue:0.24 alpha:1.0];
             break;
     }
@@ -21379,7 +21381,7 @@ static UIView *hooked_AGBuildModuleCard(AngelGuardianSettingsViewController *sel
     [card addSubview:headerTapBtn];
 
     UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, cardW - 96, 22)];
-    titleLbl.text = @"🌐 实时字幕与翻译";
+    titleLbl.text = @"🌐 屏幕翻译与听译";
     titleLbl.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightBold];
     titleLbl.textColor = [UIColor whiteColor];
     [card addSubview:titleLbl];
