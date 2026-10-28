@@ -8105,7 +8105,7 @@ static NSString *agScanDylibsForCrashingSymbolInASI(NSString *asiDesc) {
     if (!asiDesc || asiDesc.length < 6) return nil;
     NSMutableArray<NSString *> *candidateSymbols = [NSMutableArray array];
 
-    NSRegularExpression *objcRe = [NSRegularExpression regularExpressionWithPattern:@"[-+]\[([A-Za-z0-9_]+)\s+([A-Za-z0-9_:]+)\]" options:0 error:nil];
+    NSRegularExpression *objcRe = [NSRegularExpression regularExpressionWithPattern:@"[-+]\\[([A-Za-z0-9_]+)\\s+([A-Za-z0-9_:]+)\\]" options:0 error:nil];
     NSArray<NSTextCheckingResult *> *matches = [objcRe matchesInString:asiDesc options:0 range:NSMakeRange(0, asiDesc.length)];
     for (NSTextCheckingResult *m in matches) {
         if (m.numberOfRanges >= 3) {
