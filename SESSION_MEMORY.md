@@ -1,6 +1,6 @@
 # TimeGuardianSiri123 项目会话记忆文件 (SESSION_MEMORY.md)
 
-> **生成时间**：2026-10-28 03:36:00 (本地时间)
+> **生成时间**：2026-10-28 12:16:00 (本地时间)
 > **会话标识**：`02de72ea-60df-4738-8977-4a4ebaf78b2f`  
 > **用途说明**：供用户切换 Google Antigravity 账号或开启新会话后，直接读取本文件无缝继承当前项目的完整开发上下文。
 
@@ -41,54 +41,53 @@
 | **E盘归档目录** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调` | 完整项目工程归档，含源码、配置及双版本 `.deb` |
 | **E盘单文件归档** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调.txt` | 钉钉可打卡版本完整代码备份 |
 | **远端 Git 仓库** | `https://github.com/jianchengw952-source/TimeGuardianSiri123.git` | GitHub 远程仓库（分支：`main`） |
-| **当前 Git Commit** | `951c0d5` | `feat(voice+trans): fix gear modal teardown crash, add native Translation.framework dual-engine with real-time toggle` |
-| **GitHub Actions 运行记录** | Run #152 (ID: `40437251405`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
+| **当前 Git Commit** | `d750f67` | `feat: add lock screen wake & keepalive, OCR screenshot stealth, RAM telemetry, and enhanced gesture/app cleanup` |
+| **GitHub Actions 运行记录** | Run #172 (ID: `40631158941`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
 
 ---
 
 ## 三、当前会话中涉及的关键文件和路径
 
 ### 1. 核心工程源码文件
-* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (19,985 行，1,075,641 字节)
-  - SHA256: `0320E70A3883FB9624EC9800A6C61C2A9D969E6C7B4309E95DAAB8054363507E`
+* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (21,900 行，1,199,416 字节)
+  - SHA256: `C467FB0C270F34F9CEFFE8EB6D9972B53FF1258DDE39EF673B41C4BDD8226DF6`
 * **[layout/DEBIAN/postinst](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/layout/DEBIAN/postinst)** (362 字节)
 * **[.github/workflows/build.yml](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/.github/workflows/build.yml)** (1,757 字节)
 
 ### 2. 四路同步镜像文件（100% 字节一致）
-* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (1,075,641 字节，SHA256: `0320E70A3883FB9624EC9800A6C61C2A9D969E6C7B4309E95DAAB8054363507E`)
-* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (1,075,641 字节，SHA256: `0320E70A3883FB9624EC9800A6C61C2A9D969E6C7B4309E95DAAB8054363507E`)
-* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (1,075,641 字节，SHA256: `0320E70A3883FB9624EC9800A6C61C2A9D969E6C7B4309E95DAAB8054363507E`)
-* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (1,075,641 字节，SHA256: `0320E70A3883FB9624EC9800A6C61C2A9D969E6C7B4309E95DAAB8054363507E`)
+* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (1,199,416 字节，SHA256: `C467FB0C270F34F9CEFFE8EB6D9972B53FF1258DDE39EF673B41C4BDD8226DF6`)
+* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (1,199,416 字节，SHA256: `C467FB0C270F34F9CEFFE8EB6D9972B53FF1258DDE39EF673B41C4BDD8226DF6`)
+* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (1,199,416 字节，SHA256: `C467FB0C270F34F9CEFFE8EB6D9972B53FF1258DDE39EF673B41C4BDD8226DF6`)
+* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (1,199,416 字节，SHA256: `C467FB0C270F34F9CEFFE8EB6D9972B53FF1258DDE39EF673B41C4BDD8226DF6`)
 * [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (50,749 字节，SHA256: `03CAC9505D0DE46612E073FC1F5606FAF65292915511D8E46C77B26EC8335B80`)
 
-### 3. 最新云端编译产物（Run #168 / Commit `7898ec5`）
-> **本次更新（补全自定义类名隐身宏 + 彻底消除 /tmp 明文痕迹 + 恢复安全无闪退版 dladdr/dyld 隐藏钩子）**：
-> 1. 补全头部隐身宏：追加 `AGInSituTranslationOverlay`、`AGGlobalActionPillWindow`、`AGLockScreenRootViewController`、`AGCardBgCanvasView`、`AGOrbCanvasView`、`AGWaveCanvasView`、`AGScreenTranslationOverlay`、`AGStreamTranslateDelegate` 共 8 个自定义类伪装映射（全面伪装为 `_UIStatusBarFloatingPillWindow` 等 UIKit 私有类），彻底抹除 Mach-O 自定义类名特征。
-> 2. 彻底抹除 `/tmp` 痕迹：`reloadGeminiPrefsCache` 移除 `geminiPrefsFilePath()`，`saveGeminiPrefs` 剔除 `/tmp/com.custom.geminisirioverlay.plist` 并主动执行 `removeItemAtPath` 清除旧残留与日志，彻底杜绝风控扫描 `/tmp` 发现越狱插件配置。
-> 3. 恢复安全无闪退版 `dladdr` 与 `_dyld_get_image_name`：
->    - `hooked_dladdr`：**仅替换路径串与符号名**，绝不触碰 `dli_fbase` 与 `dli_saddr`，杜绝 Matrix / HMD / KSCrash 等异常收集框架在栈回溯时因基址偏移下溢导致的崩溃；
->    - `hooked_dyld_get_image_name`：纯 C 静态路径池对敏感越狱 dylib 进行沙盒私有路径伪装映射。
-> 4. 纯 `xz` 压包标准，100% 兼容 Sileo。
+### 3. 最新云端编译产物（Run #172 / Commit `d750f67`）
+> **本次更新（锁屏显示+唤醒+30s防烧屏休眠 / OCR截屏胶囊隐身 / 实时运存RAM播报 / 增强语音手势指令 / 控制中心收起 / 微信好友直达 / 线程安全杀后台）**：
+> 1. 锁屏点亮+正常显示主界面：`agWakeScreenBacklightIfNeeded` 采用 `requestUserAttentionScreenWakeFromSource:reason:` 非破坏性唤醒背光与锁屏壁纸；在 `GeminiPassthroughWindow` 与 `AGGlobalActionPillWindow` 挂载 `_canShowWhileLocked = YES`；窗口启用 `_setSecure:YES`；主界面开启 30 秒安全无操作自动休眠倒计时。
+> 2. 截屏瞬时隐身：OCR 截屏时同时隐去主窗口与 `AGGlobalActionPillWindow`，杜绝 AI 识别自身胶囊误触；`agCollectRealHardwareAndBatteryTelemetry` 纳入当前物理运存 RAM（已用/空闲/总运存）实时体检与播报。
+> 3. 增强手势与语义指令：增强点击识别（支持“点”、“按”、“两个字”、“三个字”、“最贵”、“第N个”等），支持“返回”单字边缘侧滑，新增滑动同音词与慢滑手势，新增微信正则直接直达好友聊天窗口。
+> 4. 控制中心关闭与后台清理加固：支持 `control_center_close` 与 `notification_center_close` 指令及手势收起控制中心；`- (void)handleKillBackgroundApps` 主线程提取 PID、后台线程 `SIGKILL`、执行 `malloc_zone_pressure_relief` 深度释放运存并播报清理前后真实对比。
+> 5. 纯 `xz` 压包标准，100% 兼容 Sileo。
 
 * **Dopamine (Rootless arm64)**：
   - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
-  - 文件大小：`405,092` 字节
-  - SHA256: `618BB0F5F4D99A3D7968E62E583DA47F1B4F35D71005B47455A0D2105D28A284`
-  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (403,948 字节)
+  - 文件大小：`476,600` 字节
+  - SHA256: `11A916D0C6CDEA2D5B642E47155B6F280943908DDFC17BCD83CC4575F1E0C188`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (475,448 字节)
   - 分发路径：
     - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
     - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
-    - [packages/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/packages/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+    - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
 
 * **Relaxin (RootHide arm64e)**：
   - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
-  - 文件大小：`265,372` 字节
-  - SHA256: `10FCEB86D563222498C033C8540CAD65DE9756DADC25D5D25A6CA4942132D858`
-  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (262,568 字节)
+  - 文件大小：`310,620` 字节
+  - SHA256: `5BB3175B3FD550BED34A6A6679D38DB47A787FDCCDA84193AEA773FB693BB7D8`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (307,816 字节)
   - 分发路径：
     - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
     - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
-    - [packages/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/packages/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+    - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
 
 ### Run #134 验证与交付记录 (2026-10-26 09:05)
 - **Commit**: `abfd858` (*feat: natural stand offset, UI instant toggle response, and hardened anti-detection shield*)
@@ -668,6 +667,44 @@
 - **生成的 Pure XZ .deb 包**:
   - Rootless (arm64): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb` (474,684 字节, SHA256: `D0BB1DA7C5A0FE6C6EE0056866121D7579DBE307761B70C560A62A842E1CE9B1`)
   - RootHide (arm64e): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb` (308,048 字节, SHA256: `0D028E2EA021F8C1FAC1ADD15F38CFCACE77CEBB50287C610B5625282E3819B7`)
+- **已同步分发至目标目录**:
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+
+
+### Run #172 验证与交付记录 (2026-10-28 12:16)
+- **Commit**: `d750f67` (*feat: add lock screen wake & keepalive, OCR screenshot stealth, RAM telemetry, and enhanced gesture/app cleanup*)
+- **GitHub Actions Run ID**: `40631158941` (Run #172, 双架构 build 成功)
+- **4大核心修改落地**:
+  1. **锁屏正常显示主界面 + 亮屏不黑屏 + 30秒无操作自动休眠安全阀**：
+     - 前置声明 `SBIdleTimerGlobalCoordinator`、`SBControlCenterController`、`SBCoverSheetPresentationManager` 等系统私有接口；
+     - 实现 `agTouchLockScreenActivity`、`agResetSystemLockScreenIdleTimer`、`agStopLockScreenKeepAliveMonitor`；在 `agWakeScreenBacklightIfNeeded` 采用 `requestUserAttentionScreenWakeFromSource:reason:` 非破坏性唤醒背光与锁屏壁纸（严格禁用物理电源键模拟，彻底解决锁屏黑屏）；
+     - `GeminiPassthroughWindow` 与 `AGGlobalActionPillWindow` 挂载 `- (BOOL)_canShowWhileLocked { return YES; }`；
+     - 浮窗启用 `[self.overlayWindow _setSecure:YES];` 确保锁屏安全显示；
+     - 在 `startVisualAnimations` 与 `stopVisualAnimations` 部署 30 秒安全无操作自动休眠倒计时阀，防烧屏且自动恢复系统休眠计时。
+  2. **OCR 截屏瞬时隐身防误点小胶囊 + 实时运行内存 RAM 深度体检与语音播报**：
+     - `agCaptureSafeScreenBitmapWithMaxEdge` 截屏瞬间同时隐藏主界面与 `AGGlobalActionPillWindow` 小胶囊，截屏完成后无缝还原，彻底杜绝 AI 看屏点击自身悬浮组件；
+     - `agCollectRealHardwareAndBatteryTelemetry` 新增物理运存 RAM（`mach_host_self()`、`vm_stat`）实时体检、空闲内存与后台进程数统计，支持本地与 WebSocket 语音播报。
+  3. **点击“按”与前缀剥离、滑动同音词与慢滑、简短“返回”、回桌面、控制中心收起与微信打开好友聊天窗**：
+     - `isTapIntent` 扩展涵盖“点”、“按”、“两个字”、“三个字”、“四个字”、“最贵”、“最便宜”、“第”，并在触发时调用 `agTouchLockScreenActivity()` 保持活跃；
+     - `tryExecuteDirectLocalCommand` 增加 `wxOpenChatRe` 正则（如“发微信给XX”、“给XX发微信”、“打开XX的微信聊天窗”），直接在 SpringBoard 层面打开指定好友聊天会话；
+     - 增加控制中心/通知中心收起识别（`control_center_close` / `notification_center_close`）；
+     - 针对单字“返回”支持智能边缘侧滑，新增慢滑手势（`swipe_up_slow` / `swipe_down_slow`）及同音词容错，对 `ui_tap_text` 强化多层无用引导词剥离。
+  4. **控制中心关闭、清理后台线程安全 + 运存释放对比、慢滑手势与回桌面多重保障**：
+     - `executeActionDictionary:` 与手势执行引擎联动控制中心收起，若当前处于控制中心界面，优先通过 `dismissAnimated:YES` 收起控制中心；
+     - `- (void)handleKillBackgroundApps` 彻底升级为线程安全架构：主线程提取 Application Switcher 与 `FBProcessManager` 候选进程 PID，后台全局队列执行 `kill(pid, SIGKILL)`，完成后触发 `malloc_zone_pressure_relief`，测量真实清理前后运存并即时语音播报释放效果；
+     - `- (void)handleSystemControl:` 中针对 `home` / `桌面` 实行三级连击保障（先收起控制中心 -> `_simulateHomeButtonPress` -> `handleHomeButtonSinglePressUp` -> `clickedMenuButton`）。
+- **5 份镜像哈希统一 (1,199,416 字节)**:
+  - SHA256: `C467FB0C270F34F9CEFFE8EB6D9972B53FF1258DDE39EF673B41C4BDD8226DF6`
+- **D:\定位与防检测底部代码.txt (50,749 字节)**:
+  - SHA256: `03CAC9505D0DE46612E073FC1F5606FAF65292915511D8E46C77B26EC8335B80`
+- **生成的 Pure XZ .deb 包**:
+  - Rootless (arm64): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb` (476,600 字节, SHA256: `11A916D0C6CDEA2D5B642E47155B6F280943908DDFC17BCD83CC4575F1E0C188`)
+  - RootHide (arm64e): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb` (310,620 字节, SHA256: `5BB3175B3FD550BED34A6A6679D38DB47A787FDCCDA84193AEA773FB693BB7D8`)
 - **已同步分发至目标目录**:
   - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
   - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
