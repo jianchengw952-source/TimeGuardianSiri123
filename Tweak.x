@@ -7958,7 +7958,7 @@ static void agCollectRealHardwareAndBatteryTelemetry(NSString **outPillText, NSS
 
     if (outSystemPromptInject) {
         *outSystemPromptInject = [NSString stringWithFormat:
-            @"\\n【本机 IOKit AppleSmartBattery 与运行内存实时真实数据】\\n"
+            @"\\n【本机 IOKit AppleSmartBattery 与运行内存实时真实数据（提示：若用户在询问手机状态时将“电池健康度”口误说成“电子健康度/看健康度”，请汇报以下本机实测数据；但如果用户明确在问医院就诊的“电子健康卡/医保卡”或医学体检指标，请正常回答医疗问题，切勿混淆）】\\n"
             @"- 机型：%@ (iOS %@)\\n"
             @"- 运行内存 RAM：总计 %.2fG，已用 %.2fG (%d%%)，剩余可用 %.2fG (%d MB)，后台应用 %lu 个\\n"
             @"- 存储 ROM：剩余 %.1fG/%.0fG\\n"
@@ -10752,6 +10752,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     }
     [self.accumulatedReplyText setString:@""];
     [self.pendingSpeechChunk setString:@""];
+    [self.currentVoiceQueryBuffer setString:@""];
     self.activeUtteranceCount = 0;
     self.hasDetectedSpeech = NO;
 
@@ -12530,10 +12531,10 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
     static NSRegularExpression *compactComboRe = nil, *multiChainRe = nil, *invertedTapRe = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        // 1. 一气呵成紧凑三连招正则（如：“打开淘宝搜索手机帮我点击最贵的” / “打开京东搜充电宝点第三个”）
-        compactComboRe = [NSRegularExpression regularExpressionWithPattern:@"(?:在|去|用|打开|启动)?(淘宝|京东|拼多多|美团|抖音|b站|哔哩哔哩|小红书|知乎|微博|百度|闲鱼)(?:里|上|app)?(?:，|,|\\s)*(?:然后|接着|再)?(?:帮我|给我)?(?:搜一下|搜索一下|查找一下|找一下|搜索|搜|找|买)(?:一下)?(.+?)(?:，|,|\\s)*(?:然后|接着|再)?(?:帮我|给我|再去)?(?:点击|点一下|点开|点选|点|选择|选)(.+)$" options:0 error:nil];
-        // 2. 通用多步“然后/接着/再”连招切分正则（置于最高优先级，支持2步或3步连招！）
-        multiChainRe = [NSRegularExpression regularExpressionWithPattern:@"^(.+?)(?:，|,|。|\\s)+(?:然后|接着|再帮我|再去|然后再|接着再)(?:帮我|给我)?(.+)$" options:0 error:nil];
+        // 1. 一气呵成紧凑三连招正则（支持“打开淘宝搜索手机点击贵的那个” / “打开京东搜索手机，然后找到最贵的那个点进去”）
+        compactComboRe = [NSRegularExpression regularExpressionWithPattern:@"(?:在|去|用|打开|启动)?(淘宝|京东|拼多多|美团|抖音|b站|哔哩哔哩|小红书|知乎|微博|百度|闲鱼)(?:里|上|app)?(?:，|,|\\s)*(?:然后|接着|再)?(?:帮我|给我)?(?:搜一下|搜索一下|查找一下|找一下|搜索|搜|找|买)(?:一下)?(.+?)(?:，|,|\\s)*(?:然后|接着|再)?(?:帮我|给我|再去)?(?:点击|点一下|点开|点选|找到|找一下|挑一个|选一个|选择|点|选|挑)(.+?)(?:点进去|点开|打开|进去|吧|呢)?$" options:0 error:nil];
+        // 2. 通用多步“然后/接着/再”连招切分正则（支持有无逗号/空格的各种连招！）
+        multiChainRe = [NSRegularExpression regularExpressionWithPattern:@"^(.+?)(?:，|,|。|\\s)*(?:然后|接着|再帮我|再去|然后再|接着再)(?:帮我|给我)?(.+)$" options:0 error:nil];
         // 3. 倒装点击句式正则（如：“打开我屏幕上面现在有一个按钮是电池。让我点击”）
         invertedTapRe = [NSRegularExpression regularExpressionWithPattern:@"(?:按钮|图标|选项|文字|数字|地方)(?:是|叫|为)[“\"'「]?([^”\"'」，。！？,.!?]+?)[”\"'」]?(?:，|,|。|\\s)*(?:让我|帮我|给我|你)?(?:点击|点一下|点开|点选|点|打开)" options:0 error:nil];
 
@@ -12543,7 +12544,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         numRe = [NSRegularExpression regularExpressionWithPattern:@"(\\d{1,3})" options:0 error:nil];
         timerRe = [NSRegularExpression regularExpressionWithPattern:@"(?:定个|设个|设置|开启|来个)?(\\d{1,3})(?:分钟|分|秒)(?:的)?(?:倒计时|计时器)" options:0 error:nil];
         alarmRe = [NSRegularExpression regularExpressionWithPattern:@"(?:定个|设个|设置|定一个)?(?:明天|明早|早上|上午|下午|晚上)?(\\d{1,2})(?:点|时|:|：)(?:(\\d{1,2})分?)?(?:的)?闹钟" options:0 error:nil];
-        searchRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:在|去|用|打开|启动)(淘宝|京东|拼多多|美团|抖音|b站|哔哩哔哩|小红书|知乎|微博|百度|闲鱼)(?:里|上|app)?(?:，|,|\\s)*(?:帮我)?(?:搜一下|搜索一下|查找一下|找一下|搜索|搜|找|买|看)(?:一下)?(.+)$" options:0 error:nil];
+        searchRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:在|去|用|打开|启动)(淘宝|京东|拼多多|美团|抖音|b站|哔哩哔哩|小红书|知乎|微博|百度|闲鱼)(?:里|上|app)?(?:，|,|\\s)*(?:然后|接着|再)?(?:帮我|给我)?(?:搜一下|搜索一下|查找一下|找一下|搜索|搜|找|买|看)(?:一下)?(.+)$" options:0 error:nil];
         directSearchRe = [NSRegularExpression regularExpressionWithPattern:@"^(?:再|帮我|给我)?(?:搜一下|搜索一下|查找一下|找一下|搜索|搜)(?:一下)?([^，。！？,.!?\\s]+)$" options:0 error:nil];
         naviRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:打开|用|使用)?(?:高德地图|百度地图|苹果地图|高德|百度|地图)?(?:帮我)?(?:导航|驾车|骑行|步行)?(?:到|去|前往|去往)(.+?)(?:怎么走|怎么去|吧|呢)?$" options:0 error:nil];
         musicRegex = [NSRegularExpression regularExpressionWithPattern:@"(?:在网易云|在qq音乐|听|播放)(?:搜|播|听)?([^，。！？,.!?\\s]+)" options:0 error:nil];
@@ -12600,8 +12601,8 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
             gLastOpenedSearchPlatform = pltName;
             gLastOpenedPlatformTime = [[NSDate date] timeIntervalSince1970];
             [self executeActionDictionary:@{@"type": @"search", @"keyword": searchKw, @"platform": pltName}];
-            // 等待 2.4 秒让淘宝/京东搜索结果页商品加载出来，然后自动执行点击（如“最贵的”或“第三个”）！
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // 等待 3.0 秒让淘宝/京东搜索结果页商品与价格完全加载出来，然后自动执行点击（如“最贵的”或“第三个”）！
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 gLastExecutedActionSignature = nil; // 允许连招第 2 步立即通过幂等网关
                 [self executeActionDictionary:@{@"type": @"ui_tap_text", @"text": tapTarget}];
             });
@@ -13133,7 +13134,8 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
 
     // 11. 🔋 超容电池真实健康度(>100%)、运行内存(RAM)、运行速度、循环次数、实时温度、存储、IP、当前定位全维度查询
     BOOL isScreenButtonContext = ([cmd containsString:@"屏幕"] || [cmd containsString:@"页面"] || [cmd containsString:@"按钮"] || [cmd containsString:@"图标"] || [cmd containsString:@"点击"]);
-    if (!isScreenButtonContext &&
+    BOOL isMedicalContext = ([cmd containsString:@"医院"] || [cmd containsString:@"医保"] || [cmd containsString:@"挂号"] || [cmd containsString:@"就诊"] || [cmd containsString:@"健康卡"] || [cmd containsString:@"肝"] || [cmd containsString:@"胆"] || [cmd containsString:@"血"]);
+    if (!isScreenButtonContext && !isMedicalContext &&
         ([cmd containsString:@"电池"] || [cmd containsString:@"电量"] || [cmd containsString:@"健康度"] ||
          [cmd containsString:@"电池健康"] || [cmd containsString:@"电池寿命"] || [cmd containsString:@"最大容量"] ||
          [cmd containsString:@"循环次数"] || [cmd containsString:@"循环多少次"] || [cmd containsString:@"超容"] ||
@@ -14586,9 +14588,9 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
                     }
                     cleanTarget = [cleanTarget stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 
-                    // 模式 A：智能价格比大小（“最贵 / 价格最高” 或 “最便宜 / 价格最低 / 最低价”）
-                    BOOL wantMostExpensive = ([cleanTarget containsString:@"最贵"] || [cleanTarget containsString:@"最高价"] || [cleanTarget containsString:@"价格最高"]);
-                    BOOL wantCheapest      = ([cleanTarget containsString:@"最便宜"] || [cleanTarget containsString:@"最低价"] || [cleanTarget containsString:@"价格最低"]);
+                    // 模式 A：智能价格比大小（兼容“最贵 / 贵的那个 / 贵的 / 价格最高” 或 “最便宜 / 便宜的那个 / 便宜的 / 最低价”）
+                    BOOL wantMostExpensive = ([cleanTarget containsString:@"最贵"] || [cleanTarget containsString:@"贵的"] || [cleanTarget isEqualToString:@"贵"] || [cleanTarget containsString:@"最高价"] || [cleanTarget containsString:@"价格最高"]);
+                    BOOL wantCheapest      = ([cleanTarget containsString:@"最便宜"] || [cleanTarget containsString:@"便宜的"] || [cleanTarget isEqualToString:@"便宜"] || [cleanTarget containsString:@"最低价"] || [cleanTarget containsString:@"价格最低"]);
                     if (wantMostExpensive || wantCheapest) {
                         NSRegularExpression *priceRe = [NSRegularExpression regularExpressionWithPattern:@"(?:¥|￥|\\$)?\\s*(\\d{2,6}(?:\\.\\d{1,2})?)" options:0 error:nil];
                         VNRecognizedTextObservation *extremePriceObs = nil;
