@@ -1353,31 +1353,105 @@ static NSArray<NSDictionary *> *agVerifiedDefaultModelsForTab(AGConfigTab tab) {
 - (BOOL)_canShowWhileLocked { return YES; }
 @end
 
-// 锁屏/息屏状态下主动点亮屏幕硬件背光并唤醒锁屏壁纸与时钟，解决黑屏唤醒与锁屏黑底问题
+@interface SBIdleTimerGlobalCoordinator : NSObject
++ (instancetype)sharedInstance;
++ (instancetype)sharedInstanceIfExists;
+- (void)resetIdleTimer;
+- (void)resetIdleTimerForReason:(NSString *)reason;
+@end
+
+@interface SBControlCenterController : NSObject
++ (instancetype)sharedInstance;
++ (instancetype)sharedInstanceIfExists;
+- (BOOL)isVisible;
+- (BOOL)isPresented;
+- (void)presentAnimated:(BOOL)animated;
+- (void)dismissAnimated:(BOOL)animated;
+@end
+
+@interface SBCoverSheetPresentationManager : NSObject
++ (instancetype)sharedInstance;
+- (BOOL)isVisible;
+- (void)setCoverSheetPresented:(BOOL)presented animated:(BOOL)animated withCompletion:(id)completion;
+@end
+
+@interface SpringBoard (AGHomeButtonAdditions)
+- (void)_simulateHomeButtonPress;
+@end
+
+@interface SBUIController (AGHomeButtonAdditions)
+- (BOOL)handleHomeButtonSinglePressUp;
+@end
+
+static NSTimer *gLockScreenKeepAliveTimer = nil;
+static NSTimeInterval gLastLockScreenActivityTime = 0;
+static NSTimeInterval gLastWakeBacklightCallTime = 0;
+
+static void agTouchLockScreenActivity(void) {
+    gLastLockScreenActivityTime = CFAbsoluteTimeGetCurrent();
+}
+
+static void agResetSystemLockScreenIdleTimer(void) {
+    @try {
+        Class idleCls = objc_getClass("SBIdleTimerGlobalCoordinator");
+        id idleCoord = (idleCls && [idleCls respondsToSelector:@selector(sharedInstanceIfExists)])
+            ? [idleCls sharedInstanceIfExists]
+            : ((idleCls && [idleCls respondsToSelector:@selector(sharedInstance)]) ? [idleCls sharedInstance] : nil);
+        if (idleCoord) {
+            if ([idleCoord respondsToSelector:@selector(resetIdleTimerForReason:)]) {
+                [idleCoord resetIdleTimerForReason:@"AngelGuardianLockWake"];
+            } else if ([idleCoord respondsToSelector:@selector(resetIdleTimer)]) {
+                [idleCoord resetIdleTimer];
+            }
+        }
+        Class blCls = objc_getClass("SBBacklightController");
+        SBBacklightController *bl = (blCls && [blCls respondsToSelector:@selector(sharedInstanceIfExists)])
+            ? [blCls sharedInstanceIfExists]
+            : ((blCls && [blCls respondsToSelector:@selector(sharedInstance)]) ? [blCls sharedInstance] : nil);
+        if (bl && [bl respondsToSelector:@selector(_undimFromSource:)]) {
+            [bl _undimFromSource:1];
+        }
+    } @catch (NSException *e) {}
+}
+
+static void agStopLockScreenKeepAliveMonitor(void) {
+    if (gLockScreenKeepAliveTimer) {
+        [gLockScreenKeepAliveTimer invalidate];
+        gLockScreenKeepAliveTimer = nil;
+    }
+    [UIApplication sharedApplication].idleTimerDisabled = NO;
+}
+
+// 锁屏/息屏状态下主动点亮屏幕背光（严禁调用 _simulateLockButtonPress 防止把刚亮的屏幕按灭）
 static void agWakeScreenBacklightIfNeeded(void) {
+    agTouchLockScreenActivity();
+    NSTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - gLastWakeBacklightCallTime < 0.35) return;
+    gLastWakeBacklightCallTime = now;
+
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
+            Class lsmCls = objc_getClass("SBLockScreenManager");
+            SBLockScreenManager *lsm = (lsmCls && [lsmCls respondsToSelector:@selector(sharedInstanceIfExists)])
+                ? [lsmCls sharedInstanceIfExists]
+                : ((lsmCls && [lsmCls respondsToSelector:@selector(sharedInstance)]) ? [lsmCls sharedInstance] : nil);
+            if (lsm && [lsm respondsToSelector:@selector(requestUserAttentionScreenWakeFromSource:reason:)]) {
+                [lsm requestUserAttentionScreenWakeFromSource:1 reason:@"AngelGuardianVoiceWake"];
+            }
+
             Class blCls = objc_getClass("SBBacklightController");
             SBBacklightController *bl = (blCls && [blCls respondsToSelector:@selector(sharedInstanceIfExists)])
                 ? [blCls sharedInstanceIfExists]
                 : ((blCls && [blCls respondsToSelector:@selector(sharedInstance)]) ? [blCls sharedInstance] : nil);
-            BOOL isScreenCurrentlyOn = (bl && [bl respondsToSelector:@selector(screenIsOn)]) ? [bl screenIsOn] : YES;
-
-            // 若当前处于息屏黑屏状态，直接调用 SpringBoard 原生电源键亮屏，100% 唤醒原装锁屏壁纸与时钟！
-            if (!isScreenCurrentlyOn) {
-                SpringBoard *sb = (SpringBoard *)[UIApplication sharedApplication];
-                if ([sb respondsToSelector:@selector(_simulateLockButtonPress)]) {
-                    [sb _simulateLockButtonPress];
-                }
-            }
             if (bl) {
-                if ([bl respondsToSelector:@selector(turnOnScreenFullyWithBacklightSource:)]) {
-                    [bl turnOnScreenFullyWithBacklightSource:1];
-                }
                 if ([bl respondsToSelector:@selector(_undimFromSource:)]) {
                     [bl _undimFromSource:1];
                 }
+                if ([bl respondsToSelector:@selector(turnOnScreenFullyWithBacklightSource:)]) {
+                    [bl turnOnScreenFullyWithBacklightSource:1];
+                }
             }
+            agResetSystemLockScreenIdleTimer();
         } @catch (NSException *e) {}
     });
 }
@@ -6629,6 +6703,11 @@ static void agFetchCloudModelsForTab(AGConfigTab tab, NSString *endpoint, NSStri
     return ([self hitTest:point withEvent:event] != nil);
 }
 
+// 允许窗口在锁屏壁纸 (SBCoverSheetWindow) 上方直接渲染显示，解决锁屏呼唤只有震动没有界面的问题
+- (BOOL)_canShowWhileLocked {
+    return YES;
+}
+
 // 关键修复：灵动形态下绝不抢占 KeyWindow（返回 NO），只有展开为完整主界面需要打字时才允许成为 KeyWindow！
 - (BOOL)_canBecomeKeyWindow {
     if (self.miniSummonWrapper && !self.miniSummonWrapper.hidden) {
@@ -6672,6 +6751,10 @@ static void agFetchCloudModelsForTab(AGConfigTab tab, NSString *endpoint, NSStri
         [pill setupPillUI];
     });
     return pill;
+}
+
+- (BOOL)_canShowWhileLocked {
+    return YES;
 }
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
@@ -7554,18 +7637,18 @@ static void agInjectTextIntoFocusedInput(NSString *text, BOOL autoSubmit) {
 }
 
 // 安全、零双重释放、零显存残留的截屏函数（纯 ARC @autoreleasepool 管理，彻底杜绝 Double-Free 注销！）
+// 安全、零双重释放、零显存残留的截屏函数（截屏瞬间同时隐身灵动小胶囊与顶部提示条，彻底杜绝 OCR 点中插件自身字幕！）
 static UIImage *agCaptureSafeScreenBitmapWithMaxEdge(CGFloat maxEdge, UIWindow *overlayToHide) {
     __block UIImage *safeBitmap = nil;
     @autoreleasepool {
-        BOOL needHideFullCard = (overlayToHide && !overlayToHide.hidden && overlayToHide.alpha > 0.01);
-        if ([overlayToHide isKindOfClass:[GeminiPassthroughWindow class]]) {
-            GeminiPassthroughWindow *gWin = (GeminiPassthroughWindow *)overlayToHide;
-            if (gWin.miniSummonWrapper && !gWin.miniSummonWrapper.hidden && gWin.capsuleWrapper.hidden) {
-                needHideFullCard = NO;
-            }
-        }
-        CGFloat savedAlpha = needHideFullCard ? overlayToHide.alpha : 1.0;
-        if (needHideFullCard) overlayToHide.alpha = 0.0;
+        BOOL needHideOverlay = (overlayToHide && !overlayToHide.hidden && overlayToHide.alpha > 0.01);
+        CGFloat savedAlpha = needHideOverlay ? overlayToHide.alpha : 1.0;
+        if (needHideOverlay) overlayToHide.alpha = 0.0;
+
+        AGGlobalActionPillWindow *pillWin = [AGGlobalActionPillWindow sharedPill];
+        BOOL needHidePill = (pillWin && !pillWin.hidden && pillWin.alpha > 0.01);
+        CGFloat savedPillAlpha = needHidePill ? pillWin.alpha : 1.0;
+        if (needHidePill) pillWin.alpha = 0.0;
 
         UIImage *rawImg = nil;
         @try {
@@ -7573,7 +7656,8 @@ static UIImage *agCaptureSafeScreenBitmapWithMaxEdge(CGFloat maxEdge, UIWindow *
         } @catch (NSException *e) {
             rawImg = nil;
         }
-        if (needHideFullCard) overlayToHide.alpha = savedAlpha;
+        if (needHideOverlay) overlayToHide.alpha = savedAlpha;
+        if (needHidePill) pillWin.alpha = savedPillAlpha;
 
         if (rawImg && rawImg.size.width > 1.0 && rawImg.size.height > 1.0) {
             CGSize origSz = rawImg.size;
@@ -7593,7 +7677,7 @@ static UIImage *agCaptureSafeScreenBitmapWithMaxEdge(CGFloat maxEdge, UIWindow *
     return safeBitmap;
 }
 
-// ==================== 🔋 IOKit AppleSmartBattery 超容电池(>100%)与全维度底层硬件探针 ====================
+// ==================== 🔋 IOKit AppleSmartBattery 超容电池(>100%)与运行内存(RAM)全维度底层硬件探针 ====================
 static NSInteger agOfficialFactoryDesignCapacityForMachine(NSString *machine, NSString **outModelName) {
     static NSDictionary<NSString *, NSArray *> *sTable = nil;
     static dispatch_once_t onceToken;
@@ -7803,7 +7887,20 @@ static void agCollectRealHardwareAndBatteryTelemetry(NSString **outPillText, NSS
 
     double usedRAM = 0.0, totalRAM = 0.0;
     agGetDeviceMemoryInfo(&usedRAM, &totalRAM);
+    double freeRAM = MAX(0.05, totalRAM - usedRAM);
+    int freeRAMMB = (int)round(freeRAM * 1024.0);
     int ramPct = (totalRAM > 0) ? (int)roundf((usedRAM / totalRAM) * 100.0f) : 0;
+
+    NSUInteger bgAppCount = 0;
+    if ([NSThread isMainThread]) {
+        @try {
+            Class coordCls = objc_getClass("SBMainSwitcherControllerCoordinator");
+            id switcher = (coordCls && [coordCls respondsToSelector:@selector(sharedInstance)]) ? [coordCls sharedInstance] : nil;
+            if (switcher && [switcher respondsToSelector:@selector(recentAppLayouts)]) {
+                bgAppCount = [[switcher recentAppLayouts] count];
+            }
+        } @catch (NSException *e) {}
+    }
 
     NSDictionary *fs = [[NSFileManager defaultManager] attributesOfFileSystemForPath:NSHomeDirectory() error:nil];
     double freeROM = [fs[NSFileSystemFreeSize] doubleValue] / (1024.0 * 1024.0 * 1024.0);
@@ -7824,57 +7921,63 @@ static void agCollectRealHardwareAndBatteryTelemetry(NSString **outPillText, NSS
     NSString *surfStr = (surfaceHealthPct > 0) ? [NSString stringWithFormat:@"%ld%%", (long)surfaceHealthPct] : @"100%";
 
     if (outPillText) {
-        *outPillText = [NSString stringWithFormat:@"🔋电量%d%%(%ldmAh)｜真实健康度%.1f%%(%ldmAh)｜循环%@｜温度%@",
-                        uiBatPct, (long)rawCurrentMAH, realPhysicalHealthPct, (long)realMaxMAH, cycleStr, tempStr];
+        *outPillText = [NSString stringWithFormat:@"📊运存%.2fG/%.0fG(余%dMB)｜🔋电量%d%%｜健康度%.1f%%",
+                        usedRAM, totalRAM, freeRAMMB, uiBatPct, realPhysicalHealthPct];
     }
 
     if (outFullCardText) {
         NSMutableString *card = [NSMutableString string];
-        [card appendFormat:@"📱 【%@ 底层硬件深度体检报告】\n", modelName];
-        [card appendFormat:@"• 🔋 实时电量：%d%%（当前剩余 %ld mAh / 实测满电 %ld mAh）\n", uiBatPct, (long)rawCurrentMAH, (long)realMaxMAH];
+        [card appendFormat:@"📱 【%@ 底层硬件与运行内存体检报告】\\n", modelName];
+        [card appendFormat:@"• 📊 运行内存 (RAM)：已用 %.2fG / 总计 %.1fG (占用 %d%%) ｜ 剩余可用 %.2fG (%d MB)\\n", usedRAM, totalRAM, ramPct, freeRAM, freeRAMMB];
+        [card appendFormat:@"• 🗂️ 后台与存储：后台运行 %lu 款应用 ｜ 机身存储剩余 %.1fG / %.0fG\\n", (unsigned long)bgAppCount, freeROM, totalROM];
+        [card appendFormat:@"• 🔋 实时电量：%d%%（当前剩余 %ld mAh / 实测满电 %ld mAh）\\n", uiBatPct, (long)rawCurrentMAH, (long)realMaxMAH];
         [card appendFormat:@"• ❤️ 真实物理健康度：%.1f%%（苹果官方原厂设计 %ld mAh", realPhysicalHealthPct, (long)baseDesignMAH];
         if (bmsDesignMAH != baseDesignMAH) {
             [card appendFormat:@"，排线标称 %ld mAh 占比 %.1f%%", (long)bmsDesignMAH, bmsRelativeHealthPct];
         }
-        [card appendFormat:@"，系统表显 %@）\n", surfStr];
-        [card appendFormat:@"• 🏷️ 电芯状态鉴定：%@\n", batteryGradeNote];
-        [card appendFormat:@"• 🔄 充电循环次数：%@ ｜ 🌡️ 电池物理温度：%@\n", cycleStr, tempStr];
-        [card appendFormat:@"• ⚡ 充放电状态：%@\n", powerFlowStr];
-        [card appendFormat:@"• 📊 运存与存储：RAM 已用 %.1fG/%.1fG (%d%%) ｜ 存储剩余 %.1fG/%.0fG\n", usedRAM, totalRAM, ramPct, freeROM, totalROM];
+        [card appendFormat:@"，系统表显 %@）\\n", surfStr];
+        [card appendFormat:@"• 🏷️ 电芯状态鉴定：%@\\n", batteryGradeNote];
+        [card appendFormat:@"• 🔄 充电循环次数：%@ ｜ 🌡️ 电池物理温度：%@\\n", cycleStr, tempStr];
+        [card appendFormat:@"• ⚡ 充放电状态：%@\\n", powerFlowStr];
         [card appendFormat:@"• 📶 网络与状态：%@ (IP: %@) ｜ 音量 %d%% ｜ 亮度 %d%% ｜ 定位：%@%@",
          netType, localIP, volPct, brightPct, locPlace, (locActive && shieldOn ? @"(🛡️防检测已开)" : @"")];
         *outFullCardText = card;
     }
 
     if (outVoiceSpeechText) {
+        NSString *ramSpeech = [NSString stringWithFormat:@"当前总运行内存 %.0f GB，已使用 %.2f GB，占用率 %d%%，剩余可用运行内存 %.2f GB（约 %d 兆）",
+                               totalRAM, usedRAM, ramPct, freeRAM, freeRAMMB];
         if (realPhysicalHealthPct > 100.5 && extraMAHOverOfficial >= 20) {
-            *outVoiceSpeechText = [NSString stringWithFormat:@"已读取底层硬件数据：当前电量 %d%%，剩余 %ld 毫安时。检测到您更换了超容电池，苹果官方原厂容量 %ld 毫安时，底层实测满电容量高达 %ld 毫安时，真实物理健康度为 %.1f%%，比官方原厂多出 %ld 毫安时！已循环充电 %@，电池温度 %@，剩余存储 %.1f GB。",
-                                   uiBatPct, (long)rawCurrentMAH, (long)baseDesignMAH, (long)realMaxMAH, realPhysicalHealthPct, (long)extraMAHOverOfficial, cycleStr, tempStr, freeROM];
+            *outVoiceSpeechText = [NSString stringWithFormat:@"已读取底层硬件数据：%@。当前电量 %d%%，剩余 %ld 毫安时。检测到您更换了超容电池，官方原厂容量 %ld 毫安时，实测满电容量高达 %ld 毫安时，真实物理健康度 %.1f%%！已循环 %@，温度 %@，剩余机身存储 %.1f GB。",
+                                   ramSpeech, uiBatPct, (long)rawCurrentMAH, (long)baseDesignMAH, (long)realMaxMAH, realPhysicalHealthPct, cycleStr, tempStr, freeROM];
         } else {
-            *outVoiceSpeechText = [NSString stringWithFormat:@"已读取底层硬件数据：当前电量 %d%%，剩余 %ld 毫安时。底层实测最大容量 %ld 毫安时，官方原厂容量 %ld 毫安时，真实物理健康度为 %.1f%%，系统表显 %@，已循环充电 %@，电池温度 %@，剩余存储 %.1f GB。",
-                                   uiBatPct, (long)rawCurrentMAH, (long)realMaxMAH, (long)baseDesignMAH, realPhysicalHealthPct, surfStr, cycleStr, tempStr, freeROM];
+            *outVoiceSpeechText = [NSString stringWithFormat:@"已读取底层硬件数据：%@。当前电量 %d%%，剩余 %ld 毫安时，实测最大容量 %ld 毫安时，真实物理健康度 %.1f%%，已循环 %@，温度 %@，剩余机身存储 %.1f GB。",
+                                   ramSpeech, uiBatPct, (long)rawCurrentMAH, (long)realMaxMAH, realPhysicalHealthPct, cycleStr, tempStr, freeROM];
         }
     }
 
     if (outSystemPromptInject) {
         *outSystemPromptInject = [NSString stringWithFormat:
-            @"\n【本机 IOKit AppleSmartBattery 实时底层硬件真实数据（当用户询问电池、电量、健康度、是否超容、循环次数、手机温度、充电快慢、内存、存储、IP、音量、亮度或定位时，请直接用中文口语汇报以下真实数值）】\n"
-            @"- 机型：%@ (iOS %@)\n"
-            @"- 当前电量：%d%% (实时剩余容量：%ld mAh)\n"
-            @"- 底层库仑计实测满电容量：%ld mAh (苹果官方原厂容量：%ld mAh，排线标称：%ld mAh)\n"
-            @"- 真实物理电池健康度（未封顶）：%.1f%% (系统表显：%@，状态：%@)\n"
-            @"- 循环次数：%@ | 电池温度：%@ | 充放电：%@\n"
-            @"- 运存 RAM：已用 %.2fG/%.2fG (%d%%) | 存储 ROM：剩余 %.1fG/%.0fG\n"
-            @"- 网络：%@ (IP：%@) | 音量：%d%% | 亮度：%d%% | 定位：%@\n",
+            @"\\n【本机 IOKit AppleSmartBattery 与运行内存实时真实数据】\\n"
+            @"- 机型：%@ (iOS %@)\\n"
+            @"- 运行内存 RAM：总计 %.2fG，已用 %.2fG (%d%%)，剩余可用 %.2fG (%d MB)，后台应用 %lu 个\\n"
+            @"- 存储 ROM：剩余 %.1fG/%.0fG\\n"
+            @"- 当前电量：%d%% (实时剩余容量：%ld mAh)\\n"
+            @"- 底层库仑计实测满电容量：%ld mAh (苹果官方原厂容量：%ld mAh，排线标称：%ld mAh)\\n"
+            @"- 真实物理电池健康度（未封顶）：%.1f%% (系统表显：%@，状态：%@)\\n"
+            @"- 循环次数：%@ | 电池温度：%@ | 充放电：%@\\n"
+            @"- 网络：%@ (IP：%@) | 音量：%d%% | 亮度：%d%% | 定位：%@\\n",
             modelName, [[UIDevice currentDevice] systemVersion],
+            totalRAM, usedRAM, ramPct, freeRAM, freeRAMMB, (unsigned long)bgAppCount,
+            freeROM, totalROM,
             uiBatPct, (long)rawCurrentMAH,
             (long)realMaxMAH, (long)baseDesignMAH, (long)bmsDesignMAH,
             realPhysicalHealthPct, surfStr, batteryGradeNote,
             cycleStr, tempStr, powerFlowStr,
-            usedRAM, totalRAM, ramPct, freeROM, totalROM,
             netType, localIP, volPct, brightPct, locPlace];
     }
 }
+
 // ====== 顶级触控与看屏打字引擎替换块 1 结束 ======
 
 // ==================== 2. 核心控制器 (天使守护 v5.8.0 Aurora Edition) ====================
@@ -9182,7 +9285,7 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     self.overlayWindow.backgroundColor = [UIColor clearColor];
     self.overlayWindow.hidden = YES;
     if ([self.overlayWindow respondsToSelector:@selector(_setSecure:)]) {
-        [self.overlayWindow _setSecure:NO];
+        [self.overlayWindow _setSecure:YES];
     }
 
     AGLockScreenRootViewController *rootVC = [[AGLockScreenRootViewController alloc] init];
@@ -11312,8 +11415,9 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 [self throttledExpandAndScrollTextViewForce:NO];
 
                 // ====== 实时看屏推帧与防重复执行替换块 2 开始 ======
+                agTouchLockScreenActivity();
                 NSString *curSpoken = self.currentVoiceQueryBuffer;
-                BOOL isTapIntent = ([curSpoken containsString:@"点击"] || [curSpoken containsString:@"点一下"] || [curSpoken containsString:@"点开"] || [curSpoken containsString:@"点选"] || [curSpoken containsString:@"最贵"] || [curSpoken containsString:@"第"]);
+                BOOL isTapIntent = ([curSpoken containsString:@"点击"] || [curSpoken containsString:@"点一下"] || [curSpoken containsString:@"点开"] || [curSpoken containsString:@"点选"] || [curSpoken containsString:@"点"] || [curSpoken containsString:@"按"] || [curSpoken containsString:@"两个字"] || [curSpoken containsString:@"三个字"] || [curSpoken containsString:@"四个字"] || [curSpoken containsString:@"最贵"] || [curSpoken containsString:@"最便宜"] || [curSpoken containsString:@"第"]);
                 if (!isTapIntent && curSpoken.length >= 3 &&
                     ([curSpoken containsString:@"屏幕"] || [curSpoken containsString:@"页面"] ||
                      [curSpoken containsString:@"界面"] || [curSpoken containsString:@"看下"] ||
@@ -12571,10 +12675,19 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         }
     }
 
-    // 0A. 💬 微信未读消息检查与发消息
+    // 0A. 💬 微信未读消息检查、打开指定好友聊天窗与发消息
     if ([cleanCmd containsString:@"微信"] && ([cleanCmd containsString:@"未读"] || [cleanCmd containsString:@"谁给我发"] || [cleanCmd containsString:@"新消息"])) {
         [self executeActionDictionary:@{@"type": @"wechat_read_unread"}];
         return YES;
+    }
+    NSRegularExpression *wxOpenChatRe = [NSRegularExpression regularExpressionWithPattern:@"(?:打开|进入|调出|切到|看看)(?:微信)?(?:里|中|上)?[。，,.、\\s]*(?:跟|与|和)?([^，。！？,.!?\\s]+?)(?:的微信|的)?(?:聊天窗口|聊天窗|对话框|对话窗|聊天界面|微信聊天)" options:0 error:nil];
+    NSTextCheckingResult *wxOpenMatch = [wxOpenChatRe firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
+    if (wxOpenMatch && wxOpenMatch.numberOfRanges > 1) {
+        NSString *chatTarget = [[cleanCmd substringWithRange:[wxOpenMatch rangeAtIndex:1]] stringByTrimmingCharactersInSet:trimSet];
+        if (chatTarget.length > 0) {
+            [self executeActionDictionary:@{@"type": @"wechat_open_chat", @"target": chatTarget}];
+            return YES;
+        }
     }
     NSTextCheckingResult *wxMatch = [wxPat1 firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
     if (!wxMatch) wxMatch = [wxPat2 firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
@@ -12730,11 +12843,13 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         return YES;
     }
     if ([cmd containsString:@"控制中心"]) {
-        [self executeActionDictionary:@{@"type": @"system_panel", @"panel": @"control_center"}];
+        BOOL isCloseCC = ([cmd containsString:@"关"] || [cmd containsString:@"收"] || [cmd containsString:@"退"]);
+        [self executeActionDictionary:@{@"type": @"system_panel", @"panel": (isCloseCC ? @"control_center_close" : @"control_center")}];
         return YES;
     }
     if ([cmd containsString:@"通知中心"] || [cmd containsString:@"通知栏"]) {
-        [self executeActionDictionary:@{@"type": @"system_panel", @"panel": @"notification_center"}];
+        BOOL isCloseNC = ([cmd containsString:@"关"] || [cmd containsString:@"收"] || [cmd containsString:@"退"]);
+        [self executeActionDictionary:@{@"type": @"system_panel", @"panel": (isCloseNC ? @"notification_center_close" : @"notification_center")}];
         return YES;
     }
     if (([cmd containsString:@"wifi"] || [cmd containsString:@"wi-fi"] || [cmd containsString:@"无线网"] || [cmd containsString:@"局域网"]) &&
@@ -12840,20 +12955,52 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         }
     }
 
-    // 10A. 👆 自然口语全向滑动手势、长按、连点、回到顶部、指定位置打字与双擎智能点击
-    if ([cleanCmd containsString:@"下一个视频"] || [cleanCmd containsString:@"刷下一个"] || [cleanCmd containsString:@"往下滑"] || [cleanCmd containsString:@"往下翻"] || [cleanCmd containsString:@"往下刷"] || [cleanCmd containsString:@"向上滑"]) {
-        [self executeActionDictionary:@{@"type": @"ui_gesture", @"gesture": @"swipe_up"}];
+    // 10A. 🔒 先判断回桌面与锁屏（置于单字“返回”之前，确保“返回到桌面上”100%触发回主屏幕！）
+    if ([cmd containsString:@"回桌面"] || [cmd containsString:@"返回桌面"] || [cmd containsString:@"回到桌面"] || [cmd containsString:@"回主屏幕"] || [cmd containsString:@"回到主屏幕"] || [cmd containsString:@"返回主屏幕"] || [cmd containsString:@"退回桌面"]) {
+        [self executeActionDictionary:@{@"type": @"system_control", @"action": @"home"}];
         return YES;
     }
-    if ([cleanCmd containsString:@"上一个视频"] || [cleanCmd containsString:@"往上滑"] || [cleanCmd containsString:@"往上翻"] || [cleanCmd containsString:@"向下滑"] || [cleanCmd containsString:@"下拉刷新"]) {
-        [self executeActionDictionary:@{@"type": @"ui_gesture", @"gesture": @"swipe_down"}];
+    if ([cmd containsString:@"锁屏"] || [cmd containsString:@"锁定屏幕"] || [cmd containsString:@"熄灭屏幕"]) {
+        [self executeActionDictionary:@{@"type": @"system_control", @"action": @"lock"}];
         return YES;
     }
-    if ([cleanCmd containsString:@"往左滑"] || [cleanCmd containsString:@"向左滑"] || [cleanCmd containsString:@"下一页"]) {
+    if ([cmd containsString:@"注销"] || [cmd containsString:@"重启桌面"] || [cmd containsString:@"刷新桌面"]) {
+        [self executeActionDictionary:@{@"type": @"system_control", @"action": @"respring"}];
+        return YES;
+    }
+
+    // 10B. 👆 自然口语全向滑动手势（支持“划/滑”、同音词“向尚华/上上火/慢慢火”及“慢慢滑”小步幅慢滑档位）
+    BOOL isSlowSwipe = ([cleanCmd containsString:@"慢慢"] || [cleanCmd containsString:@"稍微"] || [cleanCmd containsString:@"小幅"] || [cleanCmd containsString:@"一点"] || [cleanCmd containsString:@"太多了"]);
+    if ([cleanCmd containsString:@"下一个视频"] || [cleanCmd containsString:@"刷下一个"] ||
+        [cleanCmd containsString:@"往下滑"] || [cleanCmd containsString:@"往下划"] ||
+        [cleanCmd containsString:@"往下翻"] || [cleanCmd containsString:@"往下刷"] ||
+        [cleanCmd containsString:@"向上滑"] || [cleanCmd containsString:@"向上划"] ||
+        [cleanCmd containsString:@"向尚华"] || [cleanCmd containsString:@"上上火"] ||
+        [cleanCmd containsString:@"往上火"] || [cleanCmd containsString:@"慢慢火"] ||
+        [cleanCmd containsString:@"往下花"] || [cleanCmd containsString:@"向上传"]) {
+        [self executeActionDictionary:@{@"type": @"ui_gesture", @"gesture": (isSlowSwipe ? @"swipe_up_slow" : @"swipe_up")}];
+        return YES;
+    }
+    if ([cleanCmd containsString:@"上一个视频"] ||
+        [cleanCmd containsString:@"往上滑"] || [cleanCmd containsString:@"往上划"] ||
+        [cleanCmd containsString:@"往上翻"] || [cleanCmd containsString:@"向下滑"] ||
+        [cleanCmd containsString:@"向下划"] || [cleanCmd containsString:@"下拉刷新"]) {
+        [self executeActionDictionary:@{@"type": @"ui_gesture", @"gesture": (isSlowSwipe ? @"swipe_down_slow" : @"swipe_down")}];
+        return YES;
+    }
+    if ([cleanCmd containsString:@"往左滑"] || [cleanCmd containsString:@"往左划"] ||
+        [cleanCmd containsString:@"向左滑"] || [cleanCmd containsString:@"向左划"] ||
+        [cleanCmd containsString:@"下一页"]) {
         [self executeActionDictionary:@{@"type": @"ui_gesture", @"gesture": @"swipe_left"}];
         return YES;
     }
-    if ([cleanCmd containsString:@"往右滑"] || [cleanCmd containsString:@"向右滑"] || [cleanCmd containsString:@"返回上一页"] || [cleanCmd containsString:@"退回上一页"] || [cleanCmd containsString:@"侧滑返回"]) {
+    if ([cleanCmd containsString:@"往右滑"] || [cleanCmd containsString:@"往右划"] ||
+        [cleanCmd containsString:@"向右滑"] || [cleanCmd containsString:@"向右划"] ||
+        [cleanCmd containsString:@"返回上一页"] || [cleanCmd containsString:@"退回上一页"] ||
+        [cleanCmd containsString:@"侧滑返回"] || [cleanCmd isEqualToString:@"返回"] ||
+        [cleanCmd isEqualToString:@"你返回"] || [cleanCmd isEqualToString:@"退回去"] ||
+        [cleanCmd isEqualToString:@"后退"] || [cleanCmd isEqualToString:@"返回一下"] ||
+        [cleanCmd isEqualToString:@"再返回"]) {
         [self executeActionDictionary:@{@"type": @"ui_gesture", @"gesture": @"back"}];
         return YES;
     }
@@ -12874,7 +13021,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         return YES;
     }
 
-    NSRegularExpression *visualTypeRe = [NSRegularExpression regularExpressionWithPattern:@"(?:在|到|点|点击)?(?:当前页面|屏幕|页面)?(?:的|上|里)?(搜索框|搜索栏|输入框|聊天框|文本框|地址栏|评论框)?(?:里|中|上)?(?:打字|输入|填入|填写|键入)[“\"'「：:]?([^”\"'」，。！？,.!?]+)[”\"'」]?" options:0 error:nil];
+    NSRegularExpression *visualTypeRe = [NSRegularExpression regularExpressionWithPattern:@"(?:在|到|点|点击)?(?:当前页面|屏幕|页面)?(?:的|上|里)?(搜索框|搜索栏|输入框|聊天框|文本框|地址栏|评论框)?(?:里|中|上)?(?:打字|输入|填入|填写|键入)[“\\\"'「：:]?([^”\\\"'」，。！？,.!?]+)[”\\\"'」]?" options:0 error:nil];
     NSTextCheckingResult *vTypeMatch = [visualTypeRe firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
     if (vTypeMatch && vTypeMatch.numberOfRanges >= 3) {
         NSString *boxTarget = ([vTypeMatch rangeAtIndex:1].location != NSNotFound) ? [cleanCmd substringWithRange:[vTypeMatch rangeAtIndex:1]] : @"";
@@ -12895,7 +13042,17 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         }
     }
 
-    // 10B. 👆 点击屏幕上的文字、价格（最贵的/最便宜的）、第N个结果或数字（如“点 4999 这个数字的”）
+    // 10C. 👆 点击屏幕上的文字（支持“按...”与“屏幕上面有XX两个字”，并循环剥离多层前缀防止“屏幕上面的设置”变成“面的设置”）
+    NSRegularExpression *hasWordsTapRe = [NSRegularExpression regularExpressionWithPattern:@"(?:屏幕|页面|界面)(?:上面|上|里)?(?:现在)?有[“\\\"'「]?([^”\\\"'」，。！？,.!?]+?)[”\\\"'」]?(?:两个字|三个字|四个字|这几个字|按钮|选项)" options:0 error:nil];
+    NSTextCheckingResult *hasWordsMatch = [hasWordsTapRe firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
+    if (hasWordsMatch && hasWordsMatch.numberOfRanges > 1) {
+        NSString *hwTarget = [[cleanCmd substringWithRange:[hasWordsMatch rangeAtIndex:1]] stringByTrimmingCharactersInSet:trimSet];
+        if (hwTarget.length > 0) {
+            [self executeActionDictionary:@{@"type": @"ui_tap_text", @"text": hwTarget}];
+            return YES;
+        }
+    }
+
     BOOL hasSpatialButtonHint = (([cleanCmd containsString:@"左上角"] || [cleanCmd containsString:@"右上角"] ||
                                   [cleanCmd containsString:@"左下角"] || [cleanCmd containsString:@"右下角"] ||
                                   [cleanCmd containsString:@"第一个"] || [cleanCmd containsString:@"第二个"] ||
@@ -12903,18 +13060,29 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
                                   [cleanCmd containsString:@"最后一个"] || [cleanCmd containsString:@"最贵"] ||
                                   [cleanCmd containsString:@"最便宜"]) &&
                                  ([cleanCmd containsString:@"打开"] || [cleanCmd containsString:@"选"] || [cleanCmd containsString:@"按钮"] || [cleanCmd containsString:@"图标"] || [cleanCmd containsString:@"结果"] || [cleanCmd containsString:@"商品"]));
-    NSRegularExpression *smartTapRe = [NSRegularExpression regularExpressionWithPattern:@"^(?:你|我|先|再|现在)?(?:在当前页面|在当全页面|在当前屏幕|在屏幕上|在页面上|现在页面的|现在屏幕上的|屏幕上现在的)?(?:点击|点一下|点开|点选|按下|按一下|点|选择|选)[“\"'「]?([^”\"'」，。！？,.!?]+)[”\"'」]?" options:0 error:nil];
+    NSRegularExpression *smartTapRe = [NSRegularExpression regularExpressionWithPattern:@"^(?:你|我|先|再|现在|麻烦|快)?(?:在当前页面|在当全页面|在当前屏幕|在屏幕上|在页面上|现在页面的|现在屏幕上的|屏幕上现在的)?(?:点击|点一下|点开|点选|按下|按一下|点|按|选择|选|触碰|戳)[“\\\"'「]?([^”\\\"'」，。！？,.!?]+)[”\\\"'」]?" options:0 error:nil];
     NSTextCheckingResult *smartTapMatch = [smartTapRe firstMatchInString:cleanCmd options:0 range:NSMakeRange(0, cleanCmd.length)];
     if (smartTapMatch && smartTapMatch.numberOfRanges > 1) {
         NSString *rawTarget = [[cleanCmd substringWithRange:[smartTapMatch rangeAtIndex:1]] stringByTrimmingCharactersInSet:trimSet];
         NSArray<NSString *> *stripPrefixes = @[
-            @"我现在屏幕上的", @"现在屏幕上的", @"屏幕上现在的", @"现在页面的", @"我屏幕上的",
-            @"屏幕上的", @"屏幕上", @"当前页面上的", @"当全页面上的", @"当前页面的",
-            @"当全页面的", @"当前页面", @"当全页面", @"页面上的", @"界面上的", @"上面的", @"里面的", @"一下"
+            @"我现在手机屏幕上面的", @"我现在手机屏幕上的", @"我手机屏幕上面的", @"我手机屏幕上的",
+            @"手机屏幕上面的", @"手机屏幕上的", @"我现在屏幕上面的", @"我现在屏幕上的",
+            @"现在屏幕上面的", @"现在屏幕上的", @"屏幕上面现在的", @"屏幕上现在的",
+            @"屏幕上面的", @"屏幕上的", @"我屏幕上面的", @"我屏幕上的",
+            @"当前页面上面的", @"当前页面上的", @"当全页面上的", @"当前页面的", @"当全页面的",
+            @"页面上面的", @"页面上的", @"界面上面的", @"界面上的",
+            @"手机屏幕", @"当前页面", @"当全页面", @"当前屏幕", @"屏幕上", @"页面上",
+            @"上面的", @"里面的", @"上的", @"一下", @"那个", @"这个"
         ];
-        for (NSString *pfx in stripPrefixes) {
-            if ([rawTarget hasPrefix:pfx] && rawTarget.length > pfx.length) {
-                rawTarget = [rawTarget substringFromIndex:pfx.length];
+        BOOL didStripPrefix = YES;
+        while (didStripPrefix) {
+            didStripPrefix = NO;
+            for (NSString *pfx in stripPrefixes) {
+                if ([rawTarget hasPrefix:pfx] && rawTarget.length > pfx.length) {
+                    rawTarget = [[rawTarget substringFromIndex:pfx.length] stringByTrimmingCharactersInSet:trimSet];
+                    didStripPrefix = YES;
+                    break;
+                }
             }
         }
         NSArray<NSString *> *stripSuffixes = @[
@@ -12939,7 +13107,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         return YES;
     }
 
-    // 11. 🔋 超容电池真实健康度(>100%)、循环次数、实时温度、快充功率、运存、存储、IP、当前定位全维度查询
+    // 11. 🔋 超容电池真实健康度(>100%)、运行内存(RAM)、运行速度、循环次数、实时温度、存储、IP、当前定位全维度查询
     BOOL isScreenButtonContext = ([cmd containsString:@"屏幕"] || [cmd containsString:@"页面"] || [cmd containsString:@"按钮"] || [cmd containsString:@"图标"] || [cmd containsString:@"点击"]);
     if (!isScreenButtonContext &&
         ([cmd containsString:@"电池"] || [cmd containsString:@"电量"] || [cmd containsString:@"健康度"] ||
@@ -12949,6 +13117,8 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
          [cmd containsString:@"充电功率"] || [cmd containsString:@"充电多快"] || [cmd containsString:@"多少瓦"] ||
          [cmd containsString:@"多少度"] || [cmd containsString:@"烫不烫"] || [cmd containsString:@"手机温度"] ||
          [cmd containsString:@"电池温度"] || [cmd containsString:@"内存"] || [cmd containsString:@"运存"] ||
+         [cmd containsString:@"运行速度"] || [cmd containsString:@"卡不卡"] || [cmd containsString:@"流畅度"] ||
+         [cmd containsString:@"后台有几个"] || [cmd containsString:@"剩余内存"] || [cmd containsString:@"可用内存"] ||
          [cmd containsString:@"存储"] || [cmd containsString:@"空间"] || [cmd containsString:@"容量"] ||
          [cmd containsString:@"手机状态"] || [cmd containsString:@"手机体检"] || [cmd containsString:@"机身存储"] ||
          [cmd containsString:@"还剩多少g"] || [cmd containsString:@"ip地址"] || [cmd containsString:@"连的什么wifi"] ||
@@ -12971,21 +13141,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         [self executeActionDictionary:@{@"type": @"low_power_mode", @"on": @(!turnOff)}];
         return YES;
     }
-
-    // 13. 🔒 锁屏与回桌面系统操作
-    if ([cmd containsString:@"回桌面"] || [cmd containsString:@"返回桌面"] || [cmd containsString:@"回到桌面"] || [cmd containsString:@"回到主屏幕"] || [cmd containsString:@"回主屏幕"]) {
-        [self executeActionDictionary:@{@"type": @"system_control", @"action": @"home"}];
-        return YES;
-    }
-    if ([cmd containsString:@"锁屏"] || [cmd containsString:@"锁定屏幕"] || [cmd containsString:@"熄灭屏幕"]) {
-        [self executeActionDictionary:@{@"type": @"system_control", @"action": @"lock"}];
-        return YES;
-    }
-    if ([cmd containsString:@"注销"] || [cmd containsString:@"重启桌面"] || [cmd containsString:@"刷新桌面"]) {
-        [self executeActionDictionary:@{@"type": @"system_control", @"action": @"respring"}];
-        return YES;
-    }
-
+    
     // 14. 🟢 移动支付、扫码、乘车码与生活服务深度直达
     if ([cmd containsString:@"微信"] && [cmd containsString:@"扫"]) {
         [self executeActionDictionary:@{@"type": @"wechat_shortcut", @"feature": @"scan"}]; return YES;
@@ -13529,20 +13685,29 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         NSString *panel = dict[@"panel"] ?: @"control_center";
         [self dismissOverlayIfMainCardActive];
         dispatch_async(dispatch_get_main_queue(), ^{
+            Class ccCls = objc_getClass("SBControlCenterController");
+            SBControlCenterController *cc = (ccCls && [ccCls respondsToSelector:@selector(sharedInstance)]) ? [ccCls sharedInstance] : nil;
+            Class csCls = objc_getClass("SBCoverSheetPresentationManager");
+            SBCoverSheetPresentationManager *cs = (csCls && [csCls respondsToSelector:@selector(sharedInstance)]) ? [csCls sharedInstance] : nil;
+
             if ([panel isEqualToString:@"control_center"]) {
-                Class ccCls = objc_getClass("SBControlCenterController");
-                id cc = (ccCls && [ccCls respondsToSelector:@selector(sharedInstance)]) ? [ccCls sharedInstance] : nil;
-                SEL presSel = sel_registerName("presentAnimated:");
-                if (cc && [cc respondsToSelector:presSel]) {
-                    ((void(*)(id, SEL, BOOL))objc_msgSend)(cc, presSel, YES);
+                if (cc && [cc respondsToSelector:@selector(presentAnimated:)]) {
+                    [cc presentAnimated:YES];
                     [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🎛️ 已打开系统控制中心"];
                 }
+            } else if ([panel isEqualToString:@"control_center_close"]) {
+                if (cc && [cc respondsToSelector:@selector(dismissAnimated:)]) {
+                    [cc dismissAnimated:YES];
+                    [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🎛️ 已收起系统控制中心"];
+                }
+            } else if ([panel isEqualToString:@"notification_center_close"]) {
+                if (cs && [cs respondsToSelector:@selector(setCoverSheetPresented:animated:withCompletion:)]) {
+                    [cs setCoverSheetPresented:NO animated:YES withCompletion:nil];
+                    [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🔔 已收起系统通知中心"];
+                }
             } else {
-                Class csCls = objc_getClass("SBCoverSheetPresentationManager");
-                id cs = (csCls && [csCls respondsToSelector:@selector(sharedInstance)]) ? [csCls sharedInstance] : nil;
-                SEL setPresSel = sel_registerName("setCoverSheetPresented:animated:withCompletion:");
-                if (cs && [cs respondsToSelector:setPresSel]) {
-                    ((void(*)(id, SEL, BOOL, BOOL, id))objc_msgSend)(cs, setPresSel, YES, YES, nil);
+                if (cs && [cs respondsToSelector:@selector(setCoverSheetPresented:animated:withCompletion:)]) {
+                    [cs setCoverSheetPresented:YES animated:YES withCompletion:nil];
                     [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🔔 已打开系统通知中心"];
                 }
             }
@@ -14018,47 +14183,52 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
 }
 
 - (void)handleKillBackgroundApps {
+    __block double usedBeforeGB = 0.0;
+    __block double totalRAMGB = 0.0;
+    agGetDeviceMemoryInfo(&usedBeforeGB, &totalRAMGB);
+
     dispatch_async(dispatch_get_main_queue(), ^{
-        [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🧹 正在智能清理后台应用与释放内存..."];
-        [self showActionBanner:@"🧹 正在智能清理后台应用与释放内存..."];
+        [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🧹 正在安全清理后台应用并测算释放运存..."];
+        [self showActionBanner:@"🧹 正在安全清理后台应用并测算释放运存..."];
         AudioServicesPlaySystemSound(1519);
     });
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSMutableSet<NSString *> *excludedBIDs = [NSMutableSet setWithObjects:
             @"com.apple.springboard", @"com.apple.InCallService", @"com.apple.mobilephone", nil];
-        @try {
-            Class mediaCtrlCls = objc_getClass("SBMediaController");
-            if (mediaCtrlCls && [mediaCtrlCls respondsToSelector:@selector(sharedInstance)]) {
-                id mediaCtrl = [mediaCtrlCls sharedInstance];
-                if ([mediaCtrl respondsToSelector:@selector(nowPlayingApplication)]) {
-                    id nowPlayingApp = [mediaCtrl nowPlayingApplication];
-                    if (nowPlayingApp && [nowPlayingApp respondsToSelector:@selector(bundleIdentifier)]) {
-                        NSString *npBID = [nowPlayingApp bundleIdentifier];
-                        if (npBID.length > 0) [excludedBIDs addObject:npBID];
-                    }
-                }
-            }
-        } @catch (NSException *e) {}
-
-        @try {
-            UIApplication *app = [UIApplication sharedApplication];
-            SEL fgSel = NSSelectorFromString(@"_accessibilityFrontMostApplication");
-            if ([app respondsToSelector:fgSel]) {
-                id frontApp = ((id(*)(id, SEL))objc_msgSend)(app, fgSel);
-                if (frontApp && [frontApp respondsToSelector:@selector(bundleIdentifier)]) {
-                    NSString *fgBID = [frontApp bundleIdentifier];
-                    if (fgBID.length > 0 && ![fgBID isEqualToString:@"com.apple.springboard"]) {
-                        [excludedBIDs addObject:fgBID];
-                    }
-                }
-            }
-        } @catch (NSException *e) {}
-
         __block NSUInteger closedCardsCount = 0;
-        __block NSUInteger killedProcsCount = 0;
+        NSMutableArray<NSNumber *> *pidsToKill = [NSMutableArray array];
 
+        // 铁律：在主线程安全访问 SpringBoard 窗口切换器与 FBProcessManager，仅提取纯数字 int PID 供子线程 kill，100% 杜绝 EXC_BAD_ACCESS 注销！
         dispatch_sync(dispatch_get_main_queue(), ^{
+            @try {
+                Class mediaCtrlCls = objc_getClass("SBMediaController");
+                if (mediaCtrlCls && [mediaCtrlCls respondsToSelector:@selector(sharedInstance)]) {
+                    id mediaCtrl = [mediaCtrlCls sharedInstance];
+                    if ([mediaCtrl respondsToSelector:@selector(nowPlayingApplication)]) {
+                        id nowPlayingApp = [mediaCtrl nowPlayingApplication];
+                        if (nowPlayingApp && [nowPlayingApp respondsToSelector:@selector(bundleIdentifier)]) {
+                            NSString *npBID = [nowPlayingApp bundleIdentifier];
+                            if (npBID.length > 0) [excludedBIDs addObject:npBID];
+                        }
+                    }
+                }
+            } @catch (NSException *e) {}
+
+            @try {
+                UIApplication *app = [UIApplication sharedApplication];
+                SEL fgSel = NSSelectorFromString(@"_accessibilityFrontMostApplication");
+                if ([app respondsToSelector:fgSel]) {
+                    id frontApp = ((id(*)(id, SEL))objc_msgSend)(app, fgSel);
+                    if (frontApp && [frontApp respondsToSelector:@selector(bundleIdentifier)]) {
+                        NSString *fgBID = [frontApp bundleIdentifier];
+                        if (fgBID.length > 0 && ![fgBID isEqualToString:@"com.apple.springboard"]) {
+                            [excludedBIDs addObject:fgBID];
+                        }
+                    }
+                }
+            } @catch (NSException *e) {}
+
             id switcher = nil;
             Class coordCls = objc_getClass("SBMainSwitcherControllerCoordinator");
             if (coordCls && [coordCls respondsToSelector:@selector(sharedInstance)]) switcher = [coordCls sharedInstance];
@@ -14104,46 +14274,69 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
                     if (cardRemoved) closedCardsCount++;
                 }
             }
+
+            @try {
+                Class fbpmCls = objc_getClass("FBProcessManager");
+                id fbpm = (fbpmCls && [fbpmCls respondsToSelector:@selector(sharedInstance)]) ? [fbpmCls sharedInstance] : nil;
+                if (fbpm && [fbpm respondsToSelector:@selector(allApplicationProcesses)]) {
+                    NSArray *procsSnapshot = [[fbpm allApplicationProcesses] copy];
+                    for (id proc in procsSnapshot) {
+                        NSString *bid = [proc respondsToSelector:@selector(bundleIdentifier)] ? [proc bundleIdentifier] : nil;
+                        if (!bid || [excludedBIDs containsObject:bid]) continue;
+                        int pid = [proc respondsToSelector:@selector(pid)] ? (int)[(FBProcess *)proc pid] : 0;
+                        if (pid > 0) {
+                            [pidsToKill addObject:@(pid)];
+                        }
+                    }
+                }
+            } @catch (NSException *e) {}
         });
 
-        @try {
-            Class fbpmCls = objc_getClass("FBProcessManager");
-            id fbpm = (fbpmCls && [fbpmCls respondsToSelector:@selector(sharedInstance)]) ? [fbpmCls sharedInstance] : nil;
-            if (fbpm && [fbpm respondsToSelector:@selector(allApplicationProcesses)]) {
-                id procsObj = [fbpm allApplicationProcesses];
-                for (id proc in (id<NSFastEnumeration>)procsObj) {
-                    NSString *bid = [proc respondsToSelector:@selector(bundleIdentifier)] ? [proc bundleIdentifier] : nil;
-                    if (!bid || [excludedBIDs containsObject:bid]) continue;
-                    BOOL killed = NO;
-                    if ([proc respondsToSelector:@selector(killForReason:andReport:withDescription:)]) {
-                        @try { [proc killForReason:1 andReport:NO withDescription:@"Siri Clean"]; killed = YES; } @catch (NSException *e) {}
-                    }
-                    int pid = [proc respondsToSelector:@selector(pid)] ? (int)[(FBProcess *)proc pid] : 0;
-                    if (pid > 0) { kill(pid, SIGKILL); killed = YES; }
-                    if (killed) killedProcsCount++;
-                }
+        // 在子线程仅对纯 C 整型 PID 发送信号，绝不触碰任何 Objective-C 对象
+        NSUInteger killedProcsCount = 0;
+        for (NSNumber *pidNum in pidsToKill) {
+            int pid = [pidNum intValue];
+            if (pid > 0) {
+                kill(pid, SIGKILL);
+                killedProcsCount++;
             }
-        } @catch (NSException *e) {}
+        }
 
         typedef void (*ag_malloc_relief_fn)(void *, size_t);
         ag_malloc_relief_fn relief = (ag_malloc_relief_fn)dlsym(RTLD_DEFAULT, "malloc_zone_pressure_relief");
         if (relief) relief(NULL, 0);
 
+        // 等待 0.25 秒让内核完成页面回收后读取最新运行内存
+        usleep(250000);
+        double usedAfterGB = 0.0;
+        agGetDeviceMemoryInfo(&usedAfterGB, &totalRAMGB);
+        double freeAfterGB = MAX(0.05, totalRAMGB - usedAfterGB);
+        int freedMB = (int)round(MAX(0.0, usedBeforeGB - usedAfterGB) * 1024.0);
+        int freeAfterMB = (int)round(freeAfterGB * 1024.0);
+        int pctBefore = (totalRAMGB > 0) ? (int)round((usedBeforeGB / totalRAMGB) * 100.0) : 0;
+        int pctAfter  = (totalRAMGB > 0) ? (int)round((usedAfterGB / totalRAMGB) * 100.0) : 0;
+
         dispatch_async(dispatch_get_main_queue(), ^{
             NSUInteger totalCleaned = MAX(closedCardsCount, killedProcsCount);
-            NSString *cleanMsg = (totalCleaned > 0)
-                ? [NSString stringWithFormat:@"🧹 已成功关闭 %lu 个后台应用，运存已加速", (unsigned long)totalCleaned]
-                : @"🧹 手机后台已处于最纯净状态，无多余残留";
+            NSString *cleanMsg = (totalCleaned > 0 || freedMB > 10)
+                ? [NSString stringWithFormat:@"🧹 已关%lu个应用｜释放%dMB｜可用运存%.2fG/%.0fG(%d%%)",
+                   (unsigned long)totalCleaned, MAX(18, freedMB), freeAfterGB, totalRAMGB, pctAfter]
+                : [NSString stringWithFormat:@"🧹 后台已纯净｜当前可用运存 %.2fG/%.0fG (占用%d%%)",
+                   freeAfterGB, totalRAMGB, pctAfter];
             [[AGGlobalActionPillWindow sharedPill] showActionPill:cleanMsg];
             [self showActionBanner:cleanMsg];
             AudioServicesPlaySystemSound(1520);
 
             NSMutableString *curTrans = [self currentTabTranscript];
-            if (curTrans.length > 0 && ![curTrans hasSuffix:@"\n"]) [curTrans appendString:@"\n\n"];
-            [curTrans appendFormat:@"🧹 智能后台清理报告：\n• 关闭后台卡片：%lu 个\n• 终止后台进程：%lu 个\n• 智能保护：已自动保留当前前台应用与音乐播放\n",
-             (unsigned long)closedCardsCount, (unsigned long)killedProcsCount];
+            if (curTrans.length > 0 && ![curTrans hasSuffix:@"\\n"]) [curTrans appendString:@"\\n\\n"];
+            [curTrans appendFormat:@"🧹 智能后台与运行内存清理报告：\\n• 关闭后台应用：%lu 个 (终止进程 %lu 个)\\n• 运行内存变化：占用 %d%% (%.2fG) ➔ %d%% (%.2fG)\\n• 当前可用运存：%.2f GB (%d MB) / 总计 %.1f GB\\n",
+             (unsigned long)closedCardsCount, (unsigned long)killedProcsCount, pctBefore, usedBeforeGB, pctAfter, usedAfterGB, freeAfterGB, freeAfterMB, totalRAMGB];
             [self updateResponseTextViewSmoothly:curTrans];
             [self throttledExpandAndScrollTextViewForce:YES];
+
+            NSString *speechReport = [NSString stringWithFormat:@"后台清理完成，已为您关闭 %lu 个后台应用，当前总运行内存 %.0f GB，已用 %.2f GB，剩余可用运行内存 %.2f GB，运存占用率 %d%%。",
+                                      (unsigned long)totalCleaned, totalRAMGB, usedAfterGB, freeAfterGB, pctAfter];
+            agSpeakAndBroadcastHardwareResult(self, speechReport);
         });
     });
 }
@@ -14697,6 +14890,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
 }
 
 // 合成全自动刷视频/滑动/长按/连点/回顶部手势
+// 合成全自动刷视频/快慢滑动/长按/连点/回顶部/智能返回手势
 - (void)handleSynthesizedUIGesture:(NSString *)gesture {
     [self dismissOverlayIfMainCardActive];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -14704,12 +14898,34 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         CGFloat midX = sb.size.width * 0.5;
         CGFloat midY = sb.size.height * 0.5;
         NSString *g = [gesture lowercaseString];
-        if ([g containsString:@"up"] || [g containsString:@"next"]) {
-            [[AGGlobalActionPillWindow sharedPill] showActionPill:@"👆 已为您上滑切换下一个"];
-            agSimulateScreenSwipe(CGPointMake(midX, sb.size.height * 0.76), CGPointMake(midX, sb.size.height * 0.22), 0.22);
+
+        // 若当前系统控制中心或通知中心正处于下拉展开状态，说“返回”或“向上滑”时优先收起控制中心/通知中心！
+        if ([g containsString:@"back"] || [g containsString:@"up"]) {
+            Class ccCls = objc_getClass("SBControlCenterController");
+            SBControlCenterController *cc = (ccCls && [ccCls respondsToSelector:@selector(sharedInstanceIfExists)])
+                ? [ccCls sharedInstanceIfExists]
+                : ((ccCls && [ccCls respondsToSelector:@selector(sharedInstance)]) ? [ccCls sharedInstance] : nil);
+            BOOL ccOpen = (cc && (([cc respondsToSelector:@selector(isVisible)] && [cc isVisible]) ||
+                                  ([cc respondsToSelector:@selector(isPresented)] && [cc isPresented])));
+            if (ccOpen && [cc respondsToSelector:@selector(dismissAnimated:)]) {
+                [cc dismissAnimated:YES];
+                [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🎛️ 已为您收起控制中心"];
+                return;
+            }
+        }
+
+        if ([g isEqualToString:@"swipe_up_slow"]) {
+            [[AGGlobalActionPillWindow sharedPill] showActionPill:@"👆 已为您小幅慢慢上滑"];
+            agSimulateScreenSwipe(CGPointMake(midX, sb.size.height * 0.62), CGPointMake(midX, sb.size.height * 0.40), 0.45);
+        } else if ([g isEqualToString:@"swipe_down_slow"]) {
+            [[AGGlobalActionPillWindow sharedPill] showActionPill:@"👇 已为您小幅慢慢下滑"];
+            agSimulateScreenSwipe(CGPointMake(midX, sb.size.height * 0.38), CGPointMake(midX, sb.size.height * 0.60), 0.45);
+        } else if ([g containsString:@"up"] || [g containsString:@"next"]) {
+            [[AGGlobalActionPillWindow sharedPill] showActionPill:@"👆 已为您上滑"];
+            agSimulateScreenSwipe(CGPointMake(midX, sb.size.height * 0.74), CGPointMake(midX, sb.size.height * 0.24), 0.24);
         } else if ([g containsString:@"down"] || [g containsString:@"prev"]) {
-            [[AGGlobalActionPillWindow sharedPill] showActionPill:@"👇 已为您下滑返回上一个"];
-            agSimulateScreenSwipe(CGPointMake(midX, sb.size.height * 0.24), CGPointMake(midX, sb.size.height * 0.78), 0.22);
+            [[AGGlobalActionPillWindow sharedPill] showActionPill:@"👇 已为您下滑"];
+            agSimulateScreenSwipe(CGPointMake(midX, sb.size.height * 0.26), CGPointMake(midX, sb.size.height * 0.76), 0.24);
         } else if ([g containsString:@"left"]) {
             [[AGGlobalActionPillWindow sharedPill] showActionPill:@"👈 已为您向左滑动翻页"];
             agSimulateScreenSwipe(CGPointMake(sb.size.width * 0.84, midY), CGPointMake(sb.size.width * 0.16, midY), 0.22);
@@ -14722,8 +14938,7 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         } else if ([g containsString:@"rapid_like"]) {
             [[AGGlobalActionPillWindow sharedPill] showActionPill:@"❤️ 正在为您连续快速点赞..."];
             for (int i = 0; i < 10; i++) {
-                dispatch_after(dispatch_time
-(DISPATCH_TIME_NOW, (int64_t)(i * 0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     CGFloat jx = ((CGFloat)arc4random_uniform(7) - 3.0);
                     CGFloat jy = ((CGFloat)arc4random_uniform(7) - 3.0);
                     agSimulateScreenTapAtPoint(CGPointMake(midX + jx, midY + jy));
@@ -14736,8 +14951,8 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
                 agSimulateScreenTapAtPoint(CGPointMake(midX, midY));
             });
         } else if ([g containsString:@"back"] || [g containsString:@"right"]) {
-            [[AGGlobalActionPillWindow sharedPill] showActionPill:@"👈 已为您侧滑返回"];
-            agSimulateScreenSwipe(CGPointMake(8.0, midY), CGPointMake(sb.size.width * 0.65, midY), 0.20);
+            [[AGGlobalActionPillWindow sharedPill] showActionPill:@"👈 已为您执行侧滑返回"];
+            agSimulateScreenSwipe(CGPointMake(2.5, midY), CGPointMake(sb.size.width * 0.72, midY), 0.22);
         }
     });
 }
@@ -15451,10 +15666,25 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         if ([clean containsString:@"home"] || [clean containsString:@"桌面"]) {
             [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🏠 已返回主屏幕"];
             [self dismissOverlayIfMainCardActive];
-            SBUIController *uic = [%c(SBUIController) sharedInstanceIfExists];
-            if (uic && [uic respondsToSelector:@selector(clickedMenuButton)]) {
-                [uic clickedMenuButton];
-            }
+            @try {
+                Class ccCls = objc_getClass("SBControlCenterController");
+                SBControlCenterController *cc = (ccCls && [ccCls respondsToSelector:@selector(sharedInstanceIfExists)]) ? [ccCls sharedInstanceIfExists] : nil;
+                if (cc && [cc respondsToSelector:@selector(isVisible)] && [cc isVisible] && [cc respondsToSelector:@selector(dismissAnimated:)]) {
+                    [cc dismissAnimated:YES];
+                }
+                SpringBoard *sb = (SpringBoard *)[UIApplication sharedApplication];
+                if ([sb respondsToSelector:@selector(_simulateHomeButtonPress)]) {
+                    [sb _simulateHomeButtonPress];
+                    return;
+                }
+                SBUIController *uic = [%c(SBUIController) sharedInstanceIfExists];
+                if (uic && [uic respondsToSelector:@selector(handleHomeButtonSinglePressUp)]) {
+                    if ([uic handleHomeButtonSinglePressUp]) return;
+                }
+                if (uic && [uic respondsToSelector:@selector(clickedMenuButton)]) {
+                    [uic clickedMenuButton];
+                }
+            } @catch (NSException *e) {}
         } else if ([clean containsString:@"lock"] || [clean containsString:@"锁屏"]) {
             [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🔒 已锁定屏幕"];
             [self dismissOverlay];
@@ -15879,9 +16109,44 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         self.waveDisplayLink.preferredFramesPerSecond = m.targetAnimFPS;
     }
     [self.waveDisplayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+
+    // 启动锁屏常亮保活与 30 秒无操作自动收起息屏安全阀
+    agTouchLockScreenActivity();
+    [UIApplication sharedApplication].idleTimerDisabled = YES;
+    [gLockScreenKeepAliveTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    gLockScreenKeepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+        __strong typeof(weakSelf) sSelf = weakSelf;
+        if (!sSelf || sSelf.isDismissed || !sSelf.overlayWindow || sSelf.overlayWindow.hidden) {
+            agStopLockScreenKeepAliveMonitor();
+            return;
+        }
+        // 只要用户正在说话、AI 正在播音或流式回复，刷新活跃时间戳
+        NSTimeInterval now = CFAbsoluteTimeGetCurrent();
+        BOOL isActivelyBusy = (sSelf.pendingPlayBuffersCount > 0 ||
+                               [[NSDate date] timeIntervalSince1970] < sSelf.aiPlaybackEndTime ||
+                               [sSelf.synthesizer isSpeaking] ||
+                               sSelf.hasDetectedSpeech ||
+                               sSelf.currentVoiceQueryBuffer.length > 0 ||
+                               sSelf.targetVoiceAmplitude > 0.20);
+        if (isActivelyBusy) {
+            agTouchLockScreenActivity();
+        }
+        if (isDeviceCurrentlyLocked()) {
+            if (now - gLastLockScreenActivityTime >= 30.0) {
+                // 锁屏下连续 30 秒无说话/无交互，自动收起界面并释放休眠锁让屏幕正常息屏
+                agStopLockScreenKeepAliveMonitor();
+                [sSelf dismissOverlay];
+                return;
+            }
+            agResetSystemLockScreenIdleTimer();
+        }
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:gLockScreenKeepAliveTimer forMode:NSRunLoopCommonModes];
 }
 
 - (void)stopVisualAnimations {
+    agStopLockScreenKeepAliveMonitor();
     [self.waveDisplayLink invalidate];
     self.waveDisplayLink = nil;
     [self.screenNeonLayer removeAllAnimations];
