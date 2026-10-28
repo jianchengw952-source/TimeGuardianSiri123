@@ -10927,6 +10927,12 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
             @"【操作与控制类指令严禁联网搜索】：凡是打开App（如淘宝、微信等）、控制手机硬件（低电量/省电模式、屏幕亮度、音量、手电筒、蓝牙、WiFi等）、以及锁屏/截屏等操作类指令，绝对禁止调用 google_search！你必须直接输出对应的 [ACTION:...] 指令或用口语告知，严禁发起联网搜索！", nowStr];
     }
 
+    NSString *hwTelemetryPrompt = nil;
+    agCollectRealHardwareAndBatteryTelemetry(nil, nil, nil, &hwTelemetryPrompt);
+    if (hwTelemetryPrompt.length > 0) {
+        sysInstruction = [sysInstruction stringByAppendingString:hwTelemetryPrompt];
+    }
+
     NSString *permMemory = agBuildUniversalMemoryPromptBlockForQuery(@"");
     if (permMemory.length > 0) {
         sysInstruction = [sysInstruction stringByAppendingString:permMemory];
@@ -11418,10 +11424,15 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 agTouchLockScreenActivity();
                 NSString *curSpoken = self.currentVoiceQueryBuffer;
                 BOOL isTapIntent = ([curSpoken containsString:@"点击"] || [curSpoken containsString:@"点一下"] || [curSpoken containsString:@"点开"] || [curSpoken containsString:@"点选"] || [curSpoken containsString:@"点"] || [curSpoken containsString:@"按"] || [curSpoken containsString:@"两个字"] || [curSpoken containsString:@"三个字"] || [curSpoken containsString:@"四个字"] || [curSpoken containsString:@"最贵"] || [curSpoken containsString:@"最便宜"] || [curSpoken containsString:@"第"]);
-                if (!isTapIntent && curSpoken.length >= 3 &&
-                    ([curSpoken containsString:@"屏幕"] || [curSpoken containsString:@"页面"] ||
-                     [curSpoken containsString:@"界面"] || [curSpoken containsString:@"看下"] ||
-                     [curSpoken containsString:@"看一下"] || [curSpoken containsString:@"看看"])) {
+                BOOL isHardwareQuery = ([curSpoken containsString:@"电池"] || [curSpoken containsString:@"电量"] || [curSpoken containsString:@"健康度"] || [curSpoken containsString:@"内存"] || [curSpoken containsString:@"运存"] || [curSpoken containsString:@"运行速度"] || [curSpoken containsString:@"存储"] || [curSpoken containsString:@"空间"] || [curSpoken containsString:@"音量"] || [curSpoken containsString:@"亮度"]);
+                BOOL isVisualScreenQuery = ([curSpoken containsString:@"屏幕"] || [curSpoken containsString:@"页面"] ||
+                                            [curSpoken containsString:@"界面"] || [curSpoken containsString:@"看下"] ||
+                                            [curSpoken containsString:@"看一下"] || [curSpoken containsString:@"看看"] ||
+                                            [curSpoken containsString:@"认识他"] || [curSpoken containsString:@"认识她"] ||
+                                            [curSpoken containsString:@"这是谁"] || [curSpoken containsString:@"这是什么"] ||
+                                            [curSpoken containsString:@"照片里"] || [curSpoken containsString:@"图里"] ||
+                                            [curSpoken containsString:@"视频里"] || [curSpoken containsString:@"这个人"]);
+                if (!isTapIntent && !isHardwareQuery && curSpoken.length >= 3 && isVisualScreenQuery) {
                     NSTimeInterval nowTs = [[NSDate date] timeIntervalSince1970];
                     if (nowTs - self.lastWSVideoFrameSentTime >= 2.2) {
                         self.lastWSVideoFrameSentTime = nowTs;
@@ -11464,18 +11475,20 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
                 [self.currentVoiceQueryBuffer setString:@""];
                 if ([self tryExecuteDirectLocalCommand:fullVoiceCmd]) {
                     self.lastLocalActionExecTime = [[NSDate date] timeIntervalSince1970];
-                    // 关键修复：递增 currentTurnPlaybackID 并归零 pendingPlayBuffersCount，派发到 audioPlayQueue 线程安全停止音频，彻底消除多线程崩溃与 51 包积压卡慢！
-                    self.currentTurnPlaybackID++;
-                    self.pendingPlayBuffersCount = 0;
-                    self.aiPlaybackEndTime = 0;
-                    if (self.pcm24kStagingBuffer) [self.pcm24kStagingBuffer setLength:0];
-                    dispatch_async(self.audioPlayQueue, ^{
-                        if (self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
-                            [self.pcmPlayerNode stop];
-                            [self.pcmPlayerNode play];
-                        }
-                    });
-                    return;
+                    BOOL isPureStatusQuery = ([fullVoiceCmd containsString:@"电池"] || [fullVoiceCmd containsString:@"电量"] || [fullVoiceCmd containsString:@"健康度"] || [fullVoiceCmd containsString:@"内存"] || [fullVoiceCmd containsString:@"运存"] || [fullVoiceCmd containsString:@"运行速度"] || [fullVoiceCmd containsString:@"卡不卡"]);
+                    if (!isPureStatusQuery) {
+                        self.currentTurnPlaybackID++;
+                        self.pendingPlayBuffersCount = 0;
+                        self.aiPlaybackEndTime = 0;
+                        if (self.pcm24kStagingBuffer) [self.pcm24kStagingBuffer setLength:0];
+                        dispatch_async(self.audioPlayQueue, ^{
+                            if (self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
+                                [self.pcmPlayerNode stop];
+                                [self.pcmPlayerNode play];
+                            }
+                        });
+                        return;
+                    }
                 }
             }
             NSString *aiDelta = outputTrans[@"text"];
@@ -11717,12 +11730,14 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     NSUInteger inSampleCount = pcm16Data.length / sizeof(int16_t);
     if (inSampleCount < 24) return; // 过滤小于 1ms 的无效微碎包，防止队列碎片化与爆音
 
-    // 合并 960 samples 音频微包：当 pendingPlayBuffersCount >= 4 且收到 <= 2048 字节小包时暂存合并
-    if (self.pendingPlayBuffersCount >= 4 && pcm16Data.length <= 2048) {
-        if (!self.pcm24kStagingBuffer) self.pcm24kStagingBuffer = [NSMutableData data];
+    // 严格 FIFO 保序合并：若暂存区已有数据，新包（无论大小）必须先入暂存区再按序取出，杜绝大包插队与尾包滞留！
+    if (!self.pcm24kStagingBuffer) self.pcm24kStagingBuffer = [NSMutableData data];
+    if (self.pcm24kStagingBuffer.length > 0 || (self.pendingPlayBuffersCount >= 4 && pcm16Data.length <= 2048)) {
         [self.pcm24kStagingBuffer appendData:pcm16Data];
-        if (self.pcm24kStagingBuffer.length < 9600) {
-            return; // 暂存未满 9600 字节（约 200ms），继续合并
+        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(flushPCM24kStagingBuffer) object:nil];
+        if (self.pcm24kStagingBuffer.length < 4800 && self.pendingPlayBuffersCount > 2) {
+            [self performSelector:@selector(flushPCM24kStagingBuffer) withObject:nil afterDelay:0.14];
+            return;
         }
         pcm16Data = [self.pcm24kStagingBuffer copy];
         [self.pcm24kStagingBuffer setLength:0];
@@ -12413,16 +12428,20 @@ static void agDarwinPrefsChangedCallback(CFNotificationCenterRef center, void *o
     if ([self tryExecuteDirectLocalCommand:fullCmd]) {
         self.lastLocalActionExecTime = [[NSDate date] timeIntervalSince1970];
         [self.currentVoiceQueryBuffer setString:@""];
-        self.currentTurnPlaybackID++;
-        self.pendingPlayBuffersCount = 0;
-        self.aiPlaybackEndTime = 0;
-        if (self.pcm24kStagingBuffer) [self.pcm24kStagingBuffer setLength:0];
-        dispatch_async(self.audioPlayQueue, ^{
-            if (self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
-                [self.pcmPlayerNode stop];
-                [self.pcmPlayerNode play];
-            }
-        });
+        // 若是查电池/查运存等播报类指令，保留 AI 正在生成的原生语音回答，不掐断播放器
+        BOOL isPureStatusQuery = ([fullCmd containsString:@"电池"] || [fullCmd containsString:@"电量"] || [fullCmd containsString:@"健康度"] || [fullCmd containsString:@"内存"] || [fullCmd containsString:@"运存"] || [fullCmd containsString:@"运行速度"] || [fullCmd containsString:@"卡不卡"]);
+        if (!isPureStatusQuery) {
+            self.currentTurnPlaybackID++;
+            self.pendingPlayBuffersCount = 0;
+            self.aiPlaybackEndTime = 0;
+            if (self.pcm24kStagingBuffer) [self.pcm24kStagingBuffer setLength:0];
+            dispatch_async(self.audioPlayQueue, ^{
+                if (self.pcmPlayerNode && self.pcmPlayerNode.isPlaying) {
+                    [self.pcmPlayerNode stop];
+                    [self.pcmPlayerNode play];
+                }
+            });
+        }
         return;
     }
 }
@@ -12437,21 +12456,8 @@ static NSTimeInterval gLastOpenedPlatformTime = 0;
 static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSString *speechText) {
     if (!mgr || !speechText || speechText.length == 0) return;
     if (mgr.isWebSocketConnected && mgr.liveWebSocketTask && mgr.activeModeTab != AGConfigTabPureText) {
-        NSString *promptCmd = [NSString stringWithFormat:@"【系统底层硬件实测结果】：%@ \n请立即用简练、亲切、自然的中文口语把上述实测数据直接告诉用户，不要遗漏关键数值！", speechText];
-        if (mgr.isGoogleBidiProtocol) {
-            [mgr sendJSONDictionaryOverWebSocket:@{
-                @"clientContent": @{
-                    @"turns": @[ @{ @"role": @"user", @"parts": @[ @{ @"text": promptCmd } ] } ],
-                    @"turnComplete": @YES
-                }
-            }];
-        } else {
-            [mgr sendJSONDictionaryOverWebSocket:@{
-                @"type": @"conversation.item.create",
-                @"item": @{ @"type": @"message", @"role": @"user", @"content": @[ @{ @"type": @"input_text", @"text": promptCmd } ] }
-            }];
-            [mgr sendJSONDictionaryOverWebSocket:@{ @"type": @"response.create" }];
-        }
+        // 实时硬件与运存数据已预埋进握手 systemInstruction，严禁在语音流中途强插 clientContent 导致服务端状态机卡死！
+        return;
     } else if (mgr.activeModeTab != AGConfigTabPureText) {
         [mgr enqueueSpeechSentence:speechText];
     }
@@ -12955,8 +12961,26 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         }
     }
 
-    // 10A. 🔒 先判断回桌面与锁屏（置于单字“返回”之前，确保“返回到桌面上”100%触发回主屏幕！）
-    if ([cmd containsString:@"回桌面"] || [cmd containsString:@"返回桌面"] || [cmd containsString:@"回到桌面"] || [cmd containsString:@"回主屏幕"] || [cmd containsString:@"回到主屏幕"] || [cmd containsString:@"返回主屏幕"] || [cmd containsString:@"退回桌面"]) {
+    // 10A. 👋 语音关闭/退出天使守护助手自己（支持“你可以关闭了 / 关掉你 / 退下吧”等自然口语）
+    if ([cmd containsString:@"你可以关闭"] || [cmd containsString:@"可以关闭了"] ||
+        [cmd containsString:@"关闭你自己"] || [cmd containsString:@"关掉你自己"] ||
+        [cmd containsString:@"管好你自己"] || [cmd containsString:@"关掉你"] ||
+        [cmd containsString:@"管掉你"] || [cmd containsString:@"你关了吧"] ||
+        [cmd containsString:@"你光忙吧"] || [cmd containsString:@"送你走吧"] ||
+        [cmd containsString:@"退下吧"] || [cmd containsString:@"你可以退下"] ||
+        [cmd containsString:@"退出语音"] || [cmd containsString:@"关闭语音"] ||
+        [cmd containsString:@"关闭助手"] || [cmd containsString:@"关掉助手"] ||
+        [cmd containsString:@"退出助手"] || [cmd containsString:@"没事了退下"] ||
+        ([cmd containsString:@"点错了"] && [cmd containsString:@"关"])) {
+        [[AGGlobalActionPillWindow sharedPill] showActionPill:@"👋 好的，已为您关闭，随时呼唤我"];
+        [self dismissOverlay];
+        return YES;
+    }
+
+    // 10A-2. 🔒 判断回桌面与锁屏（置于单字“返回”之前，确保“我返回桌面 / 返回到桌面上”100%触发回主屏幕！）
+    if ([cmd containsString:@"回桌面"] || [cmd containsString:@"返回桌面"] || [cmd containsString:@"回到桌面"] ||
+        [cmd containsString:@"回主屏幕"] || [cmd containsString:@"回到主屏幕"] || [cmd containsString:@"返回主屏幕"] ||
+        [cmd containsString:@"退回桌面"] || [cmd containsString:@"去桌面"] || [cmd containsString:@"切回桌面"]) {
         [self executeActionDictionary:@{@"type": @"system_control", @"action": @"home"}];
         return YES;
     }
@@ -15665,6 +15689,9 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
         NSString *clean = [action lowercaseString];
         if ([clean containsString:@"home"] || [clean containsString:@"桌面"]) {
             [[AGGlobalActionPillWindow sharedPill] showActionPill:@"🏠 已返回主屏幕"];
+            if (self.overlayWindow && self.overlayWindow.isKeyWindow) {
+                [self.overlayWindow resignKeyWindow];
+            }
             [self dismissOverlayIfMainCardActive];
             @try {
                 Class ccCls = objc_getClass("SBControlCenterController");
@@ -15672,16 +15699,16 @@ static void agSpeakAndBroadcastHardwareResult(GeminiAssistantManager *mgr, NSStr
                 if (cc && [cc respondsToSelector:@selector(isVisible)] && [cc isVisible] && [cc respondsToSelector:@selector(dismissAnimated:)]) {
                     [cc dismissAnimated:YES];
                 }
-                SpringBoard *sb = (SpringBoard *)[UIApplication sharedApplication];
-                if ([sb respondsToSelector:@selector(_simulateHomeButtonPress)]) {
-                    [sb _simulateHomeButtonPress];
-                    return;
-                }
+                // 1. 发送与系统「小白点(AssistiveTouch)主屏幕按钮」完全一致的 IOKit 硬件主屏幕键信号 (UsagePage 0x0C, Usage 0x40)
+                agDispatchHIDKeyUsage(0x0C, 0x40, YES);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.035 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    agDispatchHIDKeyUsage(0x0C, 0x40, NO);
+                });
+                // 2. 同步调用 SBUIController 单击主屏幕处理（不提前 return，双重保障）
                 SBUIController *uic = [%c(SBUIController) sharedInstanceIfExists];
                 if (uic && [uic respondsToSelector:@selector(handleHomeButtonSinglePressUp)]) {
-                    if ([uic handleHomeButtonSinglePressUp]) return;
-                }
-                if (uic && [uic respondsToSelector:@selector(clickedMenuButton)]) {
+                    [uic handleHomeButtonSinglePressUp];
+                } else if (uic && [uic respondsToSelector:@selector(clickedMenuButton)]) {
                     [uic clickedMenuButton];
                 }
             } @catch (NSException *e) {}
