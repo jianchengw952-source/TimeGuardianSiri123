@@ -1,6 +1,6 @@
 # TimeGuardianSiri123 项目会话记忆文件 (SESSION_MEMORY.md)
 
-> **生成时间**：2026-10-28 12:48:00 (本地时间)
+> **生成时间**：2026-10-28 13:18:00 (本地时间)
 > **会话标识**：`02de72ea-60df-4738-8977-4a4ebaf78b2f`  
 > **用途说明**：供用户切换 Google Antigravity 账号或开启新会话后，直接读取本文件无缝继承当前项目的完整开发上下文。
 
@@ -41,40 +41,39 @@
 | **E盘归档目录** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调` | 完整项目工程归档，含源码、配置及双版本 `.deb` |
 | **E盘单文件归档** | `E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调.txt` | 钉钉可打卡版本完整代码备份 |
 | **远端 Git 仓库** | `https://github.com/jianchengw952-source/TimeGuardianSiri123.git` | GitHub 远程仓库（分支：`main`） |
-| **当前 Git Commit** | `45ac961` | `feat: optimize hardware telemetry injection, visual vs status query dispatch, FIFO audio buffering, and assistive touch home key` |
-| **GitHub Actions 运行记录** | Run #174 (ID: `40634121705`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
+| **当前 Git Commit** | `27a1091` | `feat: harden battery/medical context separation, session query buffer reset, combo regex patterns, and pricing comparison flexibility` |
+| **GitHub Actions 运行记录** | Run #176 (ID: `40636953946`) | 🟢 **Both Jobs Success** (`build (rootless)` & `build (roothide)`) |
 
 ---
 
 ## 三、当前会话中涉及的关键文件和路径
 
 ### 1. 核心工程源码文件
-* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (21,927 行，1,202,751 字节)
-  - SHA256: `0BA8DA6025131AD3E0785E8BF7E48F3420742E3F8B58819F60B263155A58D8F7`
+* **[Tweak.x](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/Tweak.x)** (21,929 行，1,203,773 字节)
+  - SHA256: `59027AB60AE2A569A97D6840C3FEC43F8FDD5093DFB7357246885DDF6D046582`
 * **[layout/DEBIAN/postinst](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/layout/DEBIAN/postinst)** (362 字节)
 * **[.github/workflows/build.yml](file:///C:/Users/57132/.gemini/antigravity/scratch/TimeGuardianSiri123/.github/workflows/build.yml)** (1,757 字节)
 
 ### 2. 四路同步镜像文件（100% 字节一致）
-* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (1,202,751 字节，SHA256: `0BA8DA6025131AD3E0785E8BF7E48F3420742E3F8B58819F60B263155A58D8F7`)
-* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (1,202,751 字节，SHA256: `0BA8DA6025131AD3E0785E8BF7E48F3420742E3F8B58819F60B263155A58D8F7`)
-* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (1,202,751 字节，SHA256: `0BA8DA6025131AD3E0785E8BF7E48F3420742E3F8B58819F60B263155A58D8F7`)
-* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (1,202,751 字节，SHA256: `0BA8DA6025131AD3E0785E8BF7E48F3420742E3F8B58819F60B263155A58D8F7`)
+* [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt) (1,203,773 字节，SHA256: `59027AB60AE2A569A97D6840C3FEC43F8FDD5093DFB7357246885DDF6D046582`)
+* [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt) (1,203,773 字节，SHA256: `59027AB60AE2A569A97D6840C3FEC43F8FDD5093DFB7357246885DDF6D046582`)
+* [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x) (1,203,773 字节，SHA256: `59027AB60AE2A569A97D6840C3FEC43F8FDD5093DFB7357246885DDF6D046582`)
+* [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt) (1,203,773 字节，SHA256: `59027AB60AE2A569A97D6840C3FEC43F8FDD5093DFB7357246885DDF6D046582`)
 * [D:\定位与防检测底部代码.txt](file:///D:/定位与防检测底部代码.txt) (50,749 字节，SHA256: `03CAC9505D0DE46612E073FC1F5606FAF65292915511D8E46C77B26EC8335B80`)
 
-### 3. 最新云端编译产物（Run #174 / Commit `45ac961`）
-> **本次更新（握手注入底层硬件探针 / 视觉看屏与状态查体检精准分流 / 严格 FIFO 顺畅音频播报 / 语音关闭助手自己 / 小白点同款 0x0C,0x40 硬件级回桌面）**：
-> 1. 握手注入底层硬件：在 WebSocket 建连握手阶段通过 `agCollectRealHardwareAndBatteryTelemetry` 自动获取真实超容电池与运存数据，预先注入 `sysInstruction`，严禁在语音流中途强塞冲突包导致状态机卡死。
-> 2. 视觉看屏 vs 状态查询分流：细分 `isHardwareQuery`（电池/运存/存储/音量/亮度等）与 `isVisualScreenQuery`（含“认识他/她吗”、“这是谁/什么”、“照片/视频里”等），杜绝查电池时误推截图，且查体检时不掐断 AI 正在生成的原生语音。
-> 3. 音频流严格 FIFO 与防卡尾音：在 `enqueueAndPlayIncomingPCM24kData:` 实行严格 FIFO 保序合并，新增 `0.14s` 自动冲刷 `flushPCM24kStagingBuffer`，彻底消除大包插队与尾包卡死。
-> 4. 语音关闭助手自己：新增 10A 识别“你可以关闭了 / 关掉你 / 退下吧”等自然口语，自动收起浮窗并展示胶囊通知。
-> 5. AssistiveTouch 硬件级回桌面：窗口辞去 keyWindow，发送与系统小白点 100% 一致的 IOKit 硬件主屏幕键信号（UsagePage 0x0C, Usage 0x40），解除提前 return，结合 `handleHomeButtonSinglePressUp` 与 `clickedMenuButton` 形成多重回桌面绝对保障。
-> 6. 纯 `xz` 压包标准，100% 兼容 Sileo。
+### 3. 最新云端编译产物（Run #176 / Commit `27a1091`）
+> **本次更新（电池/医疗语境智能分离 / 会话残留缓冲彻底清零 / 复合连招正则弹性匹配 / 智能价格比大小容错）**：
+> 1. 电池健康度 vs 医疗健康卡智能隔离：在 `outSystemPromptInject` 提示词中明确说明用户手机状态口误（如“电子健康度/看健康度”）汇报硬件数据，但明确询问医院就诊“电子健康卡/医保卡”或医学指标时正常回答医疗问题；并在本地指令中增加 `isMedicalContext` 免打扰判定，彻底杜绝误报电池。
+> 2. 会话残留缓冲清零：在 `stopAllVoiceEngines` 中增加 `[self.currentVoiceQueryBuffer setString:@""]`，彻底消除跨会话尾包字符（如 'vieja'）串台污染下一次语音指令。
+> 3. 复合连招正则升级：`compactComboRe` 与 `multiChainRe` 兼容无标点空格的“打开淘宝然后搜索手机”与“找到最贵的那个点进去”，将商品加载等待时间微调至 3.0 秒确保价格标签完全渲染。
+> 4. 价格比大小口语兼容：在 `performVisualTapWithRetry:` 中支持“最贵 / 贵的那个 / 贵的 / 价格最高”与“最便宜 / 便宜的那个 / 便宜的 / 最低价”，少说“最”字也能秒懂。
+> 5. 纯 `xz` 压包标准，100% 兼容 Sileo。
 
 * **Dopamine (Rootless arm64)**：
   - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb`
-  - 文件大小：`477,524` 字节
-  - SHA256: `1F96F28C834A49CE2DD3920221208285FD98464489CA9917484B46BE18B4089A`
-  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (476,372 字节)
+  - 文件大小：`477,996` 字节
+  - SHA256: `C2D9CB7FE0DA164BA32290487702C5DD4FA4D87AC05927EC6DB4A85DA665951C`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (476,844 字节)
   - 分发路径：
     - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
     - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
@@ -82,9 +81,9 @@
 
 * **Relaxin (RootHide arm64e)**：
   - 包名：`com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb`
-  - 文件大小：`310,936` 字节
-  - SHA256: `AC169AF0589B1B68D8CEC737472278F524BB9787E36B7DDBD5BCB78BE4DA851F`
-  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (308,132 字节)
+  - 文件大小：`310,972` 字节
+  - SHA256: `C194BAA758871CF802CDB01AB991939FFEC14F3C31404AE904B8DF5B6CD6F33B`
+  - 归档结构：`debian-binary` (4 字节), `control.tar.xz` (780 字节), `data.tar.xz` (308,168 字节)
   - 分发路径：
     - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
     - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
@@ -741,6 +740,37 @@
 - **生成的 Pure XZ .deb 包**:
   - Rootless (arm64): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb` (477,524 字节, SHA256: `1F96F28C834A49CE2DD3920221208285FD98464489CA9917484B46BE18B4089A`)
   - RootHide (arm64e): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb` (310,936 字节, SHA256: `AC169AF0589B1B68D8CEC737472278F524BB9787E36B7DDBD5BCB78BE4DA851F`)
+- **已同步分发至目标目录**:
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+
+
+
+### Run #176 验证与交付记录 (2026-10-28 13:18)
+- **Commit**: `27a1091` (*feat: harden battery/medical context separation, session query buffer reset, combo regex patterns, and pricing comparison flexibility*)
+- **GitHub Actions Run ID**: `40636953946` (Run #176, 双架构 build 成功)
+- **4大核心修改落地**:
+  1. **电池健康度与医疗健康卡/医学指标智能语境隔离**：
+     - 在 `agCollectRealHardwareAndBatteryTelemetry` 尾部的 `outSystemPromptInject` 提示词中加入针对性指引：若用户口误将“电池健康度”说成“电子健康度/看健康度”，则汇报本机实测数据；若明确为医院就诊“电子健康卡/医保卡”或医学体检指标，切勿混淆、正常回答医疗问题；
+     - 在本地语音指令 `tryExecuteDirectLocalCommand` 中新增 `isMedicalContext`（医院/医保/挂号/就诊/健康卡/肝/胆/血）免打扰判定，杜绝查医疗健康卡时误报超容电池。
+  2. **跨会话残留字符清零**：
+     - 在 `stopAllVoiceEngines` 方法中增加 `[self.currentVoiceQueryBuffer setString:@""]`，彻底消除跨会话语音残片（如上次关闭前的 'vieja'）串台污染下一次会话开头。
+  3. **复合连招正则弹性匹配与商品加载时间优化**：
+     - `compactComboRe` 与 `multiChainRe` 深度优化：支持无逗号/空格的“打开淘宝然后搜索手机”与“找到最贵的那个点进去”，扩展动作识别词至（点击/点开/找到/找一下/挑一个/选一个/点/选/挑/点进去/打开等）；
+     - 将搜索结果页加载商品延时调整为 `3.0s`，确保各电商 App 价格与列表完全渲染后再触发视觉点击。
+  4. **智能价格比大小容错与自然口语支持**：
+     - 在 `performVisualTapWithRetry:` 模式 A 中全面兼容“最贵 / 贵的那个 / 贵的 / 价格最高”与“最便宜 / 便宜的那个 / 便宜的 / 最低价”，用户少说“最”字也能准确命中最高价与最低价。
+- **5 份镜像哈希统一 (1,203,773 字节)**:
+  - SHA256: `59027AB60AE2A569A97D6840C3FEC43F8FDD5093DFB7357246885DDF6D046582`
+- **D:\定位与防检测底部代码.txt (50,749 字节)**:
+  - SHA256: `03CAC9505D0DE46612E073FC1F5606FAF65292915511D8E46C77B26EC8335B80`
+- **生成的 Pure XZ .deb 包**:
+  - Rootless (arm64): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb` (477,996 字节, SHA256: `C2D9CB7FE0DA164BA32290487702C5DD4FA4D87AC05927EC6DB4A85DA665951C`)
+  - RootHide (arm64e): `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb` (310,972 字节, SHA256: `C194BAA758871CF802CDB01AB991939FFEC14F3C31404AE904B8DF5B6CD6F33B`)
 - **已同步分发至目标目录**:
   - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
   - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
