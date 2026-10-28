@@ -778,3 +778,39 @@
   - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
   - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
   - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+
+---
+
+## 2026-10-28: 四级深度崩溃取证与肇事插件定位引擎（Run #179 编译与全量分发）
+
+### 1. 核心特性升级
+- **四级深度崩溃取证定位引擎**：
+  1. **第 1 处（取证核心算法与账本）**：在 `agCollectRealHardwareAndBatteryTelemetry` 末尾挂载深度崩溃追凶引擎。包含 SpringBoard 注销账本 (`ag_respring_ledger.json`)、动态库遍历、dpkg/Sileo 插件名反查 (`agResolveHumanPluginNameForDylib`)、系统底座过滤、基于异常信息 (ASI) 的二进制特征码排查 (`agScanDylibsForCrashingSymbolInASI`)、崩溃时间前最近变动插件排查 (`agFindRecentlyModifiedTweakBeforeDate`)，以及四级判定输出（真凶插件、嫌疑插件、安全模式保护、正常注销统计）。
+  2. **第 2 处（AI 对话系统指令注入）**：在 `URLSession:webSocketTask:didOpenWithProtocol:` 中将 `agGetCachedCrashSpeechSummary()` 自动挂载至 Gemini AI 握手系统指令 `sysInstruction`，使得大模型在每次对话建立时即刻掌握最新崩溃诊断。
+  3. **第 3 处（三路自然语言词汇扩展）**：在 `handleIncomingWebSocketJSON:`、`outputTranscription` 以及 `checkDeferredVoiceLocalCommand` 三处全量扩展“死机/崩溃/闪退/注销/哪个插件/什么插件”排查意图识别。
+  4. **第 4 处（本地命令引擎旁路与意图挂载）**：在 `tryExecuteDirectLocalCommand:` 中为系统诊断词增加负向过滤旁路（`isSystemDiagQuery`），并在动作表分支 7B 挂载 `crash_forensics` 触发器。
+  5. **第 5 处（动作调度、日志安全保护与开机缓存预热）**：
+     - 在 `executeActionDictionary:` 中实现 `crash_forensics` 异步取证、灵动胶囊药丸提示、卡片排版上屏与语音播报。
+     - 在 `handleSystemDeepClean` 中对 `cleanDirectoryContents` 传入核心系统崩溃日志保护名单（`@[@"SpringBoard", @"backboardd", @"panic", @"ResetCounter"]`），避免误删关键诊断日志。
+     - 在 `%ctor` 构造函数中增加 `agRecordSpringBoardBootEventAndWarmupCache()`，实现 SpringBoard 重启时自动记录注销并提前异步预热取证缓存。
+
+### 2. 源码镜像与哈希校验 (100% 同步)
+- **Tweak.x 源码 (1,238,135 字节)**:
+  - SHA256: `2A50055A7CF1577B204AE95064C2458F40652B3547E92967C7F5D3DF6E2960C7`
+- **同步镜像 (1,238,135 字节, SHA256 100% 一致)**:
+  - [D:\主修实时翻译.txt](file:///D:/主修实时翻译.txt)
+  - [D:\主修实时翻译_2.txt](file:///D:/主修实时翻译_2.txt)
+  - [D:\天使siri测试版\Tweak.x](file:///D:/天使siri测试版/Tweak.x)
+  - [E:\主修实时翻译.txt](file:///E:/主修实时翻译.txt)
+
+### 3. CI 编译产物验证与全量分发 (Run #179, Commit: 5643cfb)
+- **Deb 校验 (Pure XZ, 0% Zstandard)**:
+  - **Rootless (arm64)**: `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb` (487,392 字节, SHA256: `ACD0148D755545B8DCE45699A1A03E0A34D5939BF5441D914CD649DD661DC5AA`, valid: true)
+  - **RootHide (arm64e)**: `com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb` (320,420 字节, SHA256: `174F3350FF72BBF46A3F313675671246350D2AEBD3BC536099B0F8D2095F9533`, valid: true)
+- **全量分发路径**:
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [D:\天使siri测试版\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///D:/天使siri测试版/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64.deb)
+  - [E:\钉钉正常版本，最新防检测，关闭时提示插件问题待调\com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb](file:///E:/钉钉正常版本，最新防检测，关闭时提示插件问题待调/com.custom.timeguardiansiri123_6.0.0_iphoneos-arm64e.deb)
